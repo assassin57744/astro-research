@@ -48,9 +48,6 @@ This repository serves as a centralized hub to document my scientific research p
 
 📬 **Connect**: If you are interested in any of the research, tools, or astrophotography here, or if you share the same passion for science communication, feel free to open an Issue or submit a Pull Request!
 
-<br>
-<br>
-
 ---
 ---
 
