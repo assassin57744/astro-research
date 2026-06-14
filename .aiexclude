@@ -1,0 +1,33 @@
+# 排除前端依赖
+node_modules/
+
+# 排除 Python 虚拟环境和缓存
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 排除编译输出与构建工具缓存
+dist/
+build/
+.out/
+.gradle/
+.pnpm-store/
+
+# 排除大型数据文件或日志
+*.csv
+*.json
+*.log
+data/
+
+.vscode/
+
+# 仓库根目录
+astrophotography/
+club-resources/
+logs/
+wiki-drafts/
+
+
+# 排除非相关的文件 - 同级目录
+tools/external/
