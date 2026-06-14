@@ -31,6 +31,19 @@ This repository serves as a centralized hub to document my scientific research p
 ├── /logs/                     # 🔭 Raw Observation Logs
 ├── /wiki-drafts/              # 📝 Wikipedia Drafts & Outlines
 └── /club-resources/           # 🎪 School Astronomy Club & Competition Resources
+```
+---
+
+## 🎯 Current Focus
+
+### 1. Project: Hunt 2024 Catalog Auditing (`/research/hunt24-audit/`)
+* **Objective**: Cross-verify and audit member stars within the Hunt 2024 catalog using open astronomical big data.
+* **Core Tasks**: Utilize the latest satellite observation datasets to validate the search radii of specific star clusters (such as the Hyades cluster), filtering out background noise to ensure catalog precision.
+
+### 2. Tool: `astro_data_downloader` (`/tools/`)
+* **Objective**: A self-developed utility script designed for batch retrieving astronomical data.
+* **Problem Solved**: Eliminates the friction of manual data fetching by automating stable, programmatic queries from academic databases like VizieR.
+
 ### 3. Astrophotography: Deep-Sky & Landscape Exploration (`/astrophotography/`)
 * **Objective**: Calibrating deep-sky imagery using dark/flat frames, documenting SNR (Signal-to-Noise Ratio) under varying light pollution levels, and merging astronomical science with visual aesthetics.
 
@@ -86,7 +99,7 @@ This repository serves as a centralized hub to document my scientific research p
 └── /club-resources/           # 🎪 校园天文社团活动及竞赛组织的开源资料
 
 ---
-
+```
 ## 🎯 当前专项焦点
 
 ### 1. 课题：Hunt 2024 星表审计 (`/research/hunt24-audit/`)
