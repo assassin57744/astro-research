@@ -6,7 +6,7 @@
 
 ## 📌 Overview
 
-This repository serves as a centralized hub to document my scientific research practices and engineering explorations as an 11th-grade astronomy enthusiast. The content is structured into five core modules:
+This repository serves as a centralized hub to document my scientific research practices and engineering explorations as an astronomy enthusiast. The content is structured into five core modules:
 
 * **🧬 Research Projects**: Focuses on data analysis of specific celestial objects and catalogs. The current flagship project is the **Hunt 2024 Star Catalog Auditing**.
 * **🛠️ Tools**: Houses general automation and data processing scripts developed during my research and daily observations to improve workflow efficiency (e.g., **astro_data_downloader**).
@@ -44,7 +44,7 @@ This repository serves as a centralized hub to document my scientific research p
 * **Objective**: A self-developed utility script designed for batch retrieving astronomical data.
 * **Problem Solved**: Eliminates the friction of manual data fetching by automating stable, programmatic queries from academic databases like VizieR.
 
-### 3. Astrophotography: Deep-Sky & Landscape Exploration (`/astrophotography/`)
+### 3. Astrophotography: Deep-Sky & Planetary/Lunar Exploration (`/astrophotography/`)
 * **Objective**: Calibrating deep-sky imagery using dark/flat frames, documenting SNR (Signal-to-Noise Ratio) under varying light pollution levels, and merging astronomical science with visual aesthetics.
 
 ---
@@ -72,7 +72,7 @@ This repository serves as a centralized hub to document my scientific research p
 
 ## 📌 项目概述
 
-本仓库用于沉淀我作为一名 11 年级天文爱好者的日常科研实践、工程探索与观测审美。内容主要涵盖以下五个核心板块：
+本仓库用于沉淀我作为一名天文爱好者的日常科研实践、工程探索与观测审美。内容主要涵盖以下五个核心板块：
 
 * **🧬 专项研究课题**：聚焦于特定天体的天文大数据分析。目前核心项目为 **Hunt 2024 星表审计**。
 * **🛠️ 自研工具箱**：沉淀在研究和日常观测中开发的通用自动化与数据处理脚本，提高科研效率（如 **astro_data_downloader**）。
@@ -98,8 +98,9 @@ This repository serves as a centralized hub to document my scientific research p
 ├── /wiki-drafts/              # 📝 维基百科词条修改与编写草稿
 └── /club-resources/           # 🎪 校园天文社团活动及竞赛组织的开源资料
 
----
 ```
+---
+
 ## 🎯 当前专项焦点
 
 ### 1. 课题：Hunt 2024 星表审计 (`/research/hunt24-audit/`)
