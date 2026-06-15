@@ -305,14 +305,27 @@ class AstroWorkflow:
             manifest (dict): 全局清单。
             ctx (dict, optional): 包含星团几何信息的上下文。
         """
-        self.logger.info(f"🚀 正在执行数据标准化, 当前表:{idx_data} ")
-        actions = cfg_data.get("actions", {})
+        self.logger.info(f"🚀 正在执行数据标准化, 当前源: {idx_data}")
+        
+        # 1. 动态命名对齐：检查中央映射表以覆盖 CAT_NAME
+        local_ctx = ctx.copy() if ctx else {}
+        cluster_id = local_ctx.get("id")
+        
+        if cluster_id:
+            # 从 config 模块读取中央转换矩阵
+            adapter = getattr(cfg, "CATALOG_NAMING_ADAPTER", {})
+            override_name = adapter.get(idx_data, {}).get(cluster_id)
+            if override_name:
+                self.logger.debug(f" [Naming] 识别到文献名称冲突: {idx_data} 对 {cluster_id} 使用 '{override_name}'")
+                local_ctx["CAT_NAME"] = override_name
 
+        actions = cfg_data.get("actions", {})
         for layer in ["std", "stx", "aln"]: 
             if layer in actions:
                 self.logger.debug(f"  ∟ 正在执行层级动作: {layer.upper()}")
                 action_func = actions[layer]
-                action_func(self.db, idx_data, cfg_data, self.manifest, ctx)
+                # 将修正后的上下文传给执行层
+                action_func(self.db, idx_data, cfg_data, self.manifest, local_ctx)
 
     def _get_seeds(self, idx_data, cfg_src, manifest, ctx=None, required_features=None):
         """从指定数据源的标准视图中提取高质量种子星 (RUWE < 1.4)。

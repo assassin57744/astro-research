@@ -12,8 +12,22 @@ from modules.actions import StdActions, StxActions, AlnActions
 # 运行时上下文 (Runtime Context)
 # -----------------------------------------------------------------
 # 获取默认目标（仅用于 CLI 默认值，不建议在代码中修改这些变量）
-DEFAULT_CLUSTER = os.getenv("ASTRO_TARGET_CLUSTER", "M13")
+DEFAULT_CLUSTER = os.getenv("ASTRO_TARGET_CLUSTER", "M45")
 DEFAULT_CATEGORY = os.getenv("ASTRO_TARGET_CATEGORY", "hunt")
+
+# -----------------------------------------------------------------
+# 统一命名转换矩阵 (Naming Adapter Matrix)
+# -----------------------------------------------------------------
+# 职责：解决不同文献星表对同一星团称呼不一致的问题。
+# 逻辑：如果在该表中找到 (文献标识, 星团ID) 的映射，则在过滤时优先使用映射名；
+#      否则，使用星团配置中的默认 CAT_NAME。
+CATALOG_NAMING_ADAPTER = {
+    "zerj": {
+        "M45": "Melotte 22",
+    },
+    # 未来增加新星表只需在此添加子字典
+}
+
 
 # -----------------------------------------------------------------
 # 路径与门限定义
