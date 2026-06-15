@@ -301,10 +301,14 @@ class AstroDB:
         self.logger.info(f"💾 已将资产 {table_or_view} 固化至: {path}")
         return path
 
-    def export_table(self, table_name, filename=None, format="fits"):
+    def export_table(self, table_name, filename=None, format="fits", export_dir=cfg.EXPORT_DIR):
         """导出表为指定格式。"""
         output_name = filename if filename else table_name
-        output_path = cfg.EXPORT_DIR / f"{output_name}.{format}"
+        output_path = Path(export_dir) / f"{output_name}.{format}"
+
+        # 确保导出目录及其父目录存在，防止 DuckDB 报错找不到路径
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
         if format.lower() == "fits":
             from astropy.table import Table
 
@@ -315,9 +319,9 @@ class AstroDB:
                 f"COPY {table_name} TO '{output_path.as_posix()}' (FORMAT {format.upper()})"
             )
 
-    def batch_export(self, table_names):
+    def batch_export(self, table_names, export_dir=cfg.EXPORT_DIR):
         for name in table_names:
-            self.export_table(name)
+            self.export_table(name, export_dir=export_dir)
 
     def close(self):
         if hasattr(self, "con") and self._connection_active:

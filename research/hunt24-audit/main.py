@@ -1,12 +1,12 @@
 import logging
 import sys
 import os
+import argparse
 from datetime import datetime
 from pathlib import Path
 
 # 按照扁平化结构更新导入路径
 from modules.astro_db import AstroDB
-from modules.pg_core import PriorGMM
 from modules.astro_workflow import AstroWorkflow
 
 import config as cfg
@@ -83,7 +83,222 @@ def setup_logging(log_dir=cfg.LOG_DIR):
     return logger
 
 
-def run_pipeline(target_cluster_id: str, target_category: str):
+def _initialize_pipeline_components(
+    target_cluster_id: str, target_category: str, mode: str
+):
+    """初始化核心管道组件和配置。"""
+    cfg.GMM_CONFIG["dim_mode"] = mode
+    ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
+    ctx_cluster["id"] = target_cluster_id
+    data_manifest = cfg.MANIFEST
+
+    db = AstroDB(manifest=data_manifest)
+    wf = AstroWorkflow(
+        db, target_cluster=target_cluster_id, target_category=target_category
+    )
+
+    ref_tables = [
+        ctx_cluster["FIELD_IDX"],
+        ctx_cluster["SEED_IDX"],
+        cfg.IDX_DR2IDX,
+        cfg.IDX_CG20,
+        cfg.IDX_HEYL,
+        cfg.IDX_HUNT,
+        cfg.IDX_ZERJ,
+        cfg.IDX_RISB,
+    ]
+    logger.info(
+        f"🚀 初始化管道组件完成。目标星团: {target_cluster_id}, 模式: {mode}, 审计参考: {target_category}"
+    )
+    return db, wf, ctx_cluster, data_manifest, ref_tables
+
+
+def _ingest_and_prepare_data(
+    db: AstroDB,
+    wf: AstroWorkflow,
+    target_cluster_id: str,
+    ref_tables: list,
+    ctx_cluster: dict,
+):
+    """处理原始数据摄取、标准化和虚拟视图创建。"""
+    logger.info(f"📦 [1/5] 正在同步物理数据源 (跳过虚拟视图)...")
+    db.import_raw(target_cluster_id=target_cluster_id, force=False)
+
+    logger.info(
+        f"📐 [2/5] 正在执行数据对齐与虚拟视图创建 ({target_cluster_id}, 模式: {cfg.GMM_CONFIG['dim_mode']})..."
+    )
+    wf.prepare_field_data(ref_tables, ctx_cluster)
+    logger.info("✅ 数据准备阶段完成。")
+
+
+def _execute_gmm_algorithm(wf: AstroWorkflow, ctx_cluster: dict) -> str:
+    """执行核心 GMM 成员识别算法。"""
+    logger.info(
+        f"🧠 [3/5] 启动 GMM 成员识别内核 ({cfg.GMM_CONFIG['dim_mode']} 模式)..."
+    )
+    t_result = wf.run_pipeline(ctx_cluster)
+    logger.info(f"✨ 算法推断完成，结果表: {t_result}")
+    return t_result
+
+
+def _post_process_results(wf: AstroWorkflow, t_result: str) -> dict:
+    """执行后处理和候选者分类。"""
+    logger.info("📊 [4/5] 正在合成分析宽表并提取候选成员视图...")
+    v_all_audit_data = wf.post_pipeline(t_result)
+    if v_all_audit_data.get("status") != "success":
+        logger.error(f"❌ 后处理流程失败: {v_all_audit_data.get('message')}")
+        raise RuntimeError(f"后处理流程失败: {v_all_audit_data.get('message')}")
+    logger.info("✅ 数据处理流程结束，转入交叉审计阶段。")
+    return v_all_audit_data
+
+
+def _perform_cross_audit(
+    wf: AstroWorkflow,
+    v_all_audit_data: dict,
+    data_manifest: dict,
+    target_cluster_id: str,
+) -> tuple[dict, str, dict]:
+    """执行交叉验证和新发现的深度审计。"""
+    logger.info(f"⚖️ [5/5] 执行多源文献交叉审计, 参考类别: {wf.target_category}")
+
+    v_audit_ref = v_all_audit_data["v_candidates"]  # 获取算法产出的候选成员视图名
+    target_aln_view = data_manifest[wf.target_category]["aln_view"].format(
+        cluster=target_cluster_id.lower()
+    )
+    audit_res = wf.prepare_audit_data(v_audit_ref, target_aln_view)
+    if audit_res.get("status") != "success":
+        logger.warning(f"⚠️ 交叉比对审计未完全成功: {audit_res.get('message')}")
+        # 如果交叉比对不成功，深度审计将无法进行，返回默认值
+        return audit_res, None, {}
+
+    gmm_only_key = f"v_{cfg.IDX_GMM}_only"
+    v_audit_target = audit_res.get("audit_views", {}).get(gmm_only_key)
+
+    v_final_audited = None
+    deep_stats = {}
+    if not v_audit_target:
+        logger.warning(f"⚠️ 未找到名为 {gmm_only_key} 的审计视图，跳过深度审计。")
+    else:
+        logger.info(f"🔍 准备深度审计，目标视图: {v_audit_target}")
+        v_final_audited = wf.run_audit(target=v_audit_target)
+
+        # 获取深度审计统计汇总
+        if v_final_audited:
+            st_sql = f"SELECT audit_status, count(*) FROM {v_final_audited} GROUP BY audit_status"
+            deep_stats = dict(wf.db.con.execute(st_sql).fetchall())
+    return audit_res, v_final_audited, deep_stats
+
+
+def _export_pipeline_results(
+    db: AstroDB,
+    audit_res: dict,
+    v_final_audited: str,
+    target_cluster_id: str,
+    target_category: str,
+    mode: str,
+):
+    """将管道结果导出到指定目录。"""
+    logger.info("💾 [Export] 启动数据资产导出模块...")
+
+    # 构造标准化的导出文件名前缀，包含星团 ID、审计目录及执行模式
+    # 生成示例: M45_hunt_3d_cross_summary.csv
+    export_base = f"{target_cluster_id}_{target_category}_{mode}"
+
+    # A. 导出交叉比对汇总宽表：包含 Gaia Source ID, 算法概率以及双方一致性分类标签
+    v_cross_total = audit_res.get("audit_views", {}).get("v_cross_audit_total")
+    if v_cross_total:
+        db.export_table(
+            v_cross_total,
+            filename=f"{export_base}_cross_summary",
+            format="csv",
+            export_dir=cfg.RESULTS_DIR,
+        )
+
+    # B. 导出深度审计详细报告：包含物理验证状态 (audit_status)、残差指标以及 SIMBAD 文献证据
+    if v_final_audited:
+        db.export_table(
+            v_final_audited,
+            filename=f"{export_base}_deep_audit",
+            format="csv",
+            export_dir=cfg.RESULTS_DIR,
+        )
+    logger.info("✅ 结果导出完成。")
+
+
+def _log_final_report(
+    target_cluster_id: str,
+    target_category: str,
+    mode: str,
+    ctx_cluster: dict,
+    v_all_audit_data: dict,
+    audit_res: dict,
+    deep_stats: dict,
+):
+    """记录并保存最终的合并执行报告。"""
+    used_features = cfg.GMM_CONFIG["feature_map"].get(mode, [])
+
+    report_lines = [
+        "=" * 65,
+        f"🏁 [管线执行最终报告 - {target_cluster_id}]",
+        f"  🔹 目标星团: {target_cluster_id} ({ctx_cluster['NAME']})",
+        f"  🔹 执行模式: {mode.upper()} -> 物理特征空间: {used_features}",
+        f"  🔹 审计参考: {target_category}",
+        "-" * 65
+    ]
+
+    p_stats = v_all_audit_data.get("stats", {})
+    report_lines.append("  [1] 算法发现阶段 (GMM Inference):")
+    report_lines.append(f"      - 成员星候选总数: {p_stats.get('n_candidates', 0)}")
+    report_lines.append(f"      - 高置信金种子星: {p_stats.get('n_golden', 0)}")
+
+    a_stats = audit_res.get("stats", {}).get("cross_audit_counts", {})
+    ref_missed = a_stats.get(f"{target_category}_only", 0)
+    matched = a_stats.get("matched", 0)
+    ref_total = ref_missed + matched
+    miss_rate = (ref_missed / ref_total * 100) if ref_total > 0 else 0
+
+    report_lines.append("  [2] 文献交叉比对 (Cross Match):")
+    report_lines.append(f"      - 双方共识成员 (Matched):   {matched} 颗")
+    report_lines.append(f"      - 算法漏检 (Recall/Missed): {ref_missed} 颗 (漏检率: {miss_rate:.2f}%)")
+    report_lines.append(f"      - 算法独有候选 (PG Only):   {a_stats.get('pgmm_only', 0)}")
+
+    if deep_stats:
+        total_audited = sum(deep_stats.values())
+        confirmed_both = deep_stats.get("Confirmed Member", 0)
+        new_pure_candidates = deep_stats.get("New Candidate", 0)
+        new_finds = confirmed_both + new_pure_candidates
+        discovery_precision = (
+            (new_finds / total_audited * 100) if total_audited > 0 else 0
+        )
+
+        report_lines.append("  [3] 深度审计结果 (Deep Validation):")
+        report_lines.append(f"      - 深度审计样本总数: {total_audited} 颗")
+        report_lines.append(f"      - 双重确认成员 (物理+文献): {confirmed_both} 颗")
+        report_lines.append(f"      - 物理验证通过 (New Discovery): {new_finds} 颗 (发现准确率: {discovery_precision:.2f}%)")
+        report_lines.append(f"      - 确认为背景噪点 (Contamination): {deep_stats.get('Contamination', 0)}")
+        report_lines.append(f"      - 仅文献收录 (Lit. Only):       {deep_stats.get('Literature Only', 0)}")
+
+    report_lines.append("-" * 65)
+    report_lines.append(f"  ✅ 任务状态: 成功完成 | 资产导出路径: {cfg.RESULTS_DIR}")
+    report_lines.append("=" * 65)
+
+    # 1. 打印到日志系统
+    for line in report_lines:
+        logger.info(line)
+
+    # 2. 保存到分析结果目录
+    export_base = f"{target_cluster_id}_{target_category}_{mode}"
+    report_path = cfg.RESULTS_DIR / f"{export_base}_final_report.txt"
+
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("\n".join(report_lines), encoding="utf-8")
+        logger.info(f"📄 最终报告副本已保存至: {report_path}")
+    except Exception as e:
+        logger.error(f"❌ 无法保存最终报告副本: {e}")
+
+
+def run_pipeline(target_cluster_id: str, target_category: str, mode: str):
     """
     驱动端到端的天文数据分析与审计管线。
 
@@ -92,81 +307,37 @@ def run_pipeline(target_cluster_id: str, target_category: str):
     Args:
         target_cluster_id (str): 目标星团标识符（例如 'M45'）。
         target_category (str): 用于审计比对的参考星表类别（例如 'hunt'）。
+        mode (str): GMM 执行模式（如 '3d', '6d_p'）。
     """
-    ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
-    ctx_cluster["id"] = target_cluster_id  # 显式注入 ID，供 Actions 模块使用
-    data_manifest = cfg.MANIFEST
-
-    db = AstroDB(manifest=data_manifest)
-
-    # 定义流水线运行所需的参考星表列表，包括基础星场、种子点及各文献比对表
-    ref_tables = [
-        ctx_cluster["FIELD_IDX"],  # 动态获取当前星团的全量数据索引
-        ctx_cluster["SEED_IDX"],  # 动态获取当前星团的种子源索引
-        cfg.IDX_DR2IDX,  # Gaia DR2-DR3 转换索引, 配合IDX_CG20使用
-        cfg.IDX_CG20,  # Cantat-Gaudin (2020) 参考表
-        cfg.IDX_HEYL,  # Heyl (2022) 参考表
-        cfg.IDX_HUNT,  # Hunt (2024) 参考表
-        cfg.IDX_ZERJ,  # Zerjal (2023) 参考表
-        cfg.IDX_RISB,  # Risb (2023) 参考表
-    ]
+    db, wf, ctx_cluster, data_manifest, ref_tables = _initialize_pipeline_components(
+        target_cluster_id, target_category, mode
+    )
 
     try:
-        # 1. 基础数据层同步 (L1: Raw Data Layer)
-        # 此时 db 会根据 sync_mode 自动跳过标注为 VIRTUAL 的种子集表
-        logger.info(f"📦 [1/5] 正在同步物理数据源 (跳过虚拟视图)...")
-        db.import_raw(target_cluster_id=target_cluster_id, force=False) 
+        _ingest_and_prepare_data(db, wf, target_cluster_id, ref_tables, ctx_cluster)
 
-        # 在底层物理环境就绪后，初始化工作流引擎
-        wf = AstroWorkflow(db, target_cluster=target_cluster_id, target_category=target_category)
-        
-        logger.info(
-            f"📐 [2/5] 正在执行数据对齐与虚拟视图创建 ({target_cluster_id})..."
+        t_result = _execute_gmm_algorithm(wf, ctx_cluster)
+
+        v_all_audit_data = _post_process_results(wf, t_result)
+
+        audit_res, v_final_audited, deep_stats = _perform_cross_audit(
+            wf, v_all_audit_data, data_manifest, target_cluster_id
         )
-        # prepare_field_data 内部会检测 VIRTUAL 模式，
-        # 并使用 ctx_cluster 渲染 config 中的 pre_filters（如 M45 的 5度半径筛选）
-        wf.prepare_field_data(ref_tables, ctx_cluster)
 
-        # 2. 执行核心概率推断算法
-        logger.info(
-            f"🧠 [3/5] 启动 GMM 成员识别内核 ({cfg.GMM_CONFIG['dim_mode']} 模式)..."
+        _export_pipeline_results(
+            db, audit_res, v_final_audited, target_cluster_id, target_category, mode
         )
-        t_result = wf.run_pipeline(ctx_cluster)
-        logger.info(f"✨ 算法推断完成，结果表: {t_result}")
 
-        # 3. 后处理与成员分类
-        logger.info("📊 [4/5] 正在合成分析宽表并提取候选成员视图...")
-        v_all_audit_data = wf.post_pipeline(t_result)
-        if v_all_audit_data.get("status") != "success":
-            logger.error(f"❌ 后处理流程失败: {v_all_audit_data.get('message')}")
-            return
-
-        logger.info("✅ 数据处理流程结束，转入交叉审计阶段。")
-        v_audit_ref = v_all_audit_data["v_candidates"]  # 获取算法产出的候选成员视图名
-
-        # 4. 交叉比对与审计
-        logger.info(f"⚖️ [5/5] 执行多源文献交叉审计, 参考类别: {target_category}")
-
-        # 动态渲染对齐视图名称，将占位符 {cluster} 替换为实际执行的星团 ID
-        target_aln_view = data_manifest[target_category]["aln_view"].format(
-            cluster=target_cluster_id.lower()
+        _log_final_report(
+            target_cluster_id,
+            target_category,
+            mode,
+            ctx_cluster,
+            v_all_audit_data,
+            audit_res,
+            deep_stats,
         )
-        audit_res = wf.prepare_audit_data(v_audit_ref, target_aln_view)
-        if audit_res.get("status") != "success":
-            logger.warning(f"⚠️ 交叉比对审计未完全成功: {audit_res.get('message')}")
-            return
 
-        # 5. 发现挖掘：提取“仅被我方算法识别，而文献未包含”的源（New Discovery Candidates）
-        gmm_only_key = f"v_{cfg.IDX_GMM}_only"
-        v_audit_target = audit_res.get("audit_views", {}).get(gmm_only_key)
-
-        if not v_audit_target:
-            logger.warning(f"⚠️ 未找到名为 {gmm_only_key} 的审计视图，跳过深度审计。")
-        else:
-            logger.info(f"🔍 准备深度审计，目标视图: {v_audit_target}")
-            wf.run_audit(target=v_audit_target)
-
-        logger.info(f"🏁 任务执行完毕，星团 {target_cluster_id} 的完整流水线已结束。")
     except Exception as e:
         logger.error(f"❌ 流水线在运行期间发生严重崩溃: {str(e)}", exc_info=True)
         raise e
@@ -178,11 +349,50 @@ def run_pipeline(target_cluster_id: str, target_category: str):
 if __name__ == "__main__":
     logger = setup_logging()
 
-    # 从环境变量或 config 默认值获取初始目标
-    target_cluster = os.getenv("ASTRO_TARGET_CLUSTER", cfg.DEFAULT_CLUSTER)
-    target_cat = os.getenv("ASTRO_TARGET_CATEGORY", cfg.DEFAULT_CATEGORY)
-    
-    logger.info(
-        f"🚀 启动天文数据分析管道 - 目标: {target_cluster}, 审计参考: {target_cat}"
+    # 1. 命令行参数解析配置
+    parser = argparse.ArgumentParser(
+        description="Astro Research Pipeline - 天文数据分析与自动审计命令行工具",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    run_pipeline(target_cluster, target_cat)
+
+    # 星团 ID (必填，位置参数)
+    parser.add_argument("cluster", type=str, help="目标星团名称 (例如: M45, M44, M67)")
+
+    # 审计对象 (可选，缺省 hunt)
+    parser.add_argument(
+        "--category",
+        type=str,
+        default="hunt",
+        choices=["cg20", "heyl", "zerj", "risb", "hunt"],
+        help="审计对比的参考星表类别",
+    )
+
+    # 执行模式 (可选，缺省 3d)
+    valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="3d",
+        choices=valid_modes,
+        help="GMM 算法的特征维度模式",
+    )
+
+    args = parser.parse_args()
+
+    # 2. 参数校验与预处理
+    # 星团名不区分大小写匹配
+    cluster_input = args.cluster.upper()
+    cluster_map = {k.upper(): k for k in cfg.CLUSTERS.keys()}
+
+    if cluster_input not in cluster_map:
+        logger.error(
+            f"❌ 未知的星团名称: '{args.cluster}'。可选范围: {list(cfg.CLUSTERS.keys())}"
+        )
+        sys.exit(1)
+
+    target_cluster_id = cluster_map[cluster_input]
+
+    logger.info(
+        f"🚀 启动天文数据分析管道 - 目标: {target_cluster_id}, 模式: {args.mode}, 审计参考: {args.category}"
+    )
+    run_pipeline(target_cluster_id, args.category, args.mode)

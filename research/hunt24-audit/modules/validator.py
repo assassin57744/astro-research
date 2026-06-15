@@ -144,7 +144,11 @@ class UnifiedMemberValidator:
         try:
             distance = self.config.get("DISTANCE_PC", 100.0)  # 默认单位: pc
             extinction_g = self.config.get("EXT_AG", 0.0)  # G波段视消光
-            extinction_bp_rp = self.config.get("E_BP_RP", 0.0)  # 色余
+            
+            # 🧪 增强逻辑：如果配置缺失 E_BP_RP，根据 EXT_AG 自动按比例估算
+            extinction_bp_rp = self.config.get("E_BP_RP")
+            if extinction_bp_rp is None:
+                extinction_bp_rp = extinction_g * 0.52 # 基于 Gaia DR3 经典红化律估算
 
             distance_modulus = 5.0 * np.log10(distance) - 5.0
 
@@ -486,6 +490,7 @@ class UnifiedMemberValidator:
         ]
         for line in msg:
             self.logger.info(line)
+            self.logger.debug(line)
 
     def validate_member(self, star_row) -> bool:
         """向后兼容单星测光与动力学快检接口"""
