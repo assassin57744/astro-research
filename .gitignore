@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+research/hunt24-audit/data/
+research/hunt24-audit/logs/
+research/hunt24-audit/analysis/
+research/hunt24-audit_bak/

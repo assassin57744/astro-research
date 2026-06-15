@@ -27,8 +27,12 @@ astrophotography/
 club-resources/
 logs/
 wiki-drafts/
+tools/external/
 
 
 # 排除非相关的文件 - 同级目录
-tools/external/
 research/hunt24-audit/references/
+research/hunt24-audit/data/
+research/hunt24-audit/logs/
+research/hunt24-audit/data/
+research/hunt24-audit/analysis/
