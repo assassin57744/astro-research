@@ -489,7 +489,6 @@ class UnifiedMemberValidator:
             f"{'='*70}"
         ]
         for line in msg:
-            self.logger.info(line)
             self.logger.debug(line)
 
     def validate_member(self, star_row) -> bool:

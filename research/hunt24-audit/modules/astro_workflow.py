@@ -429,11 +429,11 @@ class AstroWorkflow:
             """
             stats = self.db.execute(stats_sql).fetchone()
 
-            self.logger.info("=" * 60)
-            self.logger.info(f"📊 [{cluster_name}] Post-Pipeline 后处理数据审计摘要:")
-            self.logger.info(f"  🔹 金种子视图 ({v_golden}): {stats[0]} 颗")
-            self.logger.info(f"  🔹 候选者视图 ({v_candidates}): {stats[1]} 颗")
-            self.logger.info("=" * 60)
+            self.logger.debug("=" * 60)
+            self.logger.debug(f"📊 [{cluster_name}] Post-Pipeline 后处理数据审计摘要:")
+            self.logger.debug(f"  🔹 金种子视图 ({v_golden}): {stats[0]} 颗")
+            self.logger.debug(f"  🔹 候选者视图 ({v_candidates}): {stats[1]} 颗")
+            self.logger.debug("=" * 60)
 
             return {
                 "status": "success",
@@ -569,7 +569,7 @@ class AstroWorkflow:
             f"{'='*60}"
         ]
         for line in msg:
-            self.logger.info(line)
+            self.logger.debug(line)
 
     def audit_literature_via_simbad(self, df_subset, label="discovery"):
         """[科研审计] 对特定数据子集执行 SIMBAD 文献核实。

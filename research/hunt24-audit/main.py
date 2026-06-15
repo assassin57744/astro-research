@@ -17,28 +17,18 @@ logger = logging.getLogger("AstroPipeline")
 
 class NameShortenerFilter(logging.Filter):
     """
-    日志记录过滤器：用于精简记录器名称并合成紧凑的调用路径。
-
-    主要功能：
-    1. 提取模块叶节点名称（例如：将 'AstroPipeline.modules.seed_core' 简化为 'seed_core'）。
-    2. 合成 'call_path' 属性，将简短名与函数名结合，便于在日志中进行等宽对齐美化。
+    日志记录过滤器：用于将冗长的模块路径简化为 “文件名:行号” 格式。
     """
 
     def filter(self, record):
-        # 提取模块层级的最后一级，避免长路径破坏日志排版
-        if "." in record.name:
-            short_name = record.short_name = record.name.split(".")[-1]
-        else:
-            short_name = record.short_name = record.name
-
-        # 预合成调用路径 (例如: "astro_workflow.run_pipeline")
-        # 在日志中使用固定宽度对齐，极大提升可读性
-        record.call_path = f"{short_name}.{record.funcName}"
-
+        # 按照用户要求：只打印 文件名和行号 (例如: validator.py:456)
+        # record.filename 获取文件名，record.lineno 获取调用处的行号
+        record.call_path = f"{record.filename}:{record.lineno}"
+        
         return True
 
 
-def setup_logging(log_dir=cfg.LOG_DIR):
+def setup_logging(log_dir=cfg.LOG_DIR, level=logging.INFO):
     """
     初始化全局日志系统，支持双通道（文件与控制台）输出。
 
@@ -59,9 +49,9 @@ def setup_logging(log_dir=cfg.LOG_DIR):
 
     shortener = NameShortenerFilter()
 
-    # 定义全局日志格式：时间 - 调用路径(固定45宽) - 级别 - 消息
+    # 定义全局日志格式：时间 - 调用路径(固定22宽) - 级别 - 消息
     formatter = logging.Formatter(
-        "%(asctime)s - %(call_path)-45s - %(levelname)-8s - %(message)s",
+        "%(asctime)s [%(levelname).4s] %(call_path)-22s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
@@ -73,7 +63,7 @@ def setup_logging(log_dir=cfg.LOG_DIR):
 
     # 控制台处理器通常设置为 INFO，避免 DEBUG 级别的冗余信息干扰实时监控
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    ch.setLevel(level)
     ch.setFormatter(formatter)
     ch.addFilter(shortener)
     logger.addHandler(ch)
@@ -347,8 +337,6 @@ def run_pipeline(target_cluster_id: str, target_category: str, mode: str):
 
 
 if __name__ == "__main__":
-    logger = setup_logging()
-
     # 1. 命令行参数解析配置
     parser = argparse.ArgumentParser(
         description="Astro Research Pipeline - 天文数据分析与自动审计命令行工具",
@@ -377,7 +365,23 @@ if __name__ == "__main__":
         help="GMM 算法的特征维度模式",
     )
 
+    # 日志级别 (可选，缺省 INFO)
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="控制台日志输出级别",
+    )
+
     args = parser.parse_args()
+
+    # 2. 初始化日志系统 (根据参数设置级别)
+    numeric_level = getattr(logging, args.log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        numeric_level = logging.INFO
+        
+    logger = setup_logging(level=numeric_level)
 
     # 2. 参数校验与预处理
     # 星团名不区分大小写匹配
