@@ -197,7 +197,7 @@ def _export_pipeline_results(
         cluster=target_cluster_id, category=target_category, mode=mode
     )
 
-    # A. 导出交叉比对汇总宽表：包含 Gaia Source ID, 算法概率以及双方一致性分类标签
+    # A. 导出交叉比对汇总宽表：包含 Gaia ID、算法概率、种子分类(Core/Noise)以及文献比对标签
     db.export_table(
         wf.t_master,
         filename=cfg.TMPL.FILE_CROSS_SUMMARY.format(base=export_base),
@@ -239,8 +239,11 @@ def _log_final_report(
 
     p_stats = v_all_audit_data.get("stats", {})
     report_lines.append("  [1] 算法发现阶段 (GMM Inference):")
+    report_lines.append(f"      - 原始输入种子数量 (Seeds): {p_stats.get('n_seeds', 0)}")
     report_lines.append(f"      - 成员星候选总数: {p_stats.get('n_candidates', 0)}")
     report_lines.append(f"      - 高置信金种子星: {p_stats.get('n_golden', 0)}")
+    report_lines.append(f"      - 种子集核心样本 (Core): {p_stats.get('n_seed_core', 0)}")
+    report_lines.append(f"      - 种子集噪声剔除 (Noise): {p_stats.get('n_seed_noise', 0)}")
 
     # 🚀 [混合模式] 更新统计键名以匹配 prepare_audit_data 中的 SQL 标签
     a_stats = audit_res.get("stats", {})
@@ -317,7 +320,7 @@ def _log_all_modes_comparison(all_results: list):
     logger.info("-" * 125)
 
     header = (
-        f"{'MODE':<8} | {'CANDIDATES':<12} | {'GOLDEN':<10} | {'MATCHED':<10} | "
+        f"{'MODE':<8} | {'CANDIDATES':<12} | {'CORE':<6} | {'GOLDEN':<10} | {'MATCHED':<10} | "
         f"{'PG ONLY':<10} | {'RECALL':<12} | {'NEW DISCOVERY':<15} | {'PRECISION'}"
     )
     logger.info(header)
@@ -325,7 +328,8 @@ def _log_all_modes_comparison(all_results: list):
 
     for res in all_results:
         line = (
-            f"{res['mode']:<8} | {res['candidates']:<12} | {res['golden']:<10} | "
+            f"{res['mode']:<8} | {res['candidates']:<12} | {res['seed_core']:<6} | "
+            f"{res['golden']:<10} | "
             f"{res['matched']:<10} | {res['pg_only']:<10} | {res['recall']:>10.2f}% | "
             f"{res['new_finds']:<15} | {res['precision']:>9.2f}%"
         )
@@ -398,6 +402,7 @@ def run_pipeline(
             "mode": mode.upper(),
             "candidates": v_all_audit_data.get("stats", {}).get("n_candidates", 0),
             "golden": v_all_audit_data.get("stats", {}).get("n_golden", 0),
+            "seed_core": v_all_audit_data.get("stats", {}).get("n_seed_core", 0),
             "matched": matched,
             "pg_only": a_stats.get("PG Only", 0),
             "recall": (matched / ref_total * 100) if ref_total > 0 else 0,
@@ -454,6 +459,13 @@ def parse_args():
         help="GMM 算法的特征维度模式，使用 'all' 将循环执行所有模式",
     )
     parser.add_argument(
+        "--algo",
+        type=str,
+        default=cfg.GMM_CONFIG.get("cluster_algo", "dbscan"),
+        choices=["dbscan", "hdbscan"],
+        help="种子集预处理使用的聚类算法",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
@@ -462,10 +474,21 @@ def parse_args():
     )
 
     maint_group = parser.add_argument_group("资产维护命令 (Maintenance)")
-    maint_group.add_argument("--backup", action="store_true", help="手动备份 data/raw 目录")
-    maint_group.add_argument("--restore", type=str, nargs="?", const="A", choices=["A", "B"], 
-                             default=argparse.SUPPRESS, help="从备份中恢复数据")
-    maint_group.add_argument("--query-backup", action="store_true", help="查询当前备份库的状态")
+    maint_group.add_argument(
+        "--backup", action="store_true", help="手动备份 data/raw 目录"
+    )
+    maint_group.add_argument(
+        "--restore",
+        type=str,
+        nargs="?",
+        const="A",
+        choices=["A", "B"],
+        default=argparse.SUPPRESS,
+        help="从备份中恢复数据",
+    )
+    maint_group.add_argument(
+        "--query-backup", action="store_true", help="查询当前备份库的状态"
+    )
 
     return parser, parser.parse_args()
 
@@ -505,15 +528,22 @@ def main():
     if not args.cluster:
         parser.error("运行管线模式必须提供 cluster 参数。使用 --help 查看维护命令。")
 
+    # 覆盖配置中的聚类算法
+    cfg.GMM_CONFIG["cluster_algo"] = args.algo
+
     cluster_input = args.cluster.upper()
     cluster_map = {k.upper(): k for k in cfg.CLUSTERS.keys()}
 
     if cluster_input not in cluster_map:
-        logger.error(f"❌ 未知的星团名称: '{args.cluster}'。可选范围: {list(cfg.CLUSTERS.keys())}")
+        logger.error(
+            f"❌ 未知的星团名称: '{args.cluster}'。可选范围: {list(cfg.CLUSTERS.keys())}"
+        )
         sys.exit(1)
 
     target_cluster_id = cluster_map[cluster_input]
-    logger.info(f"🚀 启动分析管道 - 目标: {target_cluster_id}, 模式: {args.mode}, 参考: {args.category}")
+    logger.info(
+        f"🚀 启动分析管道 - 目标: {target_cluster_id}, 模式: {args.mode}, 参考: {args.category}"
+    )
 
     if args.mode == "all":
         shared_db = AstroDB(manifest=cfg.MANIFEST)
@@ -523,12 +553,16 @@ def main():
             _, wf_setup, ctx_cluster, _, ref_tables = _initialize_pipeline_components(
                 target_cluster_id, args.category, valid_modes[0], db=shared_db
             )
-            _ingest_and_prepare_data(shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster)
+            _ingest_and_prepare_data(
+                shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster
+            )
 
             all_results = []
             for m in valid_modes:
                 # 2. 循环内强制跳过 setup，仅切换算法维度进行计算
-                stats = run_pipeline(target_cluster_id, args.category, m, db=shared_db, skip_setup=True)
+                stats = run_pipeline(
+                    target_cluster_id, args.category, m, db=shared_db, skip_setup=True
+                )
                 if stats:
                     all_results.append(stats)
             _log_all_modes_comparison(all_results)

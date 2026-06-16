@@ -188,16 +188,22 @@ class AstroWorkflow:
             # 3. 统计摘要
             stats_sql = f"""
                 SELECT 
-                    count(*) FILTER (WHERE is_golden = TRUE) as n_golden,
-                    count(*) FILTER (WHERE is_candidate = TRUE) as n_candidates
+                    count(*) FILTER (WHERE is_golden = TRUE) AS n_golden,
+                    count(*) FILTER (WHERE is_candidate = TRUE) AS n_candidates,
+                    count(*) FILTER (WHERE seed_type = 'raw_seed') AS n_seeds,
+                    count(*) FILTER (WHERE density_status = 'core') AS n_seed_core,
+                    count(*) FILTER (WHERE density_status = 'noise') AS n_seed_noise
                 FROM {self.t_master}
             """
             stats = self.db.execute(stats_sql).fetchone()
+            n_golden, n_candidates, n_seeds, n_seed_core, n_seed_noise = stats
 
             self.logger.info("=" * 60)
             self.logger.info(f"📊 [{self.target_cluster}] Master 表后处理标签同步完成:")
-            self.logger.info(f"  🔹 高置信金种子星 (is_golden): {stats[0]} 颗")
-            self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {stats[1]} 颗")
+            self.logger.info(f"  🔹 高置信金种子星 (is_golden): {n_golden} 颗")
+            self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {n_candidates} 颗")
+            self.logger.info(f"  🔹 原始输入种子星 (Seeds): {n_seeds} 颗")
+            self.logger.info(f"  🔹 种子集核心样本 (Core): {n_seed_core} 颗")
             self.logger.info("=" * 60)
 
             # 为后续步骤提供一个逻辑上的“候选者”入口视图
@@ -207,7 +213,13 @@ class AstroWorkflow:
             return {
                 "status": "success",
                 "v_candidates": v_candidates,
-                "stats": {"n_golden": stats[0], "n_candidates": stats[1]},
+                "stats": {
+                    "n_golden": n_golden,
+                    "n_candidates": n_candidates,
+                    "n_seeds": n_seeds,
+                    "n_seed_core": n_seed_core,
+                    "n_seed_noise": n_seed_noise
+                },
             }
         except Exception as e:
             self.logger.info(f"Error in post_pipeline: {str(e)}")
@@ -543,7 +555,7 @@ class AstroWorkflow:
         
         # 🚀 [混合模式] 步骤 2: 标记种子星类型 (Core/Noise)
         if hasattr(params, 'df_seeds_classified'):
-            updates = params.df_seeds_classified[[cfg.STD_COLS['ID'], 'seed_type']]
+            updates = params.df_seeds_classified[[cfg.STD_COLS['ID'], 'density_status']]
             self.db.tag_master_table(self.t_master, updates)
 
         df_prob = engine.predict(df_target_final, params)

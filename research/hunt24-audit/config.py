@@ -74,7 +74,8 @@ STD_COLS = {
 
 # Master 表专用标签列名
 MASTER_COLS = {
-    "SEED_TYPE": "seed_type",   # core / noise
+    "SEED_TYPE": "seed_type",   # raw_seed
+    "DENSITY_TAG": "density_status", # core / noise
     "GMM_PROB": "prob",         # 算法计算概率
     "X_MATCH": "x_match_tag",   # Matched / PG_Only / Ref_Only
     "AUDIT": "audit_status",    # Confirmed / Candidate / Contamination
@@ -714,8 +715,12 @@ GMM_CONFIG = {
     },
     "dim_mode": "3d",
     "ruwe_limit": 1.4,
+    "cluster_algo": "dbscan", # 可选: dbscan, hdbscan
     "dbscan_eps": 0.3,  # 从 0.3 调大，补偿高维空间距离
     "dbscan_min_samples": 100,  # 3d模型为100
+    "hdbscan_min_cluster_size": 15,
+    "hdbscan_min_samples": 5,          # 提高门限，使种子核心更凝聚，减少杂质
+    "hdbscan_cluster_selection_epsilon": 0.1, # 进一步降低合并容忍度，只保留最高密度的核心部分
     "gmm_covariance_type": "full",
     "max_iter": 20,
     "tol": 1e-5,

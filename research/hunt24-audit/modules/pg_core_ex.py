@@ -3,7 +3,7 @@ import time
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, HDBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
@@ -24,6 +24,7 @@ class GMMModelParamsEx:
         n_core_samples (int): 参与星团核心模型训练的有效样本数。
         dim_mode (str): 特征空间维度模式（如 '3d', '6d_p'）。
         features_used (list): 实际参与计算的特征列名。
+        df_seeds_classified (pd.DataFrame): 包含分类标签(Core/Noise)的种子星副本。
         center_coords (dict): 用于中心化修正的各维度锚点值。
     """
 
@@ -33,6 +34,7 @@ class GMMModelParamsEx:
     n_core_samples: int
     dim_mode: str
     features_used: list
+    df_seeds_classified: pd.DataFrame = None
     center_coords: dict = field(default_factory=dict)
 
 
@@ -72,11 +74,15 @@ class PriorGMMEx:
         self.features = feature_map[self.dim_mode]
 
         # 提取聚类超参数
+        self.cluster_algo = self.config.get("cluster_algo", "dbscan").lower()
         self.dbscan_eps = self.config.get("dbscan_eps", 0.3)
         self.dbscan_min_samples = self.config.get("dbscan_min_samples", 10)
+        self.hdbscan_min_cluster_size = self.config.get("hdbscan_min_cluster_size", 15)
+        self.hdbscan_min_samples = self.config.get("hdbscan_min_samples", None)
+        self.hdbscan_eps = self.config.get("hdbscan_cluster_selection_epsilon", 0.0)
 
         self.logger.info(
-            f"🧪 [PriorGMMEx] 实验性内核加载成功 | 模式: {self.dim_mode.upper()} | 维度轴: {self.features}"
+            f"🧪 [PriorGMMEx] 实验性内核加载成功 | 模式: {self.dim_mode.upper()} | 算法: {self.cluster_algo.upper()} | 维度轴: {self.features}"
         )
 
     def _apply_adaptive_centering(
@@ -172,25 +178,54 @@ class PriorGMMEx:
         # --------------------------------==================--------------------------------
         # 4. 稳健密度修剪与星团核心先验模型 (Cluster Model)
         # --------------------------------==================--------------------------------
-        db = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(
-            X_seeds_scaled
-        )
+        if self.cluster_algo == "hdbscan":
+            db = HDBSCAN(
+                min_cluster_size=self.hdbscan_min_cluster_size,
+                min_samples=self.hdbscan_min_samples,
+                cluster_selection_epsilon=self.hdbscan_eps
+            ).fit(X_seeds_scaled)
+            algo_name = "HDBSCAN"
+        else:
+            db = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(
+                X_seeds_scaled
+            )
+            algo_name = "DBSCAN"
+            
         labels = db.labels_
+        
+        # 🏷️ 无论是否触发防护机制，先记录原始聚类结果以便后续导出分析
+        df_seeds_classified = df_seeds.copy()
+        df_seeds_classified['density_status'] = 'noise'
 
         if np.all(labels == -1):
             self.logger.warning(
-                f"⚠️ [内核拦截] DBSCAN 发生高维密度溃缩。将跳过密度修剪，回退为全量种子星构建分布。"
+                f"⚠️ [内核拦截] {algo_name} 发生高维密度溃缩。将跳过密度修剪，回退为全量种子星构建分布。"
             )
             X_core = X_seeds_scaled
         else:
             unique_labels, counts = np.unique(labels[labels != -1], return_counts=True)
-            if len(unique_labels) == 0:
+            n_seeds = len(X_seeds_scaled)
+            
+            # 找到最大的聚类
+            best_cluster_idx = np.argmax(counts) if len(counts) > 0 else -1
+            n_best = counts[best_cluster_idx] if best_cluster_idx != -1 else 0
+            
+            # 🛡️ 引入拦截防护机制：如果核心样本占比低于 20%，视为“过度清洗”或“密度溃缩”
+            if n_best < (n_seeds * 0.2):
+                self.logger.warning(
+                    f"⚠️ [内核警告] {algo_name} 拦截过于激进 ({n_best}/{n_seeds})，"
+                    f"可能发生密度溃缩。自动启动防护机制：改用全量种子星构建先验。"
+                )
                 X_core = X_seeds_scaled
             else:
-                best_cluster = unique_labels[np.argmax(counts)]
-                X_core = X_seeds_scaled[labels == best_cluster]
+                best_cluster = unique_labels[best_cluster_idx]
+                cluster_mask = labels == best_cluster
+                X_core = X_seeds_scaled[cluster_mask]
+                # 标记该簇为核心成员
+                df_seeds_classified.loc[df_seeds_classified.index[cluster_mask], 'density_status'] = 'core'
+
                 self.logger.info(
-                    f"🎯 [内核拦截] DBSCAN 完成：识别到噪声 {np.sum(labels == -1)} 颗，提取核心样本 {len(X_core)} 颗。"
+                    f"🎯 [内核拦截] {algo_name} 完成：识别到噪声 {np.sum(labels == -1)} 颗，提取核心样本 {len(X_core)} 颗。"
                 )
 
         cluster_model = GaussianMixture(
@@ -208,6 +243,7 @@ class PriorGMMEx:
             n_core_samples=len(X_core),
             dim_mode=self.dim_mode,
             features_used=self.features,
+            df_seeds_classified=df_seeds_classified,
             center_coords=center_coords,
         )
 

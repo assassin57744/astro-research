@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import logging
 from dataclasses import dataclass
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, HDBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 from utils.decorators import astro_checkpoint  # 1. 导入装饰器
@@ -22,6 +22,7 @@ class GMMModelParams:
     field_model: GaussianMixture
     scaler: StandardScaler
     n_core_samples: int
+    df_seeds_classified: pd.DataFrame = None
     center_coords: tuple = (0.0, 0.0)
 
 class PriorGMM:
@@ -47,10 +48,14 @@ class PriorGMM:
         self.features = feature_map.get(self.dim_mode, feature_map["3d"])
         
         # DBSCAN 超参数，用于从种子星提取核心
+        self.cluster_algo = self.config.get("cluster_algo", "dbscan").lower()
         self.dbscan_eps = self.config.get("dbscan_eps", 0.3)
         self.dbscan_min_samples = self.config.get("dbscan_min_samples", 10)
+        self.hdbscan_min_cluster_size = self.config.get("hdbscan_min_cluster_size", 15)
+        self.hdbscan_min_samples = self.config.get("hdbscan_min_samples", None)
+        self.hdbscan_eps = self.config.get("hdbscan_cluster_selection_epsilon", 0.0)
 
-        self.logger.info(f"PriorGMM 初始化完成 (维度: {self.dim_mode.upper()}, 特征: {self.features})")
+        self.logger.info(f"PriorGMM 初始化完成 (维度: {self.dim_mode.upper()}, 算法: {self.cluster_algo.upper()}, 特征: {self.features})")
 
     def _preprocess_5d(self, df, center=None):
         """[私有方法] 处理 5D 坐标偏移，消除绝对坐标值对标准化的影响。"""
@@ -105,17 +110,41 @@ class PriorGMM:
 
         # 4. 训练星团核心模型 (Cluster Model)
         X_seeds_scaled = scaler.transform(df_seeds_proc[self.features])
-        db = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(X_seeds_scaled)
+        if self.cluster_algo == "hdbscan":
+            db = HDBSCAN(
+                min_cluster_size=self.hdbscan_min_cluster_size,
+                min_samples=self.hdbscan_min_samples,
+                cluster_selection_epsilon=self.hdbscan_eps
+            ).fit(X_seeds_scaled)
+            algo_name = "HDBSCAN"
+        else:
+            db = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(X_seeds_scaled)
+            algo_name = "DBSCAN"
 
-        self.logger.info(f"DBSCAN 聚类结果: {np.unique(db.labels_, return_counts=True)} (标签: 颗数)")
+        self.logger.info(f"{algo_name} 聚类结果: {np.unique(db.labels_, return_counts=True)} (标签: 颗数)")
         
-        X_core = X_seeds_scaled[db.labels_ != -1]
-        n_noise = np.sum(db.labels_ == -1)
-        self.logger.info(f"DBSCAN 完成: 提取核心 {len(X_core)} 颗, 识别噪声 {n_noise} 颗")
+        labels = db.labels_
+        n_noise = np.sum(labels == -1)
+        n_seeds = len(X_seeds_scaled)
 
-        if len(X_core) < self.dbscan_min_samples:
-            self.logger.error(f"核心样本不足: 找到 {len(X_core)} < 最小阈值 {self.dbscan_min_samples}")
-            raise ValueError(f"DBSCAN 无法在 {self.dim_mode} 空间找到足够的聚类核心星。")
+        # 🏷️ 准备种子星分类结果用于记录到 Master 表
+        df_seeds_classified = df_seeds.copy()
+        df_seeds_classified['density_status'] = 'noise'
+        # 将非噪声点标记为 core (这里简化处理，非 -1 即为核心)
+        df_seeds_classified.loc[df_seeds_classified.index[labels != -1], 'density_status'] = 'core'
+
+        # 🛡️ 增加拦截防护判断
+        n_core_found = np.sum(labels != -1)
+        if n_core_found < (n_seeds * 0.2):
+            self.logger.warning(f"⚠️ [内核防护] {algo_name} 提取核心比例过低 ({n_core_found}/{n_seeds})，回退至全量种子。")
+            X_core = X_seeds_scaled
+        else:
+            X_core = X_seeds_scaled[labels != -1]
+            self.logger.info(f"{algo_name} 完成: 提取核心 {len(X_core)} 颗, 识别噪声 {n_noise} 颗")
+
+        if len(X_core) < 5:  # 极低保底限制
+            self.logger.error(f"核心样本不足: 找到 {len(X_core)} 颗星")
+            raise ValueError(f"算法无法在 {self.dim_mode} 空间找到足够的聚类核心星。")
 
         cluster_model = GaussianMixture(n_components=1, covariance_type="full")
         cluster_model.fit(X_core)
@@ -127,6 +156,7 @@ class PriorGMM:
             field_model=field_model,
             scaler=scaler,
             n_core_samples=len(X_core),
+            df_seeds_classified=df_seeds_classified,
             center_coords=center
         )
 
