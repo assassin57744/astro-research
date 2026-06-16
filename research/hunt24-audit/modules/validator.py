@@ -331,7 +331,7 @@ class UnifiedMemberValidator:
 
         passed_df = df[df["phys_audit_pass"]]
         if not passed_df.empty:
-            self.logger.debug(
+            self.logger.info(
                 f"📈 [PhysAudit] 统计: 通过率 {len(passed_df)}/{len(df)} | "
                 f"PM残差均值: {passed_df['pm_residual'].mean():.2f} | "
                 f"CMD残差均值: {passed_df['cmd_residual'].mean():.2f}"
@@ -492,7 +492,7 @@ class UnifiedMemberValidator:
             f"{'='*70}"
         ]
         for line in msg:
-            self.logger.debug(line)
+            self.logger.info(line)
 
     def validate_member(self, star_row) -> bool:
         """向后兼容单星测光与动力学快检接口"""
