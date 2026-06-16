@@ -269,51 +269,6 @@ class AstroWorkflow:
 
         return v_result
 
-    def align_reference_to_cluster(self, k_ref):
-        """基于别名注册表从参考星表中提取特定星团的成员子集。
-
-        Args:
-            k_ref (str): 参考星表键值。
-
-        Returns:
-            str: 提取后的 stx 视图名称。
-        """
-        cluster_info = CLUSTERS.get(self.target_cluster)
-        if not cluster_info:
-            self.logger.error(
-                f"❌ config.py 中未找到 TARGET_CLUSTER_ID: {self.target_cluster}"
-            )
-            return None
-
-        names_to_search = [cluster_info["NAME"]]
-        if "ALIAS_NAME" in cluster_info:
-            names_to_search.extend(cluster_info["ALIAS_NAME"].values())
-
-        # 3. 格式化为 SQL 的 IN 子句内容: 'Pleiades', 'Melotte_22'
-        in_values = ", ".join([f"'{n}'" for n in names_to_search])
-
-        # 4. 获取数据血缘配置
-        ref_cfg = DATA[k_ref]
-        v_ref = ref_cfg["std_view"]
-        v_result = ref_cfg["stx_view"]
-
-        sql = f"SELECT * FROM {v_ref} WHERE {STD_COLS['CLUSTER']} IN ({in_values})"
-        try:
-            self.db.register_view_from_sql(v_result, sql)
-            count = self.db.query(f"SELECT COUNT(*) FROM {v_result}").iloc[0, 0]
-
-            if count > 0:
-                self.logger.info(f"✅ 提取成功: {k_ref} -> {v_result}")
-                self.logger.info(f"   - 匹配别名: [{in_values}]")
-                self.logger.info(f"   - 成员数量: {count}")
-            else:
-                self.logger.warning(
-                    f"⚠️ 警告: 在 {k_ref} 中未找到匹配 {in_values} 的任何记录"
-                )
-        except Exception as e:
-            self.logger.error(f"❌ 提取参考星表子集时发生异常: {str(e)}")
-            raise e
-        return v_result
 
     def data_standardize(self, idx_data, cfg_data, manifest, ctx=None):
         """核心标准化调度算法。
@@ -326,16 +281,17 @@ class AstroWorkflow:
         """
         self.logger.info(f"🚀 正在执行数据标准化, 当前源: {idx_data}")
         
-        # 1. 动态命名对齐：检查中央映射表以覆盖 CAT_NAME
+        # 🛡️ 核心重构：确保 CAT_NAME 的解析优先级
         local_ctx = ctx.copy() if ctx else {}
         cluster_id = local_ctx.get("id")
         
+        # 默认 CAT_NAME 使用星团的 ID_NAME 或 NAME
+        local_ctx.setdefault("CAT_NAME", local_ctx.get("ID_NAME", local_ctx.get("NAME")))
+
         if cluster_id:
-            # 从 config 模块读取中央转换矩阵
             adapter = getattr(cfg, "CATALOG_NAMING_ADAPTER", {})
             override_name = adapter.get(idx_data, {}).get(cluster_id)
             if override_name:
-                self.logger.debug(f" [Naming] 识别到文献名称冲突: {idx_data} 对 {cluster_id} 使用 '{override_name}'")
                 local_ctx["CAT_NAME"] = override_name
 
         actions = cfg_data.get("actions", {})
