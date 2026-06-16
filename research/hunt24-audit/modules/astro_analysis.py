@@ -154,6 +154,38 @@ class AstroAnalyzer:
             plt.tight_layout()
             self._save_plot(fig, "VPD", key_ref)
 
+    def plot_audit_status_on_vpd(self, t_master, t_source):
+        """
+        [混合模式专用] 绘制基于审计状态着色的 VPD 图。
+        不再需要外部管理视图，直接根据 Master 表中的 audit_status 标签渲染。
+        """
+        # 1. 自动增强物理参数
+        df = self.db.enrich_with_gaia_data(t_master, t_source)
+        
+        # 2. 仅保留参与过审计的样本
+        df = df[df['audit_status'].notna()]
+        
+        fig, ax = plt.subplots(figsize=(8, 7))
+        
+        # 定义状态着色映射
+        status_colors = {
+            "Confirmed Member": "limegreen",
+            "New Candidate": "gold",
+            "Literature Only": "royalblue",
+            "Contamination": "lightgray"
+        }
+        
+        for status, color in status_colors.items():
+            sub = df[df['audit_status'] == status]
+            ax.scatter(sub['pmra'], sub['pmdec'], c=color, label=f"{status} ({len(sub)})", 
+                       s=20 if status != 'Contamination' else 5, alpha=0.8, edgecolors='none')
+            
+        ax.set_xlabel("pmra (mas/yr)")
+        ax.set_ylabel("pmdec (mas/yr)")
+        ax.legend()
+        ax.set_title(f"VPD Analysis by Audit Status - {self.target_cluster}")
+        self._save_plot(fig, "Audit_VPD")
+
     def plot_cmd(self, v_target, t_source=None, key_ref=None, ax=None):
         """
         绘制颜色-星等图 (Color-Magnitude Diagram, CMD)。
@@ -402,58 +434,67 @@ class AstroAnalyzer:
             "missing_count": misses,
         }
 
-    def plot_spatial_comparison(self, v_target, key_ref=None, show_radius=True):
+    def plot_spatial_comparison(self, t_master, key_ref=None, show_radius=True):
         """
         [整合接口] 绘制空间分布对比图。
 
-        统一了背景星、文献成员和我方新发现候选者的空间可视化。
+        [混合模式] 利用 Master 表的 x_match_tag 标签进行可视化：
+        - 蓝色: Matched (双方共识成员)
+        - 橙色: PG Only (算法新发现)
+        - 灰色: Ref Only (文献收录但算法未发现)
         """
         if key_ref is None:
             key_ref = self.target_category
 
-        ref_table = DATA[key_ref]["stx_view"]
-        self.logger.info(f"正在生成空间分布对比图: {v_target} vs {ref_table}")
-
         seed_idx = cfg.CLUSTERS[self.target_cluster]["SEED_IDX"]
         gaia_table = DATA[seed_idx]["stx_view"]
-        df = self.db.enrich_with_gaia_data(v_target, gaia_table)
-        df_ref = self.db.query(f"SELECT * FROM {ref_table}")
+        
+        self.logger.info(f"🚀 正在生成空间分布对比图 (基于 Master 状态机): {t_master}")
+
+        # 1. 增强物理参数并过滤出参与交叉审计的星源
+        df = self.db.enrich_with_gaia_data(t_master, gaia_table)
+        col_tag = cfg.MASTER_COLS['X_MATCH']
+        
+        if col_tag not in df.columns or df[col_tag].isna().all():
+            self.logger.warning("⚠️ Master 表中未发现交叉审计标签，请先执行 prepare_audit_data。")
+            return
 
         fig, ax = plt.subplots(figsize=(10, 8))
 
-        # 核心逻辑：区分“共有”与“新增”
-        col_id = STD_COLS["ID"]
-        mine_ids = df[col_id].astype("Int64")
-        ref_ids = df_ref[col_id].astype("Int64")
-
-        df_new = df[~mine_ids.isin(ref_ids)]
-        df_common = df[mine_ids.isin(ref_ids)]
-
-        # 绘图层
+        # 2. 分层绘制：确保图层叠放顺序 (Ref Only 在最底层)
+        # 2.1 文献孤儿 (Ref Only)
+        df_ref_only = df[df[col_tag] == 'Ref Only']
         ax.scatter(
-            df_ref["ra"],
-            df_ref["dec"],
+            df_ref_only["ra"],
+            df_ref_only["dec"],
             c="lightgray",
-            s=1,
-            alpha=0.5,
-            label=f"Ref: {key_ref}",
+            s=8,
+            alpha=0.4,
+            label=f"Ref Only ({len(df_ref_only)})",
         )
+        
+        # 2.2 双方共识 (Matched)
+        df_matched = df[df[col_tag] == 'Matched']
         ax.scatter(
-            df_common["ra"],
-            df_common["dec"],
+            df_matched["ra"],
+            df_matched["dec"],
             c="royalblue",
-            s=3,
-            label=f"Common (n={len(df_common)})",
+            s=12,
+            alpha=0.7,
+            label=f"Matched ({len(df_matched)})",
         )
+        
+        # 2.3 算法发现 (PG Only)
+        df_new = df[df[col_tag] == 'PG Only']
         ax.scatter(
             df_new["ra"],
             df_new["dec"],
             c="orangered",
-            s=10,
+            s=25,
             edgecolors="white",
-            linewidths=0.3,
+            linewidths=0.5,
             zorder=5,
-            label=f"New Candidates (n={len(df_new)})",
+            label=f"PG Only ({len(df_new)})",
         )
 
         if show_radius:

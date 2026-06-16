@@ -324,6 +324,7 @@ class AstroDB:
             self.con.execute(
                 f"COPY {table_name} TO '{output_path.as_posix()}' (FORMAT {format.upper()})"
             )
+        self.logger.info(f"💾 导出资产: {output_path.name} ({format.upper()}) -> {output_path.parent}")
 
     def batch_export(self, table_names, export_dir=cfg.EXPORT_DIR):
         for name in table_names:
@@ -550,6 +551,53 @@ class AstroDB:
             self.logger.info(f"📦 已物化物理表: {table_name} (行数: {count})")
         except Exception as e:
             self.logger.error(f"❌ 物化物理表 {table_name} 失败: {e}")
+
+    def init_master_table(self, table_name, df_base):
+        """初始化 Master 状态宽表。"""
+        self.logger.info(f"🏗️  [Master] 初始化状态追踪表: {table_name}")
+        df_init = df_base[[cfg.STD_COLS['ID']]].copy()
+        self.register_table_from_df(table_name, df_init)
+
+        # 🚀 [核心修复] 定义 Master 表字段的物理类型映射
+        # 默认全部为 VARCHAR，但算法概率列必须为 DOUBLE 以支持后续的数值比较和逻辑运算
+        type_map = {
+            cfg.MASTER_COLS['GMM_PROB']: "DOUBLE",
+        }
+
+        # 预添加标准状态列
+        for col in cfg.MASTER_COLS.values():
+            col_type = type_map.get(col, "VARCHAR")
+            self.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {col_type}")
+
+    def tag_master_table(self, master_name, df_updates, join_col='id'):
+        """[混合模式核心] 执行增量标签/结果回灌。"""
+        if df_updates is None or df_updates.empty:
+            return
+
+        # 🚀 [安全性修复] 获取目标表已有的列，仅更新匹配的列，防止物理参数（如 ra/dec）被误灌回 Master 表导致报错
+        dest_cols = self.con.execute(f"PRAGMA table_info('{master_name}')").df()['name'].tolist()
+        
+        update_cols = [c for c in df_updates.columns if c != join_col and c in dest_cols]
+        
+        if not update_cols:
+            self.logger.debug(f"⚠️ [Tag] {master_name} 没有匹配的列需要更新 (跳过)")
+            return
+
+        temp_name = f"tmp_tag_{int(time.time())}_{random.randint(0, 1000)}"
+        self.register_view_from_df(temp_name, df_updates)
+        
+        set_clause = ", ".join([f"{c} = src.{c}" for c in update_cols])
+        
+        sql = f"""
+            UPDATE {master_name} AS dest
+            SET {set_clause}
+            FROM {temp_name} AS src
+            WHERE dest.{join_col} = src.{join_col}
+        """
+        try:
+            self.execute(sql)
+        finally:
+            self.con.unregister(temp_name)
 
     def _fetch_simbad_data(self, params):
         """

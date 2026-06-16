@@ -72,6 +72,15 @@ STD_COLS = {
     "CLUSTER": "cluster",
 }
 
+# Master 表专用标签列名
+MASTER_COLS = {
+    "SEED_TYPE": "seed_type",   # core / noise
+    "GMM_PROB": "prob",         # 算法计算概率
+    "X_MATCH": "x_match_tag",   # Matched / PG_Only / Ref_Only
+    "AUDIT": "audit_status",    # Confirmed / Candidate / Contamination
+    "AUDIT_NOTE": "audit_note", # 审计备注（如：视差偏离、暗端漏检等）
+}
+
 class TMPL:
     # --- 数据库表/视图名 ---
     T_RAW = "raw_{idx}"  # L1: 原始物理表
@@ -83,6 +92,7 @@ class TMPL:
 
     # --- 算法结果与分析 ---
     T_RES_SG = "pgmm_{cluster}_{category}_{mode}"  # SeedGMM 原始产出
+    T_MASTER = "master_{cluster}_{category}_{mode}" # [混合模式] 状态跟踪宽表
     V_RES_SUB = "v_pgmm_{cluster}_{category}_{mode}_{tag}"  # 结果子集视图名模板, tag说明子集的特征(如 golden_members)
     V_ALL = "v_wide_{cluster}_{category}_{mode}"  # 集成所有参考星表的分析大宽表
     V_DIFF = "v_diff_{cluster}_{category}_{mode}_vs_{idx}"  # 分歧源 (与特定星表比对)
@@ -103,6 +113,9 @@ class TMPL:
     FILE_PLOT = "{cluster}_{category}_{mode}_{prefix}_{timestamp}.png"  # 诊断图表文件名
     FILE_NEW_CANDIDATES = "new_candidates_vs_{ref}.csv"  # 新候选者验证清单
     FILE_EXPORT_BASE = "{cluster}_{category}_{mode}"  # 导出文件名的基本前缀
+    FILE_SEEDS = "{base}_seeds"  # 全量种子星导出文件名模板
+    FILE_SEEDS_CORE = "{base}_seeds_core"  # 核心种子星导出文件名模板
+    FILE_SEEDS_NOISE = "{base}_seeds_noise"  # 噪声种子星导出文件名模板
     FILE_CROSS_SUMMARY = "{base}_cross_summary"  # 交叉比对汇总文件名
     FILE_DEEP_AUDIT = "{base}_deep_audit"  # 深度审计报告文件名
     FILE_FINAL_REPORT = "{base}_final_report.txt"  # 最终执行摘要文件名

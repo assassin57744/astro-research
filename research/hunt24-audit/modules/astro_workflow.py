@@ -57,6 +57,11 @@ class AstroWorkflow:
         self.mode = mode
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(db_instance, "data_manifest", {})
+        self.t_master = cfg.TMPL.T_MASTER.format(
+            cluster=self.target_cluster.lower(),
+            category=self.target_category,
+            mode=self.mode
+        )
 
     def _process_conflicts(self, dr2_view, bridge_view):
         """[私有方法] 检测并打印 DR3 ID 与 DR2 ID 之间的多对一冲突。
@@ -359,11 +364,19 @@ class AstroWorkflow:
         # 🚀 优化：仅针对当前运行模式所需的特征执行 dropna
         # 这样在 2D 模式下，即便视差 (plx) 缺失，只要自行 (pm) 还在，种子星就不会被丢弃。
         if required_features:
-            df_seeds = df_raw.dropna(subset=required_features).copy()
+            # 🚀 [Bugfix] 仅对当前存在的特征执行清洗。
+            # 派生特征（如 l, b, U, V, W）此时尚未生成，将在 Transformer 转换后的 _defensive_nan_purge 中处理
+            available_features = [f for f in required_features if f in df_raw.columns]
+            df_seeds = df_raw.dropna(subset=available_features).copy()
         else:
             df_seeds = df_raw.dropna().copy()
             
         self.logger.info(f"从数据源 [{v_src}] 提取了 {len(df_seeds)} 颗种子星")
+
+        # 🚀 [混合模式] 初始化种子标签：先全部标记为 'raw_seed'
+        df_tag = df_seeds[[cfg.STD_COLS['ID']]].copy()
+        df_tag['seed_type'] = 'raw_seed'
+        self.db.tag_master_table(self.t_master, df_tag)
         return df_seeds
 
     def _get_target(self, idx_data, cfg_src, manifest, ctx=None):
@@ -416,39 +429,41 @@ class AstroWorkflow:
 
         Args:
             t_main_results (str): 算法结果总表名称。
-
-        Returns:
-            dict: 包含处理状态、视图名及候选者统计量的字典。
         """
-        self.logger.info(f"[{self.target_cluster}] 启动 post_pipeline: 正在生成成员子集视图...")
+        self.logger.info(f"[{self.target_cluster}] 启动 post_pipeline: 执行主表标签状态同步...")
         try:
+            # 1. 动态增加成员分类标签列 (如果不存在)
+            self.db.execute(f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE")
+            self.db.execute(f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE")
+
+            # 2. 直接在 Master 表中执行状态标记
             condi_golden = f"{STD_COLS['PROB']} >= {GOLDEN_SAMPLE_THRESHOLD}"
-            v_golden = self.get_subset_view(
-                t_main_results, tag="golden_members", conditions=condi_golden
-            )
-
             condi_candidates = f"{STD_COLS['PROB']} > {MEMBER_SAMPLE_THRESHOLD}"
-            v_candidates = self.get_subset_view(
-                t_main_results, tag="candidates", conditions=condi_candidates
-            )
 
+            self.db.execute(f"UPDATE {self.t_master} SET is_golden = TRUE WHERE {condi_golden}")
+            self.db.execute(f"UPDATE {self.t_master} SET is_candidate = TRUE WHERE {condi_candidates}")
+
+            # 3. 统计摘要
             stats_sql = f"""
                 SELECT 
-                    count(*) FILTER (WHERE {condi_golden} ) as n_golden,
-                    count(*) FILTER (WHERE {condi_candidates} ) as n_candidates
-                FROM {t_main_results}
+                    count(*) FILTER (WHERE is_golden = TRUE) as n_golden,
+                    count(*) FILTER (WHERE is_candidate = TRUE) as n_candidates
+                FROM {self.t_master}
             """
             stats = self.db.execute(stats_sql).fetchone()
 
             self.logger.info("=" * 60)
-            self.logger.info(f"📊 [{self.target_cluster}] Post-Pipeline 后处理数据审计摘要:")
-            self.logger.info(f"  🔹 金种子视图 ({v_golden}): {stats[0]} 颗")
-            self.logger.info(f"  🔹 候选者视图 ({v_candidates}): {stats[1]} 颗")
+            self.logger.info(f"📊 [{self.target_cluster}] Master 表后处理标签同步完成:")
+            self.logger.info(f"  🔹 高置信金种子星 (is_golden): {stats[0]} 颗")
+            self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {stats[1]} 颗")
             self.logger.info("=" * 60)
+
+            # 为后续步骤提供一个逻辑上的“候选者”入口视图
+            v_candidates = f"v_candidates_{self.target_cluster.lower()}"
+            self.db.register_view_from_sql(v_candidates, f"SELECT * FROM {self.t_master} WHERE is_candidate = TRUE")
 
             return {
                 "status": "success",
-                "v_golden": v_golden,
                 "v_candidates": v_candidates,
                 "stats": {"n_golden": stats[0], "n_candidates": stats[1]},
             }
@@ -474,19 +489,38 @@ class AstroWorkflow:
             }
 
         self.logger.info(f"⚡ 发现审计目标表 '{v_target}'，开始交叉比对...")
+        
+        # 🚀 [混合模式重构] 直接在 Master 表更新 x_match_tag
+        col_x = cfg.MASTER_COLS['X_MATCH']
+        sql_cross = f"""
+            SELECT 
+                m.id,
+                CASE 
+                    WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} AND h.id IS NOT NULL THEN 'Matched'
+                    WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} AND h.id IS NULL     THEN 'PG Only'
+                    WHEN (m.prob <= {cfg.MEMBER_SAMPLE_THRESHOLD} OR m.prob IS NULL) AND h.id IS NOT NULL THEN 'Ref Only'
+                END as {col_x}
+            FROM {self.t_master} m
+            LEFT JOIN {v_target} h ON m.id = h.id
+            WHERE m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} OR h.id IS NOT NULL
+        """
+        df_x = self.db.query(sql_cross)
+        self.db.tag_master_table(self.t_master, df_x)
 
-        v_cross_audit = self._execute_cross_match_join(v_source, v_target)
+        # 为深度审计准备输入视图（仅针对 PG Only 部分）
+        v_audit_target = f"v_tmp_audit_pg_only"
+        self.db.register_view_from_sql(v_audit_target, f"SELECT * FROM {self.t_master} WHERE {col_x} = 'PG Only'")
 
-        audit_views = self._create_audit_subviews(v_cross_audit)
-
-        stats_cross = self._calculate_audit_stats(audit_views)
-
-        self._log_audit_summary(v_target, v_cross_audit, audit_views, stats_cross)
+        # 统计并日志
+        st_sql = f"SELECT {col_x}, count(*) FROM {self.t_master} WHERE {col_x} IS NOT NULL GROUP BY {col_x}"
+        stats_raw = self.db.execute(st_sql).fetchall()
+        stats_cross = {row[0]: row[1] for row in stats_raw}
+        self.logger.info(f"📊 [交叉审计] Matched: {stats_cross.get('Matched', 0)} | PG Only: {stats_cross.get('PG Only', 0)} | Ref Only: {stats_cross.get('Ref Only', 0)}")
 
         return {
             "status": "success",
-            "audit_views": audit_views,
-            "stats": {"cross_audit_counts": stats_cross},
+            "v_audit_target": v_audit_target,
+            "stats": stats_cross
         }
 
     def _verify_audit_target_exists(self, v_target: str) -> bool:
@@ -655,8 +689,16 @@ class AstroWorkflow:
             self._warm_up_literature_cache(validator, v_audit_input)
 
             audit_report_df = validator.run_full_audit_ex(v_audit_input)
+            
+            # 🚀 [混合模式重构] 审计结果回灌 Master 表
+            self.logger.info(f"📥 正在将深度审计结果同步至 Master 表...")
+            self.db.tag_master_table(self.t_master, audit_report_df)
 
-            return self._save_audit_report(target, audit_report_df)
+            # 🚀 [混合模式] 审计完成后，返回 Master 表的一个逻辑视图作为“审计报告”
+            # 这样既不需要创建新物理表，又能保证返回的内容仅包含审计过的星源
+            v_report = f"{self.t_master}_audited_report"
+            self.db.register_view_from_sql(v_report, f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL")
+            return v_report
 
         except Exception as e:
             self.logger.error(f"❌ [Workflow] 审计流程运行期间发生严重故障: {str(e)}", exc_info=True)
@@ -832,34 +874,6 @@ class AstroWorkflow:
         )
         return gmm_cfg, current_mode, required_features
 
-    def _load_raw_astrometry_data(
-        self, ctx_cluster, required_features=None
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """[私有方法] 原子拆解：加载全域天区与种子星原始数据。
-
-        Returns:
-            tuple: (全域数据 DataFrame, 种子星数据 DataFrame)。
-        """
-        field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
-        df_target_raw = self._get_target(
-            idx_data=field_idx,
-            cfg_src=DATA[field_idx],
-            manifest=self.manifest,
-            ctx=ctx_cluster,
-        )
-        self.logger.info(f"目标天区 source 原始数量: {len(df_target_raw)}")
-
-        seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
-        df_seeds_raw = self._get_seeds(
-            idx_data=seed_idx,
-            cfg_src=DATA[seed_idx],
-            manifest=self.manifest,
-            ctx=ctx_cluster,
-            required_features=required_features
-        )
-        self.logger.info(f"目标天区 seeds 原始数量: {len(df_seeds_raw)}")
-        return df_target_raw, df_seeds_raw
-
     def _transform_and_bridge_features(
         self, df_raw: pd.DataFrame, ctx_cluster, mode: str, required_features: list[str]
     ) -> pd.DataFrame:
@@ -965,7 +979,28 @@ class AstroWorkflow:
         )
 
         self.logger.info("📡 正在准备特征工程输入数据...")
-        df_target_raw, df_seeds_raw = self._load_raw_astrometry_data(ctx_cluster)
+        
+        # 🚀 [核心修复] 调整初始化顺序：必须先初始化 Master 表，因为 _get_seeds 会尝试更新它
+        field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
+        df_target_raw = self._get_target(
+            idx_data=field_idx,
+            cfg_src=DATA[field_idx],
+            manifest=self.manifest,
+            ctx=ctx_cluster,
+        )
+        
+        # 🚀 [混合模式] 步骤 1: 初始化主表
+        self.db.init_master_table(self.t_master, df_target_raw)
+
+        # 步骤 2: 获取种子星数据 (此时 tag_master_table 可以安全执行)
+        seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
+        df_seeds_raw = self._get_seeds(
+            idx_data=seed_idx,
+            cfg_src=DATA[seed_idx],
+            manifest=self.manifest,
+            ctx=ctx_cluster,
+            required_features=required_features
+        )
 
         self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
         df_target_ext = self._transform_and_bridge_features(
@@ -985,16 +1020,16 @@ class AstroWorkflow:
 
         self.logger.info(f"🔥 开始驱动 {kernel_name} 引擎计算...")
         params = engine.fit(df_seeds_final, df_target_final)
+        
+        # 🚀 [混合模式] 步骤 2: 标记种子星类型 (Core/Noise)
+        if hasattr(params, 'df_seeds_classified'):
+            updates = params.df_seeds_classified[[cfg.STD_COLS['ID'], 'seed_type']]
+            self.db.tag_master_table(self.t_master, updates)
+
         df_prob = engine.predict(df_target_final, params)
+        # 🚀 [混合模式] 步骤 3: 直接将概率回灌 Master 表，不再创建独立的 pgmm_xxx 表
+        self.db.tag_master_table(self.t_master, df_prob)
 
-        cluster_id = self.target_cluster.lower()
-        v_res_pg = cfg.TMPL.T_RES_SG.format(
-            cluster=cluster_id, 
-            category=self.target_category, 
-            mode=current_mode
-        )
-        self.db.register_table_from_df(v_res_pg, df_prob)
-        self.db.save_to_warehouse(v_res_pg)
-
-        self.logger.debug(df_prob.head(5))
-        return v_res_pg
+        # 🚀 [混合模式] 固化 Master 表当前状态并作为结果返回
+        self.db.save_to_warehouse(self.t_master)
+        return self.t_master

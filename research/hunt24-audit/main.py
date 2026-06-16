@@ -126,9 +126,7 @@ def _ingest_and_prepare_data(
 
 def _execute_gmm_algorithm(wf: AstroWorkflow, ctx_cluster: dict) -> str:
     """执行核心 GMM 成员识别算法。"""
-    logger.info(
-        f"🧠 [3/5] 启动 GMM 成员识别内核 ({wf.mode} 模式)..."
-    )
+    logger.info(f"🧠 [3/5] 启动 GMM 成员识别内核 ({wf.mode} 模式)...")
     t_result = wf.run_pipeline(ctx_cluster)
     logger.info(f"✨ 算法推断完成，结果表: {t_result}")
     return t_result
@@ -164,26 +162,27 @@ def _perform_cross_audit(
         # 如果交叉比对不成功，深度审计将无法进行，返回默认值
         return audit_res, None, {}
 
-    gmm_only_key = f"v_{cfg.IDX_GMM}_only"
-    v_audit_target = audit_res.get("audit_views", {}).get(gmm_only_key)
+    v_audit_target = audit_res.get("v_audit_target")
 
     v_final_audited = None
     deep_stats = {}
-    if not v_audit_target:
-        logger.warning(f"⚠️ 未找到名为 {gmm_only_key} 的审计视图，跳过深度审计。")
+    if not v_audit_target or audit_res.get("stats", {}).get("PG Only", 0) == 0:
+        logger.warning("⚠️ 未找到算法独有候选 (PG Only)，跳过深度审计。")
     else:
         logger.info(f"🔍 准备深度审计，目标视图: {v_audit_target}")
         v_final_audited = wf.run_audit(target=v_audit_target)
 
         # 获取深度审计统计汇总
         if v_final_audited:
-            st_sql = f"SELECT audit_status, count(*) FROM {v_final_audited} GROUP BY audit_status"
+            # 此时 v_final_audited 已经是 Master 表的审计子集视图
+            st_sql = f"SELECT audit_status, count(*) FROM {v_final_audited} WHERE audit_status IS NOT NULL GROUP BY audit_status"
             deep_stats = dict(wf.db.con.execute(st_sql).fetchall())
     return audit_res, v_final_audited, deep_stats
 
 
 def _export_pipeline_results(
     db: AstroDB,
+    wf: AstroWorkflow,
     audit_res: dict,
     v_final_audited: str,
     target_cluster_id: str,
@@ -199,16 +198,14 @@ def _export_pipeline_results(
     )
 
     # A. 导出交叉比对汇总宽表：包含 Gaia Source ID, 算法概率以及双方一致性分类标签
-    v_cross_total = audit_res.get("audit_views", {}).get("v_cross_audit_total")
-    if v_cross_total:
-        db.export_table(
-            v_cross_total,
-            filename=cfg.TMPL.FILE_CROSS_SUMMARY.format(base=export_base),
-            format="csv",
-            export_dir=cfg.RESULTS_DIR,
-        )
+    db.export_table(
+        wf.t_master,
+        filename=cfg.TMPL.FILE_CROSS_SUMMARY.format(base=export_base),
+        format="csv",
+        export_dir=cfg.RESULTS_DIR,
+    )
 
-    # B. 导出深度审计详细报告：包含物理验证状态 (audit_status)、残差指标以及 SIMBAD 文献证据
+    # B. 导出深度审计详细报告：仅包含被深度校验过的样本（PG Only 集合）
     if v_final_audited:
         db.export_table(
             v_final_audited,
@@ -245,9 +242,10 @@ def _log_final_report(
     report_lines.append(f"      - 成员星候选总数: {p_stats.get('n_candidates', 0)}")
     report_lines.append(f"      - 高置信金种子星: {p_stats.get('n_golden', 0)}")
 
-    a_stats = audit_res.get("stats", {}).get("cross_audit_counts", {})
-    ref_missed = a_stats.get(f"{target_category}_only", 0)
-    matched = a_stats.get("matched", 0)
+    # 🚀 [混合模式] 更新统计键名以匹配 prepare_audit_data 中的 SQL 标签
+    a_stats = audit_res.get("stats", {})
+    ref_missed = a_stats.get("Ref Only", 0)
+    matched = a_stats.get("Matched", 0)
     ref_total = ref_missed + matched
     miss_rate = (ref_missed / ref_total * 100) if ref_total > 0 else 0
 
@@ -257,7 +255,7 @@ def _log_final_report(
         f"      - 算法漏检 (Recall/Missed): {ref_missed} 颗 (漏检率: {miss_rate:.2f}%)"
     )
     report_lines.append(
-        f"      - 算法独有候选 (PG Only):   {a_stats.get('pgmm_only', 0)}"
+        f"      - 算法独有候选 (PG Only):   {a_stats.get('PG Only', 0)}"
     )
 
     if deep_stats:
@@ -304,7 +302,48 @@ def _log_final_report(
         logger.error(f"❌ 无法保存最终报告副本: {e}")
 
 
-def run_pipeline(target_cluster_id: str, target_category: str, mode: str, db: AstroDB = None, skip_setup: bool = False):
+def _log_all_modes_comparison(all_results: list):
+    """记录并展示多模式算法运行的汇总对照报告。"""
+    if not all_results:
+        return
+
+    # 按照模式排序，确保对比展示有序
+    all_results.sort(key=lambda x: x["mode"])
+
+    logger.info("\n" + "═" * 125)
+    logger.info(
+        f" 🏆 [全模式算法绩效汇总对照表] - 目标星团: {all_results[0]['cluster']}"
+    )
+    logger.info("-" * 125)
+
+    header = (
+        f"{'MODE':<8} | {'CANDIDATES':<12} | {'GOLDEN':<10} | {'MATCHED':<10} | "
+        f"{'PG ONLY':<10} | {'RECALL':<12} | {'NEW DISCOVERY':<15} | {'PRECISION'}"
+    )
+    logger.info(header)
+    logger.info("-" * 125)
+
+    for res in all_results:
+        line = (
+            f"{res['mode']:<8} | {res['candidates']:<12} | {res['golden']:<10} | "
+            f"{res['matched']:<10} | {res['pg_only']:<10} | {res['recall']:>10.2f}% | "
+            f"{res['new_finds']:<15} | {res['precision']:>9.2f}%"
+        )
+        logger.info(line)
+
+    logger.info("═" * 125)
+    logger.info(
+        " 💡 注: RECALL 基于文献已知成员的找回率; PRECISION 基于算法独有源通过物理深度审计的比例。\n"
+    )
+
+
+def run_pipeline(
+    target_cluster_id: str,
+    target_category: str,
+    mode: str,
+    db: AstroDB = None,
+    skip_setup: bool = False,
+) -> dict:
     """
     驱动端到端的天文数据分析与审计管线。
 
@@ -335,7 +374,7 @@ def run_pipeline(target_cluster_id: str, target_category: str, mode: str, db: As
         )
 
         _export_pipeline_results(
-            db, audit_res, v_final_audited, target_cluster_id, target_category, mode
+            db, wf, audit_res, v_final_audited, target_cluster_id, target_category, mode
         )
 
         _log_final_report(
@@ -347,6 +386,35 @@ def run_pipeline(target_cluster_id: str, target_category: str, mode: str, db: As
             audit_res,
             deep_stats,
         )
+
+        # 7. 构造并返回绩效摘要用于多模式汇总对比
+        a_stats = audit_res.get("stats", {})
+        ref_missed = a_stats.get("Ref Only", 0)
+        matched = a_stats.get("Matched", 0)
+        ref_total = ref_missed + matched
+
+        summary = {
+            "cluster": target_cluster_id,
+            "mode": mode.upper(),
+            "candidates": v_all_audit_data.get("stats", {}).get("n_candidates", 0),
+            "golden": v_all_audit_data.get("stats", {}).get("n_golden", 0),
+            "matched": matched,
+            "pg_only": a_stats.get("PG Only", 0),
+            "recall": (matched / ref_total * 100) if ref_total > 0 else 0,
+            "new_finds": 0,
+            "precision": 0.0,
+        }
+        if deep_stats:
+            total_audited = sum(deep_stats.values())
+            new_finds = deep_stats.get("Confirmed Member", 0) + deep_stats.get(
+                "New Candidate", 0
+            )
+            summary["new_finds"] = new_finds
+            summary["precision"] = (
+                (new_finds / total_audited * 100) if total_audited > 0 else 0
+            )
+
+        return summary
 
     except Exception as e:
         logger.error(f"❌ 流水线在运行期间发生严重崩溃: {str(e)}", exc_info=True)
@@ -365,7 +433,12 @@ if __name__ == "__main__":
     )
 
     # 星团 ID (位置参数，运行管线模式时必填)
-    parser.add_argument("cluster", type=str, nargs='?', help="目标星团名称 (运行管线模式下必填, 例如: M45, M44, M67)")
+    parser.add_argument(
+        "cluster",
+        type=str,
+        nargs="?",
+        help="目标星团名称 (运行管线模式下必填, 例如: M45, M44, M67)",
+    )
 
     # 审计对象 (可选，缺省 hunt)
     parser.add_argument(
@@ -398,23 +471,21 @@ if __name__ == "__main__":
     # --- 资产维护命令组 ---
     maint_group = parser.add_argument_group("资产维护命令 (Maintenance)")
     maint_group.add_argument(
-        "--backup", 
-        action="store_true", 
-        help="手动备份 data/raw 目录至备份库 (保留 A/B 两代)"
+        "--backup",
+        action="store_true",
+        help="手动备份 data/raw 目录至备份库 (保留 A/B 两代)",
     )
     maint_group.add_argument(
-        "--restore", 
-        type=str, 
-        nargs='?', 
-        const='A', 
-        choices=['A', 'B'],
+        "--restore",
+        type=str,
+        nargs="?",
+        const="A",
+        choices=["A", "B"],
         default=argparse.SUPPRESS,
-        help="从备份中恢复数据 (仅提供参数名时默认为 A)"
+        help="从备份中恢复数据 (仅提供参数名时默认为 A)",
     )
     maint_group.add_argument(
-        "--query-backup", 
-        action="store_true", 
-        help="查询当前备份库的状态信息"
+        "--query-backup", action="store_true", help="查询当前备份库的状态信息"
     )
 
     args = parser.parse_args()
@@ -430,13 +501,13 @@ if __name__ == "__main__":
     if args.query_backup:
         AssetManager().query_backup_assets()
         sys.exit(0)
-    
+
     if args.backup:
         AssetManager().manage_backup_assets()
         sys.exit(0)
 
-    if getattr(args, 'restore', None):
-        AssetManager().restore_backup_assets(target=getattr(args, 'restore'))
+    if getattr(args, "restore", None):
+        AssetManager().restore_backup_assets(target=getattr(args, "restore"))
         sys.exit(0)
 
     if not args.cluster:
@@ -467,12 +538,22 @@ if __name__ == "__main__":
             _, wf_setup, ctx_cluster, _, ref_tables = _initialize_pipeline_components(
                 target_cluster_id, args.category, valid_modes[0], db=shared_db
             )
-            _ingest_and_prepare_data(shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster)
+            _ingest_and_prepare_data(
+                shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster
+            )
 
-            # 3. 循环执行算法核心，跳过已完成的 setup 阶段
+            # 3. 循环执行算法核心，收集各项模式指标
+            all_results = []
             for m in valid_modes:
                 logger.info(f"🔄 [批量模式] 正在启动子任务 - 模式: {m}")
-                run_pipeline(target_cluster_id, args.category, m, db=shared_db, skip_setup=True)
+                stats = run_pipeline(
+                    target_cluster_id, args.category, m, db=shared_db, skip_setup=True
+                )
+                if stats:
+                    all_results.append(stats)
+
+            # 4. 任务结束，输出多模式绩效对比总表
+            _log_all_modes_comparison(all_results)
         finally:
             shared_db.close()
             logger.info("🔒 [All Mode] 共享数据库连接已释放。")
