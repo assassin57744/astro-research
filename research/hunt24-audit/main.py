@@ -88,16 +88,16 @@ def _initialize_pipeline_components(
         db, target_cluster=target_cluster_id, target_category=target_category, mode=mode
     )
 
+    # 🚀 优化：按需加载。只准备当前星团的 Field、Seeds 以及当前选定的审计参考表
+    # 避免在运行 hunt 审计时去处理 cg20 或 risb 的数据
     ref_tables = [
         ctx_cluster["FIELD_IDX"],
         ctx_cluster["SEED_IDX"],
+        target_category,
         cfg.IDX_DR2IDX,
-        cfg.IDX_CG20,
-        cfg.IDX_HEYL,
-        cfg.IDX_HUNT,
-        cfg.IDX_ZERJ,
-        cfg.IDX_RISB,
+        cfg.IDX_IDS_SIMBAD,
     ]
+
     logger.info(
         f"🚀 初始化管道组件完成。目标星团: {target_cluster_id}, "
         f"执行模式: {mode}, 审计参考: {target_category}"
@@ -425,22 +425,19 @@ def run_pipeline(
             logger.info("🔒 数据库连接已释放。")
 
 
-if __name__ == "__main__":
-    # 1. 命令行参数解析配置
+def parse_args():
+    """配置并解析命令行参数。"""
     parser = argparse.ArgumentParser(
         description="Astro Research Pipeline - 天文数据分析与自动审计命令行工具",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # 星团 ID (位置参数，运行管线模式时必填)
     parser.add_argument(
         "cluster",
         type=str,
         nargs="?",
         help="目标星团名称 (运行管线模式下必填, 例如: M45, M44, M67)",
     )
-
-    # 审计对象 (可选，缺省 hunt)
     parser.add_argument(
         "--category",
         type=str,
@@ -448,8 +445,6 @@ if __name__ == "__main__":
         choices=["cg20", "heyl", "zerj", "risb", "hunt"],
         help="审计对比的参考星表类别",
     )
-
-    # 执行模式 (可选，缺省 3d)
     valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
     parser.add_argument(
         "--mode",
@@ -458,8 +453,6 @@ if __name__ == "__main__":
         choices=valid_modes + ["all"],
         help="GMM 算法的特征维度模式，使用 'all' 将循环执行所有模式",
     )
-
-    # 日志级别 (可选，缺省 INFO)
     parser.add_argument(
         "--log-level",
         type=str,
@@ -468,94 +461,82 @@ if __name__ == "__main__":
         help="控制台日志输出级别",
     )
 
-    # --- 资产维护命令组 ---
     maint_group = parser.add_argument_group("资产维护命令 (Maintenance)")
-    maint_group.add_argument(
-        "--backup",
-        action="store_true",
-        help="手动备份 data/raw 目录至备份库 (保留 A/B 两代)",
-    )
-    maint_group.add_argument(
-        "--restore",
-        type=str,
-        nargs="?",
-        const="A",
-        choices=["A", "B"],
-        default=argparse.SUPPRESS,
-        help="从备份中恢复数据 (仅提供参数名时默认为 A)",
-    )
-    maint_group.add_argument(
-        "--query-backup", action="store_true", help="查询当前备份库的状态信息"
-    )
+    maint_group.add_argument("--backup", action="store_true", help="手动备份 data/raw 目录")
+    maint_group.add_argument("--restore", type=str, nargs="?", const="A", choices=["A", "B"], 
+                             default=argparse.SUPPRESS, help="从备份中恢复数据")
+    maint_group.add_argument("--query-backup", action="store_true", help="查询当前备份库的状态")
 
-    args = parser.parse_args()
+    return parser, parser.parse_args()
 
-    # 2. 初始化日志系统 (根据参数设置级别)
-    numeric_level = getattr(logging, args.log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        numeric_level = logging.INFO
 
-    logger = setup_logging(level=numeric_level)
-
-    # 3. 处理维护命令 (直接使用 AssetManager，不触发数据库连接，避免多余初始化日志)
+def handle_maintenance(args):
+    """处理数据资产维护相关的子命令。"""
     if args.query_backup:
         AssetManager().query_backup_assets()
-        sys.exit(0)
+        return True
 
     if args.backup:
         AssetManager().manage_backup_assets()
-        sys.exit(0)
+        return True
 
     if getattr(args, "restore", None):
         AssetManager().restore_backup_assets(target=getattr(args, "restore"))
-        sys.exit(0)
+        return True
 
+    return False
+
+
+def main():
+    """主程序入口：编排参数解析、环境初始化与流水线执行。"""
+    parser, args = parse_args()
+
+    # 1. 初始化日志系统
+    numeric_level = getattr(logging, args.log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        numeric_level = logging.INFO
+    setup_logging(level=numeric_level)
+
+    # 2. 检查维护命令（若执行则退出主逻辑）
+    if handle_maintenance(args):
+        return
+
+    # 3. 校验流水线运行必填参数
     if not args.cluster:
         parser.error("运行管线模式必须提供 cluster 参数。使用 --help 查看维护命令。")
 
-    # 星团名不区分大小写匹配
     cluster_input = args.cluster.upper()
     cluster_map = {k.upper(): k for k in cfg.CLUSTERS.keys()}
 
     if cluster_input not in cluster_map:
-        logger.error(
-            f"❌ 未知的星团名称: '{args.cluster}'。可选范围: {list(cfg.CLUSTERS.keys())}"
-        )
+        logger.error(f"❌ 未知的星团名称: '{args.cluster}'。可选范围: {list(cfg.CLUSTERS.keys())}")
         sys.exit(1)
 
     target_cluster_id = cluster_map[cluster_input]
-
-    logger.info(
-        f"🚀 启动天文数据分析管道 - 目标: {target_cluster_id}, 模式: {args.mode}, 审计参考: {args.category}"
-    )
+    logger.info(f"🚀 启动分析管道 - 目标: {target_cluster_id}, 模式: {args.mode}, 参考: {args.category}")
 
     if args.mode == "all":
-        # 1. 初始化共享数据库实例，防止在循环中重复连接与断开
         shared_db = AstroDB(manifest=cfg.MANIFEST)
+        valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
         try:
-            # 2. 预先执行一次性的数据加载与标准化 (对齐逻辑与模式无关，运行一次即可)
-            # 获取基础配置以执行全局 setup
+            # 1. 在循环外执行一次性的全量数据加载与归一化
             _, wf_setup, ctx_cluster, _, ref_tables = _initialize_pipeline_components(
                 target_cluster_id, args.category, valid_modes[0], db=shared_db
             )
-            _ingest_and_prepare_data(
-                shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster
-            )
+            _ingest_and_prepare_data(shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster)
 
-            # 3. 循环执行算法核心，收集各项模式指标
             all_results = []
             for m in valid_modes:
-                logger.info(f"🔄 [批量模式] 正在启动子任务 - 模式: {m}")
-                stats = run_pipeline(
-                    target_cluster_id, args.category, m, db=shared_db, skip_setup=True
-                )
+                # 2. 循环内强制跳过 setup，仅切换算法维度进行计算
+                stats = run_pipeline(target_cluster_id, args.category, m, db=shared_db, skip_setup=True)
                 if stats:
                     all_results.append(stats)
-
-            # 4. 任务结束，输出多模式绩效对比总表
             _log_all_modes_comparison(all_results)
         finally:
             shared_db.close()
-            logger.info("🔒 [All Mode] 共享数据库连接已释放。")
     else:
         run_pipeline(target_cluster_id, args.category, args.mode)
+
+
+if __name__ == "__main__":
+    main()
