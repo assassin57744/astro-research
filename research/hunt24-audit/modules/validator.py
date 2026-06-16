@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import duckdb
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
@@ -9,11 +10,12 @@ import astropy.units as u
 from pathlib import Path
 import re
 
+import config as cfg
 from config import (
     CLUSTERS,
     STD_COLS,
     MANIFEST,
-    IDX_IDS_SIMBAD,
+    IDX_IDS_SIMBAD
 )  # 导入核心配置
 
 
@@ -245,11 +247,11 @@ class UnifiedMemberValidator:
         if mask_lit.any():
             # 批量计算备注
             notes = pd.Series("", index=audit_df.index)
-            notes.loc[mask_lit & (audit_df["pm_residual"] < 1.5) & (audit_df["cmd_residual"] > 3.0)] += "CMD Outlier | "
+            notes.loc[mask_lit & (audit_df["pm_residual"] < cfg.PHYS_LIT_PM_LIMIT) & (audit_df["cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT)] += "CMD Outlier | "
             notes.loc[mask_lit & (audit_df["distance_to_center"] > self.tidal_radius)] += "Tidal Tail Member | "
 
             ruwe_col = audit_df["ruwe"] if "ruwe" in audit_df.columns else pd.Series(1.0, index=audit_df.index)
-            notes.loc[mask_lit & (ruwe_col > 1.4)] += "Gaia Data Quality Issue | "
+            notes.loc[mask_lit & (ruwe_col > cfg.AUDIT_RUWE_LIMIT)] += "Gaia Data Quality Issue | "
             
             # 清理末尾分隔符并填充默认值
             final_notes = notes.str.rstrip(" | ").replace("", "Standard Literature Entry")
@@ -319,10 +321,11 @@ class UnifiedMemberValidator:
 
         kinematics_valid = (pm_score < 2.0) & (plx_score < 2.0)
 
-        weighted_penalty = (pm_score * 0.4) + (plx_score * 0.4) + (cmd_score * 0.2)
+        w = cfg.PHYS_VERIFY_WEIGHTS
+        weighted_penalty = (pm_score * w["pm"]) + (plx_score * w["plx"]) + (cmd_score * w["cmd"])
         score_valid = (
-            weighted_penalty < 1.1
-        )  # 适度放宽到 1.1，给予外围边缘星更大的生存空间
+            weighted_penalty < cfg.PHYS_VERIFY_PENALTY_LIMIT
+        )  # 给予外围边缘星更大的生存空间
 
         df["phys_audit_pass"] = kinematics_valid & score_valid
 
@@ -503,13 +506,13 @@ class UnifiedMemberValidator:
         """
         notes = []
 
-        if row["pm_residual"] < 1.5 and row["cmd_residual"] > 3.0:
+        if row["pm_residual"] < cfg.PHYS_LIT_PM_LIMIT and row["cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT:
             notes.append("CMD Outlier")
 
         if row.get("distance_to_center", 0) > self.tidal_radius:
             notes.append("Tidal Tail Member")
 
-        if row.get("ruwe", 1.0) > 1.4:
+        if row.get("ruwe", 1.0) > cfg.AUDIT_RUWE_LIMIT:
             notes.append("Gaia Data Quality Issue")
 
         if not notes:

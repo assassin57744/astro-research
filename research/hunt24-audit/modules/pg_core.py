@@ -66,7 +66,7 @@ class PriorGMM:
         df_copy["dec"] -= center[1]
         return df_copy, center
 
-    # @astro_checkpoint(cache_table_name="cache_full_pipeline_result")
+    # @astro_checkpoint(cache_table_template="cache_{cluster}_{category}_{mode}_res", force_refresh=True)
     def fit(self, df_seeds: pd.DataFrame, df_field: pd.DataFrame) -> GMMModelParams:
         """
         训练接口：构建背景场模型与星团核心模型。

@@ -3,15 +3,25 @@ import logging
 
 logger = logging.getLogger("AstroPipeline.Checkpoint")
 
-def astro_checkpoint(cache_table_name: str, force_refresh: bool = False):
+def astro_checkpoint(cache_table_template: str, force_refresh: bool = False):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
+            import config as cfg
             db = getattr(self, "db", None)
             
-            # 1. 检查缓存表是否已存在
+            # 动态渲染缓存表名，注入星团 ID、审计对象及维度模式
+            cluster_id = getattr(self, "target_cluster", "default").lower()
+            category = getattr(self, "target_category", "none").lower()
+            mode = cfg.GMM_CONFIG.get("dim_mode", "3d").lower()
+
+            cache_table_name = cache_table_template.format(
+                cluster=cluster_id, category=category, mode=mode
+            )
+
             cache_exists = db.con.execute(
-                f"SELECT count(*) FROM information_schema.tables WHERE table_name = '{cache_table_name}'"
+                f"SELECT count(*) FROM information_schema.tables "
+                f"WHERE table_name = '{cache_table_name}'"
             ).fetchone()[0] > 0
 
             if not force_refresh and cache_exists:

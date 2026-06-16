@@ -8,6 +8,9 @@ import re
 import time
 import random
 import sys
+import shutil
+import json
+from datetime import datetime
 from astroquery.simbad import Simbad
 from pathlib import Path
 
@@ -33,6 +36,8 @@ class AstroDB:
         # 💡 判断是否是全新创建（冷启动）
         is_new_db = not db_path.exists()
         if is_new_db:
+            # 🛡️ 核心修复：确保数据库所在的目录（warehouse）物理存在，防止 duckdb.connect 抛出路径未找到异常
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             self.logger.warning(
                 f"🆕 未检测到本地数据库，正在预期位置初始化新空库: {db_path.absolute()}"
             )
@@ -190,7 +195,7 @@ class AstroDB:
     def register_audit_input_view(self, v_src, t_base, threshold=None):
         """准备增强后的审计输入视图 (含物理参数补全与概率过滤)。"""
         threshold = threshold if threshold is not None else cfg.MEMBER_SAMPLE_THRESHOLD
-        v_audit_input = f"v_audit_input_{v_src}"
+        v_audit_input = cfg.TMPL.V_ADT_INPUT.format(src=v_src)
 
         sql = self._get_enrichment_sql(v_src, t_base, threshold=threshold)
         self.register_view_from_sql(v_audit_input, sql)
@@ -289,12 +294,13 @@ class AstroDB:
         self.con.register(view_name, df)
         self.logger.debug(f"已注册内存视图: {view_name}")
 
-    def save_to_warehouse(self, table_or_view, storage_type="snapshots"):
+    def save_to_warehouse(self, table_or_view, storage_type="snapshots", filename=None):
         """将表或视图持久化为 Parquet 文件。"""
         sub_dir = self.dirs["warehouse"] / storage_type
         sub_dir.mkdir(parents=True, exist_ok=True)
 
-        path = (sub_dir / f"{table_or_view}.parquet").resolve()
+        fname = filename if filename else table_or_view
+        path = (sub_dir / f"{fname}.parquet").resolve()
 
         # DuckDB 在 Windows 上也推荐使用 Posix 风格路径 (/)
         self.con.execute(f"COPY {table_or_view} TO '{path.as_posix()}' (FORMAT PARQUET)")
@@ -410,6 +416,31 @@ class AstroDB:
             return res[0] > 0 if res else False
         except Exception:
             return False
+
+    def _rotate_backups(self, file_path: Path, limit: int = 3, is_pre_write: bool = True):
+        """
+        备份文件并循环保留最近 N 次执行的数据。
+        
+        Args:
+            file_path (Path): 要备份的主文件路径。
+            limit (int): 保留的备份文件数量。
+            is_pre_write (bool): 如果为 True，表示在写入新文件前进行备份（备份当前有效文件）。
+                                 如果为 False，表示在写入新文件后，将新文件作为最新备份。
+        """
+        if not file_path.exists():
+            return
+
+        # 删除最旧的备份
+        oldest_bak = file_path.parent / f"{file_path.stem}.bak{limit}{file_path.suffix}"
+        if oldest_bak.exists():
+            oldest_bak.unlink()
+
+        # 滚动现有备份
+        for i in range(limit - 1, 0, -1): # 从 limit-1 到 1
+            src = file_path.parent / f"{file_path.stem}.bak{i}{file_path.suffix}"
+            dst = file_path.parent / f"{file_path.stem}.bak{i+1}{file_path.suffix}"
+            if src.exists():
+                src.rename(dst)
 
     def drop_table(self, name):
         """删除物理表（如果存在）。"""
@@ -661,10 +692,26 @@ class AstroDB:
             f"命中缓存: {len(df_cached_hits)} | 增量下载: {len(df_online_results)}"
         )
 
-        # ✨ 关键逻辑：自动将增量更新后的结果持久化到 Parquet
-        # 这样下次 import_raw 运行时，加载的就是合并后的最新数据
-        if not df_online_results.empty:
-            self.save_to_warehouse(cache_table_name, storage_type="snapshots")
+        # ✨ 关键逻辑：同步更新本地文件系统，打通执行链条
+        if not df_online_results.empty or not df_cached_hits.empty:
+            # 1. 更新 RAW 目录下的原始参考源（带 3 代备份）
+            simbad_cfg = self.data_manifest.get(cfg.IDX_IDS_SIMBAD, {})
+            rel_path = simbad_cfg.get("params", {}).get("file_pattern")
+            if rel_path:
+                source_file = self.dirs["raw"] / rel_path
+                if source_file.parent.exists():
+                    # 1. 备份当前有效的主文件
+                    if source_file.exists():
+                        self._rotate_backups(source_file)
+                    
+                    # 2. 写入临时文件
+                    temp_file = source_file.parent / f"{source_file.stem}_tmp{source_file.suffix}"
+                    self.con.execute(f"COPY {cache_table_name} TO '{temp_file.as_posix()}' (FORMAT PARQUET)")
+                    # 3. 成功后替换主文件
+                    temp_file.replace(source_file)
+                    self.logger.info(f"💾 已同步更新 SIMBAD 原始数据源并保留备份: {source_file.name}")
+            # 2. 更新数仓快照，确保下一次 import_raw 使用索引键名 ids_simbad 加载
+            self.save_to_warehouse(cache_table_name, storage_type="snapshots", filename=cfg.IDX_IDS_SIMBAD)
 
         return df_final_merged
 
@@ -768,3 +815,168 @@ class AstroDB:
                 if select.select([sys.stdin], [], [], 0)[0]: return sys.stdin.read(1).lower() == 'q'
         except: pass
         return False
+
+
+class AssetManager:
+    """
+    专门负责 RAW 数据资产维护的管理器。
+    与持久化数据库解耦，仅在需要时使用内存数据库进行元数据统计。
+    """
+    def __init__(self):
+        self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
+
+    def query_backup_assets(self):
+        """查询并打印当前备份资产信息。"""
+        meta_file = cfg.BACKUP_DIR / "metadata.json"
+        if not meta_file.exists():
+            print("\n[备份查询] ❌ 目前没有任何手动备份记录。")
+            return
+
+        with open(meta_file, 'r', encoding='utf-8') as f:
+            meta = json.load(f)
+
+        print(f"\n{'='*105}")
+        print(f"{'ID':<8} | {'备份时间':<20} | {'文件数':<8} | {'总记录数'}")
+        print(f"{'-'*105}")
+        for key in ['A', 'B']:
+            info = meta.get(key)
+            if info:
+                print(f"备份 {key:<5} | {info['timestamp']:<20} | {info['file_count']:<8} | {info['record_count']:,}")
+                
+                # 打印详细的文件组成明细
+                file_details = info.get("file_details", {})
+                if file_details:
+                    print(f"  ∟ 📂 数据资产清单 (RAW):")
+                    # 按文件名排序，方便用户对照星团
+                    for fname in sorted(file_details.keys()):
+                        count = file_details[fname]
+                        records_str = f"{count:,}" if count > 0 else "[不可读取/非表格]"
+                        print(f"    - {fname:<72} | {records_str:>15} 记录")
+                
+                if info.get("db_included"):
+                    print(f"  ∟ 🗄️ 包含内部数据库快照 (astrodb_internal.db)")
+                print(f"{'-'*105}")
+            else:
+                print(f"备份 {key:<5} | {'无数据':<20} | {'-':<8} | -")
+                print(f"{'-'*105}")
+        print(f"{'='*105}\n")
+
+    def manage_backup_assets(self):
+        """执行资产手动备份。"""
+        raw_dir = cfg.RAW_DIR
+        db_file = cfg.DATA_DIR / "warehouse" / "astrodb_internal.db" # 定义 db_file
+        backup_root = cfg.BACKUP_DIR
+        backup_root.mkdir(parents=True, exist_ok=True)
+
+        path_a, path_b = backup_root / "raw_backup_A", backup_root / "raw_backup_B"
+        meta_file = backup_root / "metadata.json"
+
+        meta = {}
+        if meta_file.exists():
+            try:
+                with open(meta_file, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+            except: meta = {}
+
+        self.logger.info("📦 正在执行资产手动备份轮转 (含 RAW 数据与内部数据库)...")
+
+        if path_b.exists(): shutil.rmtree(path_b)
+        if path_a.exists():
+            path_a.rename(path_b)
+            meta['B'] = meta.get('A')
+            self.logger.info("  ∟ 已将原有 [备份A] 顺延至 [备份B]")
+
+        # 创建 A 目录并建立子结构
+        path_a.mkdir(parents=True)
+        shutil.copytree(raw_dir, path_a / "raw")
+        
+        db_included = False
+        if db_file.exists():
+            shutil.copy2(db_file, path_a / "astrodb_internal.db")
+            db_included = True
+            self.logger.info(f"  🗄️ 已同步备份内部数据库文件")
+        
+        file_details, total_records = {}, 0
+        # 使用内存连接，避免触发项目数据库初始化
+        with duckdb.connect(":memory:") as temp_con:
+            for p in (path_a / "raw").rglob("*"):
+                if not p.is_file():
+                    continue
+                
+                rel_name = p.relative_to(path_a / "raw").as_posix()
+                ext = p.suffix.lower()
+                count = 0
+                
+                try:
+                    if ext == ".parquet":
+                        count = temp_con.execute(f"SELECT count(*) FROM read_parquet('{p.as_posix()}')").fetchone()[0]
+                    elif ext == ".csv":
+                        # DuckDB 自动探测 CSV 结构并统计行数
+                        count = temp_con.execute(f"SELECT count(*) FROM read_csv_auto('{p.as_posix()}')").fetchone()[0]
+                    elif ext in [".fits", ".vot"]:
+                        # 针对 FITS 和 VOTable，使用项目中已有的 astropy 逻辑
+                        from astropy.table import Table
+                        count = len(Table.read(p))
+                    else:
+                        # 非结构化数据文件，不统计记录数
+                        count = 0
+                    
+                    file_details[rel_name] = count
+                    total_records += count
+                    self.logger.info(f"  📄 备份文件明细: {rel_name:<30} | 记录数: {count}")
+                except Exception:
+                    file_details[rel_name] = 0
+                    self.logger.info(f"  📄 备份文件明细: {rel_name:<30} | 记录数: [不可读取]")
+
+        meta['A'] = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "record_count": total_records,
+            "file_count": sum(1 for _ in path_a.rglob("*") if _.is_file()),
+            "file_details": file_details,
+            "db_included": db_included
+        }
+
+        temp_meta = meta_file.with_suffix(".tmp")
+        with open(temp_meta, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, indent=4, ensure_ascii=False)
+        temp_meta.replace(meta_file)
+
+        self.logger.info(f"✅ 手动备份完成：[备份A] 已更新。总记录数(RAW): {total_records}")
+
+    def restore_backup_assets(self, target='A'):
+        """从备份恢复数据。"""
+        target_dir = cfg.BACKUP_DIR / f"raw_backup_{target.upper()}"
+        raw_dir = cfg.RAW_DIR
+        db_file = cfg.DATA_DIR / "warehouse" / "astrodb_internal.db"
+
+        if not target_dir.exists():
+            self.logger.error(f"❌ 恢复失败：指定的 [{target_dir.name}] 不存在")
+            return False
+
+        # 增加二次确认
+        print(f"\n⚠️  警告: 正在从 [{target_dir.name}] 恢复数据!")
+        print(f"这将会彻底删除当前的 {raw_dir} 目录以及内部数据库文件。")
+        confirm = input("确定要继续吗? (y/N): ")
+        if confirm.lower() != 'y':
+            print("🚫 恢复操作已取消。")
+            return False
+
+        self.logger.warning(f"🔄 正在从 [{target_dir.name}] 强制覆盖恢复数据资产...")
+        
+        # 兼容性恢复逻辑：判断备份中是否含有 'raw' 子目录
+        if (target_dir / "raw").exists():
+            if raw_dir.exists(): shutil.rmtree(raw_dir)
+            shutil.copytree(target_dir / "raw", raw_dir)
+            
+            db_backup = target_dir / "astrodb_internal.db"
+            if db_backup.exists():
+                db_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(db_backup, db_file)
+                self.logger.info(f"  ∟ 内部数据库文件恢复完成")
+        else:
+            # 处理旧版备份结构
+            if raw_dir.exists(): shutil.rmtree(raw_dir)
+            shutil.copytree(target_dir, raw_dir)
+
+        self.logger.info(f"✅ 数据恢复成功！来源: {target_dir.name}")
+        return True

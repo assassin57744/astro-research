@@ -1,125 +1,78 @@
 # config.py
 import os
-import numpy as np
 from pathlib import Path
 from typing import TypedDict, Dict, Any
+import numpy as np
 
-# 扁平化导入：假设 actions.py 已移动到 modules/ 根目录
+# 内部模块导入
 from modules.actions import StdActions, StxActions, AlnActions
 
 
-# -----------------------------------------------------------------
-# 运行时上下文 (Runtime Context)
-# -----------------------------------------------------------------
-# 获取默认目标（仅用于 CLI 默认值，不建议在代码中修改这些变量）
-DEFAULT_CLUSTER = os.getenv("ASTRO_TARGET_CLUSTER", "M45")
-DEFAULT_CATEGORY = os.getenv("ASTRO_TARGET_CATEGORY", "hunt")
-
-# -----------------------------------------------------------------
-# 统一命名转换矩阵 (Naming Adapter Matrix)
-# -----------------------------------------------------------------
-# 职责：解决不同文献星表对同一星团称呼不一致的问题。
-# 逻辑：如果在该表中找到 (文献标识, 星团ID) 的映射，则在过滤时优先使用映射名；
-#      否则，使用星团配置中的默认 CAT_NAME。
-CATALOG_NAMING_ADAPTER = {
-    "zerj": {
-        "M45": "Melotte 22",
-    },
-    # 未来增加新星表只需在此添加子字典
-}
-
-
-# -----------------------------------------------------------------
-# 路径与门限定义
-# -----------------------------------------------------------------
+# =================================================================
+# 1. 系统路径与环境配置 (Paths & Environment)
+# =================================================================
 BASE_DIR = Path(__file__).resolve().parent.resolve()
 LOG_DIR = (BASE_DIR / "logs").resolve()
 DATA_DIR = (BASE_DIR / "data").resolve()
 ANALYSIS_DIR = (BASE_DIR / "analysis").resolve()
 RESULTS_DIR = (ANALYSIS_DIR / "results").resolve()
 
-RAW_DIR = (DATA_DIR / "raw").resolve()
+RAW_DIR    = (DATA_DIR / "raw").resolve()
+BACKUP_DIR = (DATA_DIR / "backups").resolve()
 EXPORT_DIR = (DATA_DIR / "exports").resolve()
 INTERNAL_DIR = (DATA_DIR / "internal").resolve()
 
-# 数据来源子目录配置
-GAIA_INPUT_DIR = (RAW_DIR / "gaia_archive").resolve()
+# 数据源子目录
+GAIA_INPUT_DIR   = (RAW_DIR / "gaia_archive").resolve()
 VIZIER_INPUT_DIR = (RAW_DIR / "vizier").resolve()
 SIMBAD_INPUT_DIR = (RAW_DIR / "simbad").resolve()
-OAPD_INPUT_DIR = (RAW_DIR / "oapd").resolve()
-
-DOWNLOAD_DIR = RAW_DIR # 配合精确路径匹配，统一以 raw 为基准
+OAPD_INPUT_DIR   = (RAW_DIR / "oapd").resolve()
+DOWNLOAD_DIR     = RAW_DIR 
 
 # Gaia Archive 认证信息
 GAIA_USER = os.getenv("GAIA_USER", "jli21")
-GAIA_PWD = os.getenv("GAIA_PWD") # 严禁硬编码密码
+GAIA_PWD  = os.getenv("GAIA_PWD") 
 
-# -----------------------------------------------------------------
-# 核心指示符与列名定义
-# -----------------------------------------------------------------
 
-# 成员识别目标区域
-IDX_FIELD_CLUSTER_M45 = "m45_field"
-IDX_FIELD_CLUSTER_M45_SEEDS = "m45_seeds_field"
+# =================================================================
+# 2. 科学计算门限与物理常数 (Thresholds & Physics)
+# =================================================================
+MEMBER_SAMPLE_THRESHOLD = 0.2
+GOLDEN_SAMPLE_THRESHOLD = 0.8
 
-IDX_FIELD_CLUSTER_M44 = "m44_field"
-IDX_FIELD_CLUSTER_M44_SEEDS = "m44_seeds_field"
+AUDIT_PROB_HIGH = 0.7            # 成员身份判定高门限
+AUDIT_PROB_LOW  = 0.3            # 成员身份判定低门限（背景噪点）
+AUDIT_RUWE_LIMIT = 1.4           # Gaia 天体测量质量门限
+AUDIT_PLX_RESIDUAL_LIMIT = 1.0   # 视差残差允许度 (mas)
+AUDIT_MAG_LIMIT_HUNT24 = 19.0    # Hunt2024 文献深度参考线
 
-IDX_FIELD_CLUSTER_MEL25 = "mel25_field"
-IDX_FIELD_CLUSTER_MEL25_SEEDS = "mel25_seeds_field"
+# 物理验证权重与细分容忍度
+PHYS_VERIFY_WEIGHTS = {"pm": 0.4, "plx": 0.4, "cmd": 0.2}
+PHYS_VERIFY_PENALTY_LIMIT = 1.1
+PHYS_LIT_PM_LIMIT = 1.5
+PHYS_LIT_CMD_LIMIT = 3.0
 
-IDX_FIELD_CLUSTER_MEL111 = "mel111_field"
-IDX_FIELD_CLUSTER_MEL111_SEEDS = "mel111_seeds_field"
 
-IDX_FIELD_CLUSTER_M67 = "m67_field"
-IDX_FIELD_CLUSTER_M67_SEEDS = "m67_seeds_field"
-
-IDX_FIELD_CLUSTER_M13 = "m13_field"
-IDX_FIELD_CLUSTER_M13_SEEDS = "m13_seeds_field"
-
-IDX_FIELD_CLUSTER_M41 = "m41_field"
-IDX_FIELD_CLUSTER_M41_SEEDS = "m41_seeds_field"
-
-# 参考星表唯一识别码 (整个系统通过这些 Index 来流通)
-IDX_CG20 = "cg20"
-IDX_HEYL = "heyl"
-IDX_ZERJ = "zerj"
-IDX_RISB = "risb"
-IDX_HUNT = "hunt"
-
-# 辅助表 (用于本地缓存)
-IDX_DR2IDX = "dr2idx"
-IDX_IDS_SIMBAD = "ids_simbad"
-IDX_GMM = "pgmm"  # 自定义算法产出表标识
+# =================================================================
+# 3. 命名规范、模板与适配器 (Naming & Adapters)
+# =================================================================
+CATALOG_NAMING_ADAPTER = {
+    "zerj": {"M45": "Melotte 22"},
+}
 
 STD_COLS = {
-    "ID": "id",
-    "ID_DR2": "id_dr2",
-    "RA": "ra",
-    "DEC": "dec",
-    "PMRA": "pmra",
-    "PMDEC": "pmdec",
-    "PLX": "plx",
-    "MAG": "mag",
-    "COLOR": "color",
-    "RV": "rv",
-    "RUWE": "ruwe",
-    "PROB": "prob",
+    "ID": "id", "ID_DR2": "id_dr2",
+    "RA": "ra", "DEC": "dec", 
+    "PMRA": "pmra",  # 对应 pmra_cosdec (μ*α), 单位 mas/yr
+    "PMDEC": "pmdec", # 对应 pmdec (μδ), 单位 mas/yr
+    "PLX": "plx", "MAG": "mag", "COLOR": "color",
+    "RV": "rv", "RUWE": "ruwe", "PROB": "prob",
     "GMM_PROB": "gmm_prob",
     "REF_PROB": "r_prob",
     "CLUSTER": "cluster",
 }
 
-
 class TMPL:
-    """数据血缘命名规范模板类。
-
-    L1 (raw_): 原始数据层，保持原始列名
-    L2 (std_): 标准化视图，列名对齐，初步清洗
-    L2+(stx_): 标准化视图ex, 概率补齐, dr2id -> dr3id等
-    L3 (aln_): 物理窗口对齐层，裁剪到特定天区
-    """
-
     # --- 数据库表/视图名 ---
     T_RAW = "raw_{idx}"  # L1: 原始物理表
     V_STD = "std_{idx}"  # L2: 标准化视图
@@ -129,13 +82,16 @@ class TMPL:
     T_TBL = "tbl_{idx}"  # 表格逻辑名称
 
     # --- 算法结果与分析 ---
-    T_RES_SG = "pgmm_{cluster}"  # SeedGMM 原始产出
-    V_RES_SUB = "v_res_sg_{cluster}_{tag}"  # 结果子集视图名模板,tag说明子集的特征
-    V_ALL = "v_wide_{cluster}"  # 集成所有参考星表的分析大宽表
-    V_DIFF = "v_diff_vs_{idx}"  # 分歧源
-    V_NEW = "v_new_vs_{idx}"  # 全新源
-    V_MISS = "v_miss_vs_{idx}"  # 缺失源
-    V_ADT = "v_audit_{category}_{cluster}"  # 审计专用视图，包含交叉比对的结果和分析字段
+    T_RES_SG = "pgmm_{cluster}_{category}_{mode}"  # SeedGMM 原始产出
+    V_RES_SUB = "v_pgmm_{cluster}_{category}_{mode}_{tag}"  # 结果子集视图名模板, tag说明子集的特征(如 golden_members)
+    V_ALL = "v_wide_{cluster}_{category}_{mode}"  # 集成所有参考星表的分析大宽表
+    V_DIFF = "v_diff_{cluster}_{category}_{mode}_vs_{idx}"  # 分歧源 (与特定星表比对)
+    V_NEW = "v_new_{cluster}_{category}_{mode}_vs_{idx}"  # 全新发现源
+    V_MISS = "v_miss_{cluster}_{category}_{mode}_vs_{idx}"  # 漏检源
+    V_ADT = "v_audit_{category}_{cluster}_{mode}"  # 审计专用视图，包含交叉比对的结果和分析字段
+    V_ADT_INPUT = "v_audit_input_{src}"  # 审计输入增强视图
+    V_AUDITED = "{src}_audited"  # 审计完成后的物化表名
+    V_ADT_HUNT24 = "audit_report_hunt24_by_{src}"  # 针对 Hunt24 的专项审计结果
 
     # --- 动态列名 ---
     COL_PROB = "{idx}_prob"
@@ -143,403 +99,240 @@ class TMPL:
     # --- 导出文件名 ---
     FILE_FITS = "Pleiades_{category}_vs_{idx}.fits"
     FILE_REPORT = "Validation_Report_{idx}_{date}.csv"
+    FILE_LIT_REPORT = "Lit_Audit_{label}_{cluster}_{timestamp}.csv"  # 文献审计报告
+    FILE_PLOT = "{cluster}_{category}_{mode}_{prefix}_{timestamp}.png"  # 诊断图表文件名
+    FILE_NEW_CANDIDATES = "new_candidates_vs_{ref}.csv"  # 新候选者验证清单
+    FILE_EXPORT_BASE = "{cluster}_{category}_{mode}"  # 导出文件名的基本前缀
+    FILE_CROSS_SUMMARY = "{base}_cross_summary"  # 交叉比对汇总文件名
+    FILE_DEEP_AUDIT = "{base}_deep_audit"  # 深度审计报告文件名
+    FILE_FINAL_REPORT = "{base}_final_report.txt"  # 最终执行摘要文件名
+    FILE_MISS_MAG_DIST = "hunt24_missing_mag_dist.png"  # 漏检源星等分布图
 
 
+# =================================================================
+# 4. 数据注册键 (Registry Keys - IDX)
+# =================================================================
+# 4.1 核心字段与种子集 ID
+IDX_FIELD_CLUSTER_M45      , IDX_FIELD_CLUSTER_M45_SEEDS      = "m45_field"    , "m45_seeds_field"
+IDX_FIELD_CLUSTER_M44      , IDX_FIELD_CLUSTER_M44_SEEDS      = "m44_field"    , "m44_seeds_field"
+IDX_FIELD_CLUSTER_MEL25    , IDX_FIELD_CLUSTER_MEL25_SEEDS    = "mel25_field"  , "mel25_seeds_field"
+IDX_FIELD_CLUSTER_MEL111   , IDX_FIELD_CLUSTER_MEL111_SEEDS   = "mel111_field" , "mel111_seeds_field"
+IDX_FIELD_CLUSTER_M67      , IDX_FIELD_CLUSTER_M67_SEEDS      = "m67_field"    , "m67_seeds_field"
+IDX_FIELD_CLUSTER_M13      , IDX_FIELD_CLUSTER_M13_SEEDS      = "m13_field"    , "m13_seeds_field"
+IDX_FIELD_CLUSTER_M41      , IDX_FIELD_CLUSTER_M41_SEEDS      = "m41_field"    , "m41_seeds_field"
+
+# 4.2 参考文献星表 ID
+IDX_CG20 = "cg20"
+IDX_HEYL = "heyl"
+IDX_ZERJ = "zerj"
+IDX_RISB = "risb"
+IDX_HUNT = "hunt"
+
+# 4.3 基础设施与算法输出 ID
+IDX_DR2IDX     = "dr2idx"
+IDX_IDS_SIMBAD = "ids_simbad"
+IDX_GMM        = "pgmm" 
+
+
+# =================================================================
+# 5. 星团物理先验配置 (Cluster Configurations)
+# =================================================================
 CLUSTERS = {
     "M45": {
-        # ==============================================================================
-        # 1. 基础元数据 (Metadata)
-        # ==============================================================================
         "FIELD_IDX": IDX_FIELD_CLUSTER_M45,
         "SEED_IDX": IDX_FIELD_CLUSTER_M45_SEEDS,
         "NAME": "Pleiades",
         "ID_NAME": "melotte_22",
-        "CAT_NAME": "Melotte_22",  # 在hunt2024中，Pleiades被标记为Melotte_22
-        "ISO_FILE": "pleiades_126myr.dat",  # 昴星团参考等龄线约为 126 Myr (年轻星团)
-        # ==============================================================================
-        # 2. 天区截取与几何边界 (Spatial & Sky Boundary)
-        # ==============================================================================
-        "CENTER_RA": 56.75,
-        "CENTER_DEC": 24.12,
-        "RADIUS": 17.78,  # 天区搜索半径，单位：度 (覆盖整个星团及周边背景)
-        "RA_MIN": 44.0,
-        "RA_MAX": 66.0,
-        "DEC_MIN": 16.0,
-        "DEC_MAX": 36.0,
-        "MAX_MAG": 21.0,  # 探测暗端截止视星等,大于hunt24的星团最大值: 20.620213
-        # ==============================================================================
-        # 3. 空间物理结构半径 (Structural Radii)
-        # ==============================================================================
+        "CAT_NAME": "Melotte_22",
+        "ISO_FILE": "pleiades_126myr.dat",
+        "CENTER_RA": 56.75, "CENTER_DEC": 24.12, "RADIUS": 17.78,
+        "RA_MIN": 44.0, "RA_MAX": 66.0, "DEC_MIN": 16.0, "DEC_MAX": 36.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.3,  # 单位：pc
         "HALF_MASS_RADIUS": 3.5,  # 单位：pc
         "half_light_radius": 3.0,  # 单位：pc (保持原有小写变量名对齐)
         "TIDAL_RADIUS": 10.0,  # 单位：pc
-        # ==============================================================================
-        # 4. 距离与消光物理环境 (Physics & Extinction Environment)
-        # ==============================================================================
         "DISTANCE_PC": 136.2,
-        "DISTANCE_MODULUS": 5.66,  # 本征距离模数 (5 * log10(136.2) - 5)
+        "DISTANCE_MODULUS": 5.66,
         "EXT_AG": 0.12,  # Gaia G波段消光
         "E_BP_RP": 0.06,  # 对应色余 E(BP-RP)
-        # ==============================================================================
-        # 5. 天体测量与动力学先验基准 (Astrometry & Kinematics Priors)
-        # ==============================================================================
-        # 观测空间运动学参考值
-        "PLX_REF": 7.33,  # 平均视差 (mas)，对应距离约 136.2 pc
-        "PMRA_REF": 20.10,  # 平均 pmRA (mas/yr)
-        "PMDEC_REF": -45.40,  # 平均 pmDEC (mas/yr)
-        # 物理空间运动学参考值（新增：用于支持 3d_v 和 6d_p 的高阶转换）
-        "RV_REF": 5.63,  # 标准系统视向速度 (km/s)，用于暗星虚拟投影填充
-        "UVW_REF": np.array([-6.05, -28.02, -14.34]),  # 标准三维空间速度基准
-        # ==============================================================================
-        # 6. 经验约束与质量容忍度 (Tolerance & Quality Control)
-        # ==============================================================================
+        "PLX_REF": 7.33, "PMRA_REF": 20.10, "PMDEC_REF": -45.40,
+        "RV_REF": 5.63,
+        "UVW_REF": np.array([-6.05, -28.02, -14.34]),
         "PM_RADIUS": 3.0,  # 自行半径容忍度 (mas/yr)，参考 Hunt2024 Figure 3 分布范围
         "PLX_ERROR": 0.5,  # 视差误差容忍度 (mas)
         "CMD_DEV": 0.8,  # CMD 偏离容忍度 (mag)
-        # --- 种子筛选动态配置 ---
         "SEED_RADIUS": 2.0,
-        "SEED_PLX_LIM": 1.5,  # PLX_ERROR * 3
+        "SEED_PLX_LIM": 1.5,
         "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.2,
     },
-    # Praesepe, 又名 M44 或 NGC 2632，是一个距离较近的开放星团，年龄约为 600-750 Myr
     "M44": {
-        # ==============================================================================
-        # 1. 基础元数据 (Metadata)
-        # ==============================================================================
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
         "SEED_IDX": IDX_FIELD_CLUSTER_M44_SEEDS,
-        "NAME": "Praesepe",  # Praesepe、蜂巢星团(Beehive)、鬼宿星团、NGC 2632
+        "NAME": "Praesepe",
         "ID_NAME": "Melotte_88",
-        "CAT_NAME": "NGC_2632",  # 在hunt2024中，Praesepe被标记为NGC_2632
-        "ISO_FILE": "praesepe_700myr.dat",  # 鬼星团参考年龄约为 600~750 Myr
-        # ==============================================================================
-        # 2. 天区截取与几何边界 (Spatial & Sky Boundary)
-        # ==============================================================================
-        "CENTER_RA": 130.1,
-        "CENTER_DEC": 19.7,
-        "RADIUS": 11.90,  # 天区搜索半径，单位：度
-        "RA_MIN": 120.0,
-        "RA_MAX": 140.0,
-        "DEC_MIN": 10.0,
-        "DEC_MAX": 30.0,
-        "MAX_MAG": 21.0,  # 探测暗端截止视星等, 大于hunt24的星团最大值: 20.663906
-        # ==============================================================================
-        # 3. 空间物理结构半径 (Structural Radii)
-        # ==============================================================================
+        "CAT_NAME": "NGC_2632",
+        "ISO_FILE": "praesepe_700myr.dat",
+        "CENTER_RA": 130.1, "CENTER_DEC": 19.7, "RADIUS": 11.90,
+        "RA_MIN": 120.0, "RA_MAX": 140.0, "DEC_MIN": 10.0, "DEC_MAX": 30.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 0.8,  # 单位：pc
         "HALF_MASS_RADIUS": 3.9,  # 单位：pc
         "half_light_radius": 3.5,  # 单位：pc
         "TIDAL_RADIUS": 12.0,  # 单位：pc
-        # ==============================================================================
-        # 4. 距离与消光物理环境 (Physics & Extinction Environment)
-        # ==============================================================================
         "DISTANCE_PC": 187.0,
-        "DISTANCE_MODULUS": 6.36,  # 本征距离模数 (5 * log10(187.0) - 5)
+        "DISTANCE_MODULUS": 6.36,
         "EXT_AG": 0.05,
         "E_BP_RP": 0.03,  # 补齐色余
-        # ==============================================================================
-        # 5. 天体测量与动力学先验基准 (Astrometry & Kinematics Priors)
-        # ==============================================================================
-        # 观测空间运动学参考值
-        "PLX_REF": 5.35,  # 平均视差 (mas)，对应距离约 187.0 pc
-        "PMRA_REF": -36.0,  # 平均 pmRA (mas/yr)
-        "PMDEC_REF": -12.9,  # 平均 pmDEC (mas/yr)
-        # 物理空间运动学参考值
-        "RV_REF": 35.0,  # 标准系统视向速度 (km/s)
-        "UVW_REF": np.array([-34.5, -21.2, -6.8]),  # 标准三维空间速度基准
-        # ==============================================================================
-        # 6. 经验约束与质量容忍度 (Tolerance & Quality Control)
-        # ==============================================================================
+        "PLX_REF": 5.35, "PMRA_REF": -36.0, "PMDEC_REF": -12.9,
+        "RV_REF": 35.0,
+        "UVW_REF": np.array([-34.5, -21.2, -6.8]),
         "PM_RADIUS": 4.0,  # 自行半径容忍度 (mas/yr)
         "PLX_ERROR": 0.4,  # 视差误差/弥散容忍度 (mas)
         "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag)
-        # --- 种子筛选动态配置 ---
         "SEED_RADIUS": 2.0,
-        "SEED_PLX_LIM": 1.2,  # PLX_ERROR * 3
+        "SEED_PLX_LIM": 1.2,
         "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.4,
     },
-    # Melotte 25, 又名 Hyades (毕星团)，是距离太阳最近的开放星团，年龄约为 625-650 Myr
-    "Mel25": {  # 范围有点大, 第二批识别目标, 主要用于测试管线在不同环境下的适应性和鲁棒性
-        # ==============================================================================
-        # 1. 基础元数据 (Metadata)
-        # ==============================================================================
+    "Mel25": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_MEL25,
         "SEED_IDX": IDX_FIELD_CLUSTER_MEL25_SEEDS,
         "NAME": "Hyades",
         "ID_NAME": "melotte_25",
-        "CAT_NAME": "Melotte_25",  # 在hunt2024中，Hyades被标记为Melotte_25
-        "ISO_FILE": "hyades_650myr.dat",  # 毕星团参考年龄约为 625~650 Myr
-        # ==============================================================================
-        # 2. 天区截取与几何边界 (Spatial & Sky Boundary)
-        # ==============================================================================
-        "CENTER_RA": 66.75,
-        "CENTER_DEC": 15.87,
-        "RADIUS": 59.31,  # 天区搜索半径，单位：度 (近距离星团需要大天区粗筛)
-        "RA_MIN": 50.0,
-        "RA_MAX": 85.0,
-        "DEC_MIN": 0.0,
-        "DEC_MAX": 32.0,
-        "MAX_MAG": 21.0,  # 探测暗端截止视星等, hunt24的星团最大值: 20.608107
-        # ==============================================================================
-        # 3. 空间物理结构半径 (Structural Radii)
-        # ==============================================================================
+        "CAT_NAME": "Melotte_25",
+        "ISO_FILE": "hyades_650myr.dat",
+        "CENTER_RA": 66.75, "CENTER_DEC": 15.87, "RADIUS": 59.31,
+        "RA_MIN": 50.0, "RA_MAX": 85.0, "DEC_MIN": 0.0, "DEC_MAX": 32.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 2.7,  # 单位：pc (约 8.8 光年)
         "HALF_MASS_RADIUS": 4.1,  # 单位：pc
         "half_light_radius": 3.1,  # 单位：pc (保持原有小写变量名)
         "TIDAL_RADIUS": 10.0,  # 单位：pc (经典重力潮汐半径，外部流失星形成延展星流)
-        # ==============================================================================
-        # 4. 距离与消光物理环境 (Physics & Extinction Environment)
-        # ==============================================================================
         "DISTANCE_PC": 46.7,
-        "DISTANCE_MODULUS": 3.35,  # 本征距离模数 (5 * log10(46.7) - 5)
+        "DISTANCE_MODULUS": 3.35,
         "AV": 0.02,  # V波段尘埃消光 (位于本地泡内，尘埃消光极低，近乎为0)
         "EXT_AG": 0.01,  # Gaia G波段消光
         "E_BP_RP": 0.01,
-        # ==============================================================================
-        # 5. 天体测量与动力学先验基准 (Astrometry & Kinematics Priors)
-        # ==============================================================================
-        # 观测空间运动学参考值
-        "PLX_REF": 21.41,  # 平均视差 (mas)，对应距离约 46.7 pc
-        "PMRA_REF": 101.10,  # 平均 pmRA (mas/yr) —— 典型的大自行星团
-        "PMDEC_REF": -28.50,  # 平均 pmDEC (mas/yr)
-        # 物理空间运动学参考值（新增：用于支持 3d_v 和 6d_p 的高阶转换）
-        "RV_REF": 39.10,  # 标准系统视向速度 (km/s)，用于暗星虚拟投影填充
-        "UVW_REF": np.array([-42.24, -19.11, -1.45]),  # 标准三维空间速度基准
-        # ==============================================================================
-        # 6. 经验约束与质量容忍度 (Tolerance & Quality Control)
-        # ==============================================================================
+        "PLX_REF": 21.41, "PMRA_REF": 101.10, "PMDEC_REF": -28.50,
+        "RV_REF": 39.10,
+        "UVW_REF": np.array([-42.24, -19.11, -1.45]),
         "PM_RADIUS": 12.0,  # 自行半径容忍度 (mas/yr)，离得太近导致自行发散严重
         "PLX_ERROR": 2.5,  # 视差误差/弥散容忍度 (mas)
         "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag) (主序带非常窄且干净)
-        # --- 种子筛选动态配置 ---
         "SEED_RADIUS": 8.0,
         "SEED_PLX_LIM": 2.0,
         "SEED_MAX_MAG": 16.0,
         "SEED_MAX_RUWE": 1.2,
     },
-    # Melotte 111, 又名 Coma Berenices Cluster (后发座星团)，是一个距离较近的开放星团，年龄约为 450-500 Myr
-    "Mel111": {  # 范围很大, 作为第二批识别目标,
-        # ==============================================================================
-        # 1. 基础元数据 (Metadata)
-        # ==============================================================================
+    "Mel111": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_MEL111,
         "SEED_IDX": IDX_FIELD_CLUSTER_MEL111_SEEDS,
-        "NAME": "ComaBer",  # 后发座星团 (Coma Berenices Cluster)
+        "NAME": "ComaBer",
         "ID_NAME": "melotte_111",
         "CAT_NAME": "Melotte_111",
-        "ISO_FILE": "mel111_500myr.dat",  # 参考年龄约为 450~500 Myr
-        # ==============================================================================
-        # 2. 天区截取与几何边界 (Spatial & Sky Boundary)
-        # ==============================================================================
-        "CENTER_RA": 186.6,
-        "CENTER_DEC": 26.1,
-        "RADIUS": 42.61,  # 距离极近 (86pc)，视角范围非常大
-        "RA_MIN": 175.0,
-        "RA_MAX": 198.0,
-        "DEC_MIN": 15.0,
-        "DEC_MAX": 37.0,
-        "MAX_MAG": 21.0,  # 探测暗端截止视星等, 大于hunt24的星团最大值: 20.357265
-        # ==============================================================================
-        # 3. 空间物理结构半径 (Structural Radii)
-        # ==============================================================================
+        "ISO_FILE": "mel111_500myr.dat",
+        "CENTER_RA": 186.6, "CENTER_DEC": 26.1, "RADIUS": 42.61,
+        "RA_MIN": 175.0, "RA_MAX": 198.0, "DEC_MIN": 15.0, "DEC_MAX": 37.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.5,  # 单位：pc
         "HALF_MASS_RADIUS": 4.5,
         "half_light_radius": 3.8,
         "TIDAL_RADIUS": 15.0,  # 作为一个弥散星团，其动力学边界较宽
-        # ==============================================================================
-        # 4. 距离与消光物理环境 (Physics & Extinction Environment)
-        # ==============================================================================
         "DISTANCE_PC": 86.0,
-        "DISTANCE_MODULUS": 4.67,  # 5 * log10(86.0) - 5
+        "DISTANCE_MODULUS": 4.67,
         "EXT_AG": 0.02,  # 高银纬天区，消光极低
         "E_BP_RP": 0.01,
-        # ==============================================================================
-        # 5. 天体测量与动力学先验基准 (Astrometry & Kinematics Priors)
-        # ==============================================================================
-        "PLX_REF": 11.60,
-        "PMRA_REF": -12.11,
-        "PMDEC_REF": -9.01,
-        "RV_REF": -1.0,  # 系统视向速度接近于0
+        "PLX_REF": 11.60, "PMRA_REF": -12.11, "PMDEC_REF": -9.01,
+        "RV_REF": -1.0,
         "UVW_REF": np.array([-1.7, -6.1, -1.3]),
-        # ==============================================================================
-        # 6. 经验约束与质量容忍度 (Tolerance & Quality Control)
-        # ==============================================================================
         "PM_RADIUS": 5.0,  # 自行散布容忍度
         "PLX_ERROR": 1.5,  # 视差绝对误差容忍度
         "CMD_DEV": 0.6,
-        # --- 种子筛选动态配置 ---
         "SEED_RADIUS": 5.0,
         "SEED_PLX_LIM": 1.5,
         "SEED_MAX_MAG": 16.0,
         "SEED_MAX_RUWE": 1.2,
     },
     "M67": {
-        # ==============================================================================
-        # 1. 基础元数据 (Metadata)
-        # ==============================================================================
         "FIELD_IDX": IDX_FIELD_CLUSTER_M67,
         "SEED_IDX": IDX_FIELD_CLUSTER_M67_SEEDS,
         "NAME": "M67",
         "ID_NAME": "ngc_2682",
         "CAT_NAME": "NGC_2682",
         "ISO_FILE": "m67_4000myr.dat",
-        "DIM_MODE": "2d",             # 🚀 经验证，2D 模式对 M67 的召回率提升巨大
-        # ==============================================================================
-        # 2. 天区截取与几何边界 (Spatial & Sky Boundary)
-        # ==============================================================================
-        "CENTER_RA": 132.83,
-        "CENTER_DEC": 11.82,
-        "RADIUS": 2.5, # 实际数据下载半径为2.5,理论半径2.16
-        "RA_MIN": 128.0,
-        "RA_MAX": 138.0,
-        "DEC_MIN": 7.0,
-        "DEC_MAX": 17.0,
-        "MAX_MAG": 21.0,  # hunt24的星团最大值: 20.584248
-        # ==============================================================================
-        # 3. 空间物理结构半径 (Structural Radii)
-        # ==============================================================================
+        "DIM_MODE": "2d",
+        "CENTER_RA": 132.83, "CENTER_DEC": 11.82, "RADIUS": 2.5,
+        "RA_MIN": 128.0, "RA_MAX": 138.0, "DEC_MIN": 7.0, "DEC_MAX": 17.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.2,  # 单位：pc
         "HALF_MASS_RADIUS": 4.5,
         "half_light_radius": 3.8,
         "TIDAL_RADIUS": 16.0,
-        # ==============================================================================
-        # 4. 距离与消光物理环境 (Physics & Extinction Environment)
-        # ==============================================================================
         "DISTANCE_PC": 850.0,
-        "DISTANCE_MODULUS": 9.65,  # 5 * log10(850) - 5
-        "EXT_AG": 0.10,  # 低银纬，但消光相对适中
+        "DISTANCE_MODULUS": 9.65,
+        "EXT_AG": 0.10,
         "E_BP_RP": 0.05,
-        # ==============================================================================
-        # 5. 天体测量与动力学先验基准 (Astrometry & Kinematics Priors)
-        # ==============================================================================
-        "PLX_REF": 1.17,  # 平均视差约 1.1-1.2 mas
-        "PMRA_REF": -10.96,  # 典型自行
-        "PMDEC_REF": -2.94,
-        "RV_REF": 33.7,  # 视向速度显著
+        "PLX_REF": 1.17, "PMRA_REF": -10.96, "PMDEC_REF": -2.94,
+        "RV_REF": 33.7,
         "UVW_REF": np.array([-21.4, -25.2, -15.1]),
-        # ==============================================================================
-        # 6. 经验约束与质量容忍度 (Tolerance & Quality Control)
-        # ==============================================================================
         "PM_RADIUS": 1.5,  # 远距离星团自行弥散极小
         "PLX_ERROR": 0.2,  # 视差容忍度收紧
         "CMD_DEV": 0.5,
-        # --- 种子筛选动态配置 ---
         "SEED_RADIUS": 1.5,       # 继续扩大以包含更多外围种子
         "SEED_PLX_LIM": 0.4,       # 放宽视差限制以找回更多潜在种子
-        "SEED_MAX_MAG": 20.0,      # 🚀 添加缺失的星等门限，解决 KeyError
+        "SEED_MAX_MAG": 20.0,
         "SEED_MAX_RUWE": 1.4,
-        "SEED_PM_LIM": 2.5,        # 进一步放宽，确保拥挤区样本不因测量弥散被踢出
+        "SEED_PM_LIM": 2.5,
     },
-    "M13": {  # 致密球状星团，距离较远，年龄极老，具有非常不同的物理和动力学特征，作为挑战性测试对象
-        # ==============================================================================
-        # 1. 基础元数据 (Metadata)
-        # ==============================================================================
+    "M13": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
         "SEED_IDX": IDX_FIELD_CLUSTER_M13_SEEDS,
-        "NAME": "M13",  # 武仙座球状星团 (Hercules Globular Cluster)
+        "NAME": "M13",
         "ID_NAME": "ngc_6205",
         "CAT_NAME": "NGC_6205",
-        "ISO_FILE": "m13_12gyr.dat",  # 极老星族，参考年龄约 11.5~12.0 Gyr
-        "DIM_MODE": "2d",             # 🚀 经验证，2D 模式对 M13 的召回率提升巨大
-        # ==============================================================================
-        # 2. 天区截取与几何边界 (Spatial & Sky Boundary)
-        # ==============================================================================
-        "CENTER_RA": 250.42,
-        "CENTER_DEC": 36.46,
-        "RADIUS": 3.28,  # 远距离致密天体，1.5度已足够覆盖潮汐半径外围
-        "RA_MIN": 248.0,
-        "RA_MAX": 253.0,
-        "DEC_MIN": 34.5,
-        "DEC_MAX": 38.5,
-        "MAX_MAG": 21.0,  # 20.520828是hunt24的星团最大值, 但考虑到球状星团中存在大量低质量的暗矮星，且我们希望测试管线在极端环境下的表现，因此将容忍度放宽到21.0
-        # ==============================================================================
-        # 3. 空间物理结构半径 (Structural Radii)
-        # ==============================================================================
+        "ISO_FILE": "m13_12gyr.dat",
+        "DIM_MODE": "2d",
+        "CENTER_RA": 250.42, "CENTER_DEC": 36.46, "RADIUS": 3.28,
+        "RA_MIN": 248.0, "RA_MAX": 253.0, "DEC_MIN": 34.5, "DEC_MAX": 38.5, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.3,  # 单位：pc (核心致密)
         "HALF_MASS_RADIUS": 3.5,  # 单位：pc
         "half_light_radius": 3.2,
         "TIDAL_RADIUS": 43.0,  # 球状星团的潮汐半径通常较大
-        # ==============================================================================
-        # 4. 距离与消光物理环境 (Physics & Extinction Environment)
-        # ==============================================================================
         "DISTANCE_PC": 7100.0,
-        "DISTANCE_MODULUS": 14.25,  # 5 * log10(7100) - 5
-        "EXT_AG": 0.04,  # 高银纬，消光极低
+        "DISTANCE_MODULUS": 14.25,
+        "EXT_AG": 0.04,
         "E_BP_RP": 0.02,
-        # ==============================================================================
-        # 5. 天体测量与动力学先验基准 (Astrometry & Kinematics Priors)
-        # ==============================================================================
-        "PLX_REF": 0.14,  # 极小视差 (约 7.1 kpc)
-        "PMRA_REF": -3.18,  # 典型球状星团的高本征运动
-        "PMDEC_REF": -2.57,
-        "RV_REF": -244.2,  # 极高的负向视向速度，特征显著
+        "PLX_REF": 0.14, "PMRA_REF": -3.18, "PMDEC_REF": -2.57,
+        "RV_REF": -244.2,
         "UVW_REF": np.array([58.0, -241.0, 10.0]),  # 银晕轨道的典型运动学
-        # ==============================================================================
-        # 6. 经验约束与质量容忍度 (Tolerance & Quality Control)
-        # ==============================================================================
         "PM_RADIUS": 1.0,  # 远距离天体自行离散度极小
         "PLX_ERROR": 0.1,  # 视差门限需非常严苛
         "CMD_DEV": 0.4,  # 球状星团主序带极其狭窄
-        # --- 种子筛选动态配置 ---
-        "SEED_RADIUS": 0.8,       # 扩大范围，球状星团外围成员很多
-        "SEED_PLX_LIM": 0.5,       # 考虑到 7kpc 的误差，放宽视差窗口
-        "SEED_MAX_MAG": 20.5,      # 尽可能包含到 Hunt24 的深度
+        "SEED_RADIUS": 0.8, "SEED_PLX_LIM": 0.5,
+        "SEED_MAX_MAG": 20.5,
         "SEED_MAX_RUWE": 1.4,
-        "SEED_PM_LIM": 2.0,        # 进一步放宽自行限制，对抗拥挤区的测量噪声
+        "SEED_PM_LIM": 2.0,
     },
     "M41": {
-        # ==============================================================================
-        # 1. 基础元数据 (Metadata)
-        # ==============================================================================
         "FIELD_IDX": IDX_FIELD_CLUSTER_M41,
         "SEED_IDX": IDX_FIELD_CLUSTER_M41_SEEDS,
-        "NAME": "M41",  # 小蜂巢星团 (Little Beehive Cluster)
+        "NAME": "M41",
         "ID_NAME": "ngc_2287",
         "CAT_NAME": "NGC_2287",
-        "ISO_FILE": "m41_240myr.dat",  # 参考年龄约 200~240 Myr
-        # ==============================================================================
-        # 2. 天区截取与几何边界 (Spatial & Sky Boundary)
-        # ==============================================================================
-        "CENTER_RA": 101.50,
-        "CENTER_DEC": -20.75,
-        "RADIUS": 2.53,  # 核心覆盖范围约 1 度，取 2 度以包含晕族成员
-        "RA_MIN": 96.0,
-        "RA_MAX": 107.0,
-        "DEC_MIN": -25.0,
-        "DEC_MAX": -15.0,
-        "MAX_MAG": 21.0,
-        # ==============================================================================
-        # 3. 空间物理结构半径 (Structural Radii)
-        # ==============================================================================
+        "ISO_FILE": "m41_240myr.dat",
+        "CENTER_RA": 101.50, "CENTER_DEC": -20.75, "RADIUS": 2.53,
+        "RA_MIN": 96.0, "RA_MAX": 107.0, "DEC_MIN": -25.0, "DEC_MAX": -15.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.5,  # 单位：pc
         "HALF_MASS_RADIUS": 4.0,
         "half_light_radius": 3.6,
         "TIDAL_RADIUS": 12.0,
-        # ==============================================================================
-        # 4. 距离与消光物理环境 (Physics & Extinction Environment)
-        # ==============================================================================
         "DISTANCE_PC": 710.0,
-        "DISTANCE_MODULUS": 9.25,  # 5 * log10(710) - 5
+        "DISTANCE_MODULUS": 9.25,
         "EXT_AG": 0.05,  # 消光较低
         "E_BP_RP": 0.03,
-        # ==============================================================================
-        # 5. 天体测量与动力学先验基准 (Astrometry & Kinematics Priors)
-        # ==============================================================================
-        "PLX_REF": 1.41,  # 对应 ~710 pc
-        "PMRA_REF": -1.55,  # 较小的自行特征
-        "PMDEC_REF": -1.05,
+        "PLX_REF": 1.41, "PMRA_REF": -1.55, "PMDEC_REF": -1.05,
         "RV_REF": 34.0,
         "UVW_REF": np.array([-10.5, -20.2, -5.1]),
-        # ==============================================================================
-        # 6. 经验约束与质量容忍度 (Tolerance & Quality Control)
-        # ==============================================================================
         "PM_RADIUS": 2.0,  # 较远星团，自行散布较小
         "PLX_ERROR": 0.3,
         "CMD_DEV": 0.6,
-        # --- 种子筛选动态配置 ---
         "SEED_RADIUS": 2.0,
         "SEED_PLX_LIM": 0.9,  # PLX_ERROR * 3
         "SEED_MAX_MAG": 18.0,
@@ -547,11 +340,11 @@ CLUSTERS = {
     },
 }
 
-# -----------------------------------------------------------------
-# 数据清单 (Manifest Registry)
-# -----------------------------------------------------------------
 
-# --- 字段映射模板 ---
+# =================================================================
+# 6. 数据清单 (Manifest Registry)
+# =================================================================
+# 6.1 字段映射模板
 FIELDS_VIZIER = {
     "id": "Source",
     "ra": "RA_ICRS",
@@ -580,7 +373,7 @@ FIELDS_GAIA_ARCHIVE = {
     "rv": "radial_velocity",
 }
 
-
+# 6.2 配置辅助函数
 def _make_gaia_entry(idx, file_pattern, fields=FIELDS_GAIA_ARCHIVE, pre_filters=None):
     """生成 Gaia 数据源标准配置项的辅助函数"""
     return {
@@ -604,7 +397,6 @@ def _make_gaia_entry(idx, file_pattern, fields=FIELDS_GAIA_ARCHIVE, pre_filters=
             "aln": AlnActions.pass_through,
         },
     }
-
 
 def _make_seed_entry(idx, base_idx, with_pm=False, pre_filters=None, fields=FIELDS_GAIA_ARCHIVE):
     """
@@ -642,7 +434,6 @@ def _make_seed_entry(idx, base_idx, with_pm=False, pre_filters=None, fields=FIEL
             "aln": AlnActions.pass_through,
         },
     }
-
 
 def _make_catalog_entry(
     idx,
@@ -688,7 +479,7 @@ def _make_catalog_entry(
         entry["pre_filters"] = pre_filters
     return entry
 
-
+# 6.3 核心数据清单
 MANIFEST = {
     # ==============================================================================
     # 1. Target Cluster Data (Gaia DR3 Source Fields & Seed Samples)
@@ -891,9 +682,9 @@ MANIFEST = {
     ),
 }
 
-# -----------------------------------------------------------------
-# 算法配置与物理常数
-# -----------------------------------------------------------------
+# =================================================================
+# 7. 算法流水线配置 (Pipeline & GMM Configuration)
+# =================================================================
 GMM_CONFIG = {
     "FULL_NAME": "SeedGMM",
     "SHORT_NAME": "SG",
@@ -917,6 +708,3 @@ GMM_CONFIG = {
     "tol": 1e-5,
     "use_experimental": True,  # 启用实验性功能，如基于近邻的智能初始化
 }
-
-MEMBER_SAMPLE_THRESHOLD = 0.2
-GOLDEN_SAMPLE_THRESHOLD = 0.8  # 补全缺失的门限值

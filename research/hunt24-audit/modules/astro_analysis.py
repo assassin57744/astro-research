@@ -15,10 +15,11 @@ from config import (  # config.py 位于 modules/ 的上一级目录
 
 
 class AstroAnalyzer:
-    def __init__(self, db_instance, target_cluster=None, target_category=None):
+    def __init__(self, db_instance, target_cluster=None, target_category=None, mode="3d"):
         self.db = db_instance
         self.target_cluster = target_cluster
         self.target_category = target_category
+        self.mode = mode
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
 
         # 定义标准特征组，便于自动增强
@@ -31,12 +32,20 @@ class AstroAnalyzer:
     def _save_plot(self, fig, prefix, key_ref=None):
         """[内部工具] 统一保存图表到指定目录并关闭画布。"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cluster_id = self.target_cluster or cfg.DEFAULT_CLUSTER
+        cluster_id = self.target_cluster
         if cluster_id not in cfg.CLUSTERS:
             self.logger.error(f"❌ 未知的星团 ID: {cluster_id}")
             return
-        target_field = cfg.CLUSTERS[cluster_id]["NAME"]
-        filename = f"{prefix}_{target_field}_{key_ref or 'none'}_{timestamp}.png"
+        
+        # 优化文件名：增加 mode 和 category 标识，便于溯源
+        category = key_ref or self.target_category or "none"
+        filename = TMPL.FILE_PLOT.format(
+            cluster=cluster_id,
+            category=category,
+            mode=self.mode,
+            prefix=prefix,
+            timestamp=timestamp,
+        )
 
         # 扁平化处理：直接使用导出根目录，不再创建 plots 子目录
         plot_dir = cfg.EXPORT_DIR
@@ -68,11 +77,11 @@ class AstroAnalyzer:
             ax (matplotlib.axes.Axes, optional): 绘图轴对象。
         """
         if key_ref is None:
-            key_ref = self.target_category or cfg.DEFAULT_CATEGORY
+            key_ref = self.target_category
 
         ref_cfg = DATA.get(key_ref)
         if not ref_cfg:
-            self.logger.warning(f"未找到参考配置: {key_ref}")
+            self.logger.warning(f"⚠️ [VPD] 未找到参考星表配置: {key_ref}，将不绘制背景。")
             t_ref = None
             col_prob = None
         else:
@@ -287,14 +296,19 @@ class AstroAnalyzer:
         # 1. 准备就绪视图
         view_name = result_table
         prob_col = STD_COLS["PROB"]
-        cat = self.target_category or cfg.DEFAULT_CATEGORY
+        cat = self.target_category
         ref_prob_col = TMPL.COL_PROB.format(idx=cat)
 
-        # 2. 提取分歧样本
-        discrepancy_view = f"v_discrepancy_{ref_table}"
+        # 2. 提取分歧样本：增加集群、类别和模式前缀防止覆盖
+        discrepancy_view = TMPL.V_DIFF.format(
+            cluster=self.target_cluster.lower(),
+            category=cat,
+            mode=self.mode,
+            idx=ref_table,
+        )
         sql = f"""
             SELECT * FROM {view_name}
-            WHERE {prob_col} > 0.70 AND ({ref_prob_col} < 0.30 OR {ref_prob_col} IS NULL)
+            WHERE {prob_col} > {cfg.AUDIT_PROB_HIGH} AND ({ref_prob_col} < {cfg.AUDIT_PROB_LOW} OR {ref_prob_col} IS NULL)
         """
         self.db.register_view_from_sql(discrepancy_view, sql)
         count = self.db.get_row_count(discrepancy_view)
@@ -330,7 +344,7 @@ class AstroAnalyzer:
 
     def report_validation_results(self, df_audit_report, t_ref):
         """审计结果汇总报告。"""
-        output_path = cfg.EXPORT_DIR / f"new_candidates_vs_{t_ref}.csv"
+        output_path = cfg.EXPORT_DIR / TMPL.FILE_NEW_CANDIDATES.format(ref=t_ref)
         df_audit_report.to_csv(output_path, index=False)
 
         passed = len(
@@ -395,7 +409,7 @@ class AstroAnalyzer:
         统一了背景星、文献成员和我方新发现候选者的空间可视化。
         """
         if key_ref is None:
-            key_ref = self.target_category or cfg.DEFAULT_CATEGORY
+            key_ref = self.target_category
 
         ref_table = DATA[key_ref]["stx_view"]
         self.logger.info(f"正在生成空间分布对比图: {v_target} vs {ref_table}")
@@ -459,7 +473,7 @@ class AstroAnalyzer:
         # 4. 修饰图表
         ax.set_xlabel("RA (deg)")
         ax.set_ylabel("Dec (deg)")
-        ax.set_title(f"Spatial Distribution: {cfg.CLUSTERS[cfg.target_cluster]['NAME'].upper()}")
+        ax.set_title(f"Spatial Distribution: {self.target_cluster.upper()} ({self.mode.upper()})")
         ax.set_aspect("equal", adjustable="datalim")
         ax.invert_xaxis()
         ax.legend(loc="best", markerscale=3)
@@ -510,7 +524,7 @@ class AstroAnalyzer:
 
         # 3. 美化与保存
         plt.title(
-            f"Membership Probability Distribution - {cfg.CLUSTERS[self.target_cluster]['NAME'].upper()}",
+            f"Membership Probability Distribution - {self.target_cluster.upper()}",
             fontsize=14,
             pad=20,
         )
@@ -535,13 +549,14 @@ class AstroAnalyzer:
         self.logger.info("--- 开始回溯审计漏检源 ---")
 
         # 统计 RUWE
-        bad_data = df_missing[df_missing["ruwe"] > 1.4]
-        self.logger.info(f"数据质量差 (RUWE > 1.4): {len(bad_data)} 个 (建议维持剔除)")
+        bad_data = df_missing[df_missing["ruwe"] > cfg.AUDIT_RUWE_LIMIT]
+        self.logger.info(f"数据质量差 (RUWE > {cfg.AUDIT_RUWE_LIMIT}): {len(bad_data)} 个 (建议维持剔除)")
 
         # 统计视差残差
-        # 假设 plx_cluster 是 Pleiades 的标准视差 ~7.35
-        plx_dist = (df_missing["plx"] - 7.35).abs()
-        wrong_dist = df_missing[plx_dist > 1.0]  # 距离偏差超过 ~20pc
+        ctx = cfg.CLUSTERS.get(self.target_cluster, {})
+        plx_ref = ctx.get("PLX_REF", 0.0)
+        plx_dist = (df_missing["plx"] - plx_ref).abs()
+        wrong_dist = df_missing[plx_dist > cfg.AUDIT_PLX_RESIDUAL_LIMIT]  # 距离偏差超过 ~20pc
         self.logger.info(f"距离显著偏离星团中心: {len(wrong_dist)} 个 (建议维持剔除)")
 
         # 剩余的源：可能是你的模型“漏网之鱼”
@@ -600,18 +615,18 @@ class AstroAnalyzer:
 
         # 基于【交集样本】进行共识分类统计
         both_high = len(
-            df_overlap[(df_overlap[sg_prob_col] >= 0.7) & (df_overlap[col_prob] >= 0.7)]
+            df_overlap[(df_overlap[sg_prob_col] >= cfg.AUDIT_PROB_HIGH) & (df_overlap[col_prob] >= cfg.AUDIT_PROB_HIGH)]
         )
         both_low = len(
-            df_overlap[(df_overlap[sg_prob_col] < 0.3) & (df_overlap[col_prob] < 0.3)]
+            df_overlap[(df_overlap[sg_prob_col] < cfg.AUDIT_PRO_LOW) & (df_overlap[col_prob] < cfg.AUDIT_PROB_LOW)]
         )
 
         # 歧见统计：ID 都在，但概率判定冲突
         only_me = len(
-            df_overlap[(df_overlap[sg_prob_col] >= 0.7) & (df_overlap[col_prob] < 0.3)]
+            df_overlap[(df_overlap[sg_prob_col] >= cfg.AUDIT_PROB_HIGH) & (df_overlap[col_prob] < cfg.AUDIT_PROB_LOW)]
         )
         only_ref = len(
-            df_overlap[(df_overlap[sg_prob_col] < 0.3) & (df_overlap[col_prob] >= 0.7)]
+            df_overlap[(df_overlap[sg_prob_col] < cfg.AUDIT_PROB_LOW) & (df_overlap[col_prob] >= cfg.AUDIT_PROB_HIGH)]
         )
 
         # --- 3. 生成报告文本 ---
@@ -759,13 +774,13 @@ class AstroAnalyzer:
 
         # 2. 统计星等分布
         total_missing = len(df_missing)
-        dark_samples = df_missing[df_missing["phot_g_mean_mag"] > 19]
+        dark_samples = df_missing[df_missing["phot_g_mean_mag"] > cfg.AUDIT_MAG_LIMIT_HUNT24]
         dark_count = len(dark_samples)
         percentage = (dark_count / total_missing) * 100 if total_missing > 0 else 0
 
         self.logger.info(f"📈 遗漏源统计摘要:")
         self.logger.info(f"   - 总计遗漏: {total_missing} 颗")
-        self.logger.info(f"   - 其中暗端 (G > 19): {dark_count} 颗")
+        self.logger.info(f"   - 其中暗端 (G > {cfg.AUDIT_MAG_LIMIT_HUNT24}): {dark_count} 颗")
         self.logger.info(f"   - 暗端占比: {percentage:.2f}%")
 
         if percentage > 50:
@@ -794,7 +809,7 @@ class AstroAnalyzer:
 
         # 保存图表
         # 扁平化处理：将原本散落在 reports 下的内容统一收纳到数据导出目录
-        save_path = cfg.EXPORT_DIR / "hunt24_missing_mag_dist.png"
+        save_path = cfg.EXPORT_DIR / TMPL.FILE_MISS_MAG_DIST
         plt.savefig(save_path)
         self.logger.info(f"💾 星等分布直方图已保存至: {save_path}")
 
@@ -810,7 +825,7 @@ class AstroAnalyzer:
         v_hunt = DATA[IDX_HUNT]["aln_view"]
 
         # 结果表名：标识是对 Hunt24 的审计结果
-        t_audit_report = f"audit_report_hunt24_by_{t_candidates}"
+        t_audit_report = TMPL.V_ADT_HUNT24.format(src=t_candidates)
         self.logger.info(f"🔍 正在审计 Hunt24 星表... 使用 {t_candidates} 作为校验准则")
 
         # 核心逻辑：以 Hunt24 (h) 为主，对比 PG候选 (c)

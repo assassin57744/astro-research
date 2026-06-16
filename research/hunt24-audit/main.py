@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 # 按照扁平化结构更新导入路径
-from modules.astro_db import AstroDB
+from modules.astro_db import AstroDB, AssetManager
 from modules.astro_workflow import AstroWorkflow
 
 import config as cfg
@@ -24,7 +24,7 @@ class NameShortenerFilter(logging.Filter):
         # 按照用户要求：只打印 文件名和行号 (例如: validator.py:456)
         # record.filename 获取文件名，record.lineno 获取调用处的行号
         record.call_path = f"{record.filename}:{record.lineno}"
-        
+
         return True
 
 
@@ -74,17 +74,18 @@ def setup_logging(log_dir=cfg.LOG_DIR, level=logging.INFO):
 
 
 def _initialize_pipeline_components(
-    target_cluster_id: str, target_category: str, mode: str
+    target_cluster_id: str, target_category: str, mode: str, db: AstroDB = None
 ):
     """初始化核心管道组件和配置。"""
-    cfg.GMM_CONFIG["dim_mode"] = mode
     ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
     ctx_cluster["id"] = target_cluster_id
     data_manifest = cfg.MANIFEST
 
-    db = AstroDB(manifest=data_manifest)
+    if db is None:
+        db = AstroDB(manifest=data_manifest)
+
     wf = AstroWorkflow(
-        db, target_cluster=target_cluster_id, target_category=target_category
+        db, target_cluster=target_cluster_id, target_category=target_category, mode=mode
     )
 
     ref_tables = [
@@ -98,7 +99,8 @@ def _initialize_pipeline_components(
         cfg.IDX_RISB,
     ]
     logger.info(
-        f"🚀 初始化管道组件完成。目标星团: {target_cluster_id}, 模式: {mode}, 审计参考: {target_category}"
+        f"🚀 初始化管道组件完成。目标星团: {target_cluster_id}, "
+        f"执行模式: {mode}, 审计参考: {target_category}"
     )
     return db, wf, ctx_cluster, data_manifest, ref_tables
 
@@ -115,7 +117,8 @@ def _ingest_and_prepare_data(
     db.import_raw(target_cluster_id=target_cluster_id, force=False)
 
     logger.info(
-        f"📐 [2/5] 正在执行数据对齐与虚拟视图创建 ({target_cluster_id}, 模式: {cfg.GMM_CONFIG['dim_mode']})..."
+        f"📐 [2/5] 正在执行数据对齐与虚拟视图创建 "
+        f"({target_cluster_id}, 模式: {wf.mode})..."
     )
     wf.prepare_field_data(ref_tables, ctx_cluster)
     logger.info("✅ 数据准备阶段完成。")
@@ -124,7 +127,7 @@ def _ingest_and_prepare_data(
 def _execute_gmm_algorithm(wf: AstroWorkflow, ctx_cluster: dict) -> str:
     """执行核心 GMM 成员识别算法。"""
     logger.info(
-        f"🧠 [3/5] 启动 GMM 成员识别内核 ({cfg.GMM_CONFIG['dim_mode']} 模式)..."
+        f"🧠 [3/5] 启动 GMM 成员识别内核 ({wf.mode} 模式)..."
     )
     t_result = wf.run_pipeline(ctx_cluster)
     logger.info(f"✨ 算法推断完成，结果表: {t_result}")
@@ -191,15 +194,16 @@ def _export_pipeline_results(
     logger.info("💾 [Export] 启动数据资产导出模块...")
 
     # 构造标准化的导出文件名前缀，包含星团 ID、审计目录及执行模式
-    # 生成示例: M45_hunt_3d_cross_summary.csv
-    export_base = f"{target_cluster_id}_{target_category}_{mode}"
+    export_base = cfg.TMPL.FILE_EXPORT_BASE.format(
+        cluster=target_cluster_id, category=target_category, mode=mode
+    )
 
     # A. 导出交叉比对汇总宽表：包含 Gaia Source ID, 算法概率以及双方一致性分类标签
     v_cross_total = audit_res.get("audit_views", {}).get("v_cross_audit_total")
     if v_cross_total:
         db.export_table(
             v_cross_total,
-            filename=f"{export_base}_cross_summary",
+            filename=cfg.TMPL.FILE_CROSS_SUMMARY.format(base=export_base),
             format="csv",
             export_dir=cfg.RESULTS_DIR,
         )
@@ -208,7 +212,7 @@ def _export_pipeline_results(
     if v_final_audited:
         db.export_table(
             v_final_audited,
-            filename=f"{export_base}_deep_audit",
+            filename=cfg.TMPL.FILE_DEEP_AUDIT.format(base=export_base),
             format="csv",
             export_dir=cfg.RESULTS_DIR,
         )
@@ -233,7 +237,7 @@ def _log_final_report(
         f"  🔹 目标星团: {target_cluster_id} ({ctx_cluster['NAME']})",
         f"  🔹 执行模式: {mode.upper()} -> 物理特征空间: {used_features}",
         f"  🔹 审计参考: {target_category}",
-        "-" * 65
+        "-" * 65,
     ]
 
     p_stats = v_all_audit_data.get("stats", {})
@@ -249,8 +253,12 @@ def _log_final_report(
 
     report_lines.append("  [2] 文献交叉比对 (Cross Match):")
     report_lines.append(f"      - 双方共识成员 (Matched):   {matched} 颗")
-    report_lines.append(f"      - 算法漏检 (Recall/Missed): {ref_missed} 颗 (漏检率: {miss_rate:.2f}%)")
-    report_lines.append(f"      - 算法独有候选 (PG Only):   {a_stats.get('pgmm_only', 0)}")
+    report_lines.append(
+        f"      - 算法漏检 (Recall/Missed): {ref_missed} 颗 (漏检率: {miss_rate:.2f}%)"
+    )
+    report_lines.append(
+        f"      - 算法独有候选 (PG Only):   {a_stats.get('pgmm_only', 0)}"
+    )
 
     if deep_stats:
         total_audited = sum(deep_stats.values())
@@ -264,9 +272,15 @@ def _log_final_report(
         report_lines.append("  [3] 深度审计结果 (Deep Validation):")
         report_lines.append(f"      - 深度审计样本总数: {total_audited} 颗")
         report_lines.append(f"      - 双重确认成员 (物理+文献): {confirmed_both} 颗")
-        report_lines.append(f"      - 物理验证通过 (New Discovery): {new_finds} 颗 (发现准确率: {discovery_precision:.2f}%)")
-        report_lines.append(f"      - 确认为背景噪点 (Contamination): {deep_stats.get('Contamination', 0)}")
-        report_lines.append(f"      - 仅文献收录 (Lit. Only):       {deep_stats.get('Literature Only', 0)}")
+        report_lines.append(
+            f"      - 物理验证通过 (New Discovery): {new_finds} 颗 (发现准确率: {discovery_precision:.2f}%)"
+        )
+        report_lines.append(
+            f"      - 确认为背景噪点 (Contamination): {deep_stats.get('Contamination', 0)}"
+        )
+        report_lines.append(
+            f"      - 仅文献收录 (Lit. Only):       {deep_stats.get('Literature Only', 0)}"
+        )
 
     report_lines.append("-" * 65)
     report_lines.append(f"  ✅ 任务状态: 成功完成 | 资产导出路径: {cfg.RESULTS_DIR}")
@@ -277,8 +291,10 @@ def _log_final_report(
         logger.info(line)
 
     # 2. 保存到分析结果目录
-    export_base = f"{target_cluster_id}_{target_category}_{mode}"
-    report_path = cfg.RESULTS_DIR / f"{export_base}_final_report.txt"
+    export_base = cfg.TMPL.FILE_EXPORT_BASE.format(
+        cluster=target_cluster_id, category=target_category, mode=mode
+    )
+    report_path = cfg.RESULTS_DIR / cfg.TMPL.FILE_FINAL_REPORT.format(base=export_base)
 
     try:
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,7 +304,7 @@ def _log_final_report(
         logger.error(f"❌ 无法保存最终报告副本: {e}")
 
 
-def run_pipeline(target_cluster_id: str, target_category: str, mode: str):
+def run_pipeline(target_cluster_id: str, target_category: str, mode: str, db: AstroDB = None, skip_setup: bool = False):
     """
     驱动端到端的天文数据分析与审计管线。
 
@@ -298,13 +314,17 @@ def run_pipeline(target_cluster_id: str, target_category: str, mode: str):
         target_cluster_id (str): 目标星团标识符（例如 'M45'）。
         target_category (str): 用于审计比对的参考星表类别（例如 'hunt'）。
         mode (str): GMM 执行模式（如 '3d', '6d_p'）。
+        db (AstroDB, optional): 已存在的数据库实例。
+        skip_setup (bool): 是否跳过数据导入与标准化阶段。
     """
+    db_provided = db is not None
     db, wf, ctx_cluster, data_manifest, ref_tables = _initialize_pipeline_components(
-        target_cluster_id, target_category, mode
+        target_cluster_id, target_category, mode, db=db
     )
 
     try:
-        _ingest_and_prepare_data(db, wf, target_cluster_id, ref_tables, ctx_cluster)
+        if not skip_setup:
+            _ingest_and_prepare_data(db, wf, target_cluster_id, ref_tables, ctx_cluster)
 
         t_result = _execute_gmm_algorithm(wf, ctx_cluster)
 
@@ -332,8 +352,9 @@ def run_pipeline(target_cluster_id: str, target_category: str, mode: str):
         logger.error(f"❌ 流水线在运行期间发生严重崩溃: {str(e)}", exc_info=True)
         raise e
     finally:
-        db.close()
-        logger.info("🔒 数据库连接已释放。")
+        if not db_provided:
+            db.close()
+            logger.info("🔒 数据库连接已释放。")
 
 
 if __name__ == "__main__":
@@ -343,8 +364,8 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # 星团 ID (必填，位置参数)
-    parser.add_argument("cluster", type=str, help="目标星团名称 (例如: M45, M44, M67)")
+    # 星团 ID (位置参数，运行管线模式时必填)
+    parser.add_argument("cluster", type=str, nargs='?', help="目标星团名称 (运行管线模式下必填, 例如: M45, M44, M67)")
 
     # 审计对象 (可选，缺省 hunt)
     parser.add_argument(
@@ -361,8 +382,8 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="3d",
-        choices=valid_modes,
-        help="GMM 算法的特征维度模式",
+        choices=valid_modes + ["all"],
+        help="GMM 算法的特征维度模式，使用 'all' 将循环执行所有模式",
     )
 
     # 日志级别 (可选，缺省 INFO)
@@ -374,16 +395,53 @@ if __name__ == "__main__":
         help="控制台日志输出级别",
     )
 
+    # --- 资产维护命令组 ---
+    maint_group = parser.add_argument_group("资产维护命令 (Maintenance)")
+    maint_group.add_argument(
+        "--backup", 
+        action="store_true", 
+        help="手动备份 data/raw 目录至备份库 (保留 A/B 两代)"
+    )
+    maint_group.add_argument(
+        "--restore", 
+        type=str, 
+        nargs='?', 
+        const='A', 
+        choices=['A', 'B'],
+        default=argparse.SUPPRESS,
+        help="从备份中恢复数据 (仅提供参数名时默认为 A)"
+    )
+    maint_group.add_argument(
+        "--query-backup", 
+        action="store_true", 
+        help="查询当前备份库的状态信息"
+    )
+
     args = parser.parse_args()
 
     # 2. 初始化日志系统 (根据参数设置级别)
     numeric_level = getattr(logging, args.log_level.upper(), None)
     if not isinstance(numeric_level, int):
         numeric_level = logging.INFO
-        
+
     logger = setup_logging(level=numeric_level)
 
-    # 2. 参数校验与预处理
+    # 3. 处理维护命令 (直接使用 AssetManager，不触发数据库连接，避免多余初始化日志)
+    if args.query_backup:
+        AssetManager().query_backup_assets()
+        sys.exit(0)
+    
+    if args.backup:
+        AssetManager().manage_backup_assets()
+        sys.exit(0)
+
+    if getattr(args, 'restore', None):
+        AssetManager().restore_backup_assets(target=getattr(args, 'restore'))
+        sys.exit(0)
+
+    if not args.cluster:
+        parser.error("运行管线模式必须提供 cluster 参数。使用 --help 查看维护命令。")
+
     # 星团名不区分大小写匹配
     cluster_input = args.cluster.upper()
     cluster_map = {k.upper(): k for k in cfg.CLUSTERS.keys()}
@@ -399,4 +457,24 @@ if __name__ == "__main__":
     logger.info(
         f"🚀 启动天文数据分析管道 - 目标: {target_cluster_id}, 模式: {args.mode}, 审计参考: {args.category}"
     )
-    run_pipeline(target_cluster_id, args.category, args.mode)
+
+    if args.mode == "all":
+        # 1. 初始化共享数据库实例，防止在循环中重复连接与断开
+        shared_db = AstroDB(manifest=cfg.MANIFEST)
+        try:
+            # 2. 预先执行一次性的数据加载与标准化 (对齐逻辑与模式无关，运行一次即可)
+            # 获取基础配置以执行全局 setup
+            _, wf_setup, ctx_cluster, _, ref_tables = _initialize_pipeline_components(
+                target_cluster_id, args.category, valid_modes[0], db=shared_db
+            )
+            _ingest_and_prepare_data(shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster)
+
+            # 3. 循环执行算法核心，跳过已完成的 setup 阶段
+            for m in valid_modes:
+                logger.info(f"🔄 [批量模式] 正在启动子任务 - 模式: {m}")
+                run_pipeline(target_cluster_id, args.category, m, db=shared_db, skip_setup=True)
+        finally:
+            shared_db.close()
+            logger.info("🔒 [All Mode] 共享数据库连接已释放。")
+    else:
+        run_pipeline(target_cluster_id, args.category, args.mode)

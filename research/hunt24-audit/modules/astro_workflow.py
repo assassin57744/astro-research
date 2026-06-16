@@ -42,17 +42,19 @@ class AstroWorkflow:
         manifest (dict): 来源于数据库实例的数据配置清单。
     """
 
-    def __init__(self, db_instance, target_cluster=None, target_category=None):
+    def __init__(self, db_instance, target_cluster=None, target_category=None, mode="3d"):
         """初始化工作流实例。
 
         Args:
             db_instance (AstroDB): 活跃的 AstroDB 数据库对象。
             target_cluster (str): 当前处理的星团 ID。
             target_category (str): 当前审计的类别。
+            mode (str): 算法执行模式。
         """
         self.db = db_instance
         self.target_cluster = target_cluster
         self.target_category = target_category
+        self.mode = mode
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(db_instance, "data_manifest", {})
 
@@ -101,8 +103,12 @@ class AstroWorkflow:
         Returns:
             str: 注册成功的视图名称。
         """
-        cluster_name = CLUSTERS[self.target_cluster]["NAME"]
-        v_subset = cfg.TMPL.V_RES_SUB.format(cluster=cluster_name, tag=tag)
+        v_subset = cfg.TMPL.V_RES_SUB.format(
+            cluster=self.target_cluster.lower(),
+            category=self.target_category,
+            mode=self.mode,
+            tag=tag,
+        )
         sql = f"SELECT * FROM {t_source}"
         if conditions:
             sql += f" WHERE {conditions}"
@@ -122,7 +128,12 @@ class AstroWorkflow:
         Returns:
             str: 注册成功的缺失源视图名称（v_miss_...）。
         """
-        v_result = cfg.TMPL.V_MISS.format(idx=k_ref)
+        v_result = cfg.TMPL.V_MISS.format(
+            cluster=self.target_cluster.lower(),
+            category=self.target_category,
+            mode=self.mode,
+            idx=k_ref,
+        )
         self.logger.info(
             f"正在构建 {t_source} 与 {k_ref} 的漏检源分析视图: {v_result}"
         )
@@ -175,8 +186,11 @@ class AstroWorkflow:
             """
             sql = f"SELECT base.*, ref_{k}.{col_prob_alias} FROM ({sql}) AS base {join_part}"
 
-        cluster_name = CLUSTERS[self.target_cluster]["NAME"]
-        view_name = TMPL.V_ALL.format(cluster=cluster_name)
+        view_name = TMPL.V_ALL.format(
+            cluster=self.target_cluster.lower(),
+            category=self.target_category,
+            mode=self.mode,
+        )
 
         # 统一使用标准化视图注册接口
         self.db.register_view_from_sql(view_name, sql)
@@ -406,10 +420,7 @@ class AstroWorkflow:
         Returns:
             dict: 包含处理状态、视图名及候选者统计量的字典。
         """
-        cluster_name = CLUSTERS[self.target_cluster]["NAME"]
-        self.logger.info(
-            f"[{cluster_name}] 启动 post_pipeline: 正在生成成员子集视图..."
-        )
+        self.logger.info(f"[{self.target_cluster}] 启动 post_pipeline: 正在生成成员子集视图...")
         try:
             condi_golden = f"{STD_COLS['PROB']} >= {GOLDEN_SAMPLE_THRESHOLD}"
             v_golden = self.get_subset_view(
@@ -430,7 +441,7 @@ class AstroWorkflow:
             stats = self.db.execute(stats_sql).fetchone()
 
             self.logger.debug("=" * 60)
-            self.logger.debug(f"📊 [{cluster_name}] Post-Pipeline 后处理数据审计摘要:")
+            self.logger.debug(f"📊 [{self.target_cluster}] Post-Pipeline 后处理数据审计摘要:")
             self.logger.debug(f"  🔹 金种子视图 ({v_golden}): {stats[0]} 颗")
             self.logger.debug(f"  🔹 候选者视图 ({v_candidates}): {stats[1]} 颗")
             self.logger.debug("=" * 60)
@@ -505,7 +516,8 @@ class AstroWorkflow:
         
         v_audit_base = TMPL.V_ADT.format(
             category=self.target_category, 
-            cluster=self.target_cluster.lower()
+            cluster=self.target_cluster.lower(),
+            mode=self.mode,
         )
         views = {
             "v_cross_audit_total": v_cross_audit,
@@ -602,8 +614,11 @@ class AstroWorkflow:
         
         final_report = pd.merge(df_subset, df_audit_raw, on="id", how="left")
 
-        cluster_name = CLUSTERS[self.target_cluster]["NAME"]
-        report_name = f"Literature_Audit_{label}_{cluster_name}_{datetime.now().strftime('%H%M%S')}.csv"
+        report_name = TMPL.FILE_LIT_REPORT.format(
+            label=label,
+            cluster=self.target_cluster,
+            timestamp=datetime.now().strftime("%H%M%S"),
+        )
         output_path = cfg.EXPORT_DIR / report_name
         
         try:
@@ -690,7 +705,7 @@ class AstroWorkflow:
             self.logger.warning("⚠️ 验证器返回的审计数据为空，跳过落库流程。")
             return None
 
-        output_table = f"{target}_audited"
+        output_table = TMPL.V_AUDITED.format(src=target)
         self.db.register_table_from_df(output_table, df_report)
         
         self.logger.info(f"✅ [Workflow] 审计报告已保存至数据库表: {output_table}")
@@ -758,7 +773,11 @@ class AstroWorkflow:
         Returns:
             str: 交叉审计总视图名。
         """
-        v_audit_base = TMPL.V_ADT.format(category=self.target_category, cluster=self.target_cluster.lower())
+        v_audit_base = TMPL.V_ADT.format(
+            category=self.target_category,
+            cluster=self.target_cluster.lower(),
+            mode=self.mode,
+        )
         v_cross_audit = v_audit_base + "_cross"
 
         self.logger.info(f"💾 正在构建全外连接总表视图: {v_cross_audit}")
@@ -796,20 +815,22 @@ class AstroWorkflow:
         Returns:
             tuple: (配置字典, 运行模式字符串, 特征列名列表)。
         """
-        feature_map = GMM_CONFIG.get("feature_map", {})
+        # 采用局部副本，防止污染全局配置
+        gmm_cfg = GMM_CONFIG.copy()
+        current_mode = self.mode
+        gmm_cfg["dim_mode"] = current_mode
+
+        feature_map = gmm_cfg.get("feature_map", {})
         self.logger.debug(f"当前 GMM_CONFIG 中的 feature_map 配置:\n {feature_map}")
 
-        current_mode = GMM_CONFIG.get("dim_mode", "3d")
         if current_mode not in feature_map:
-            raise ValueError(
-                f"未知的运行模式: {current_mode}，请核实 feature_map 配置。"
-            )
+            raise ValueError(f"未知的运行模式: {current_mode}，请核实 feature_map 配置。")
 
         required_features = feature_map[current_mode]
         self.logger.info(
             f"🌌 当前运行模式: [{current_mode}], 所需核心特征空间: {required_features}"
         )
-        return GMM_CONFIG, current_mode, required_features
+        return gmm_cfg, current_mode, required_features
 
     def _load_raw_astrometry_data(
         self, ctx_cluster, required_features=None
@@ -924,7 +945,7 @@ class AstroWorkflow:
             self.logger.info(f"✅ [数据预检 - {label}] 样本特征完备，共计 {len(df_clean)} 颗星。")
         return df_clean
 
-    @astro_checkpoint(cache_table_name="cache_full_pipeline_result", force_refresh=True)
+    @astro_checkpoint(cache_table_template="cache_{cluster}_{category}_{mode}_res", force_refresh=True)
     def run_pipeline(self, ctx_cluster):
         """驱动核心 GMM 计算流水线：执行双轨制内核推理并固化结果。
 
@@ -966,8 +987,12 @@ class AstroWorkflow:
         params = engine.fit(df_seeds_final, df_target_final)
         df_prob = engine.predict(df_target_final, params)
 
-        cluster_name = CLUSTERS[self.target_cluster]["NAME"]
-        v_res_pg = cfg.TMPL.T_RES_SG.format(cluster=cluster_name)
+        cluster_id = self.target_cluster.lower()
+        v_res_pg = cfg.TMPL.T_RES_SG.format(
+            cluster=cluster_id, 
+            category=self.target_category, 
+            mode=current_mode
+        )
         self.db.register_table_from_df(v_res_pg, df_prob)
         self.db.save_to_warehouse(v_res_pg)
 
