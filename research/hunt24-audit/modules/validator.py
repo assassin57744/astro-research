@@ -298,14 +298,22 @@ class UnifiedMemberValidator:
 
         # A. 动力学残差 (自行 或 物理速度)
         if is_physical_v and "u" in audit_matrix.columns:
-            v_ref = self.config.get("UVW_REF", np.zeros(3))
+            # 🚀 动力学审计：优先使用星团先验 UVW 速度矢量
+            v_ref = self.config.get("UVW_REF")
+            if v_ref is None:
+                self.logger.warning(f"⚠️ {self.cluster_id} 缺失 UVW_REF 配置，使用零向量作为参考 (不建议)")
+                v_ref = np.zeros(3)
+
             v_res = np.sqrt(
                 (audit_matrix["u"] - v_ref[0]) ** 2
                 + (audit_matrix["v"] - v_ref[1]) ** 2
                 + (audit_matrix["w"] - v_ref[2]) ** 2
             )
+            # 针对不同星团，通过 V_ERROR 参数定义速度空间的“容忍半径” (km/s)
+            # 若配置缺失，则默认使用 2.0 km/s 作为典型的弥散尺度
             penalties["pm"] = v_res / self.config.get("V_ERROR", 2.0)
         else:
+            # 2D 模式下，针对不同星团，通过 PM_RADIUS 参数定义自行空间的“容忍半径” (mas/yr)
             penalties["pm"] = audit_matrix["pm_residual"] / self.config.get(
                 "PM_RADIUS", 3.0
             )
@@ -319,7 +327,7 @@ class UnifiedMemberValidator:
         # C. 视向速度残差 (如果列存在)
         if "rv" in audit_matrix.columns:
             rv_res = (audit_matrix["rv"] - self.config.get("RV_REF", 0.0)).abs()
-            penalties["rv"] = rv_res / self.config.get("RV_ERROR", 5.0)
+            penalties["rv"] = rv_res / self.config.get("RV_ERROR", cfg.DEFAULT_RV_ERROR)
 
         # D. 测光演化残差 (CMD)
         if self.cmd_interpolator and all(
@@ -349,12 +357,14 @@ class UnifiedMemberValidator:
 
         # 4. 硬门槛判定 (Kinematics Gate)
         # 核心逻辑：自行和视差(若存在)必须通过初步筛选，且 RV 不能偏离过大
-        kine_valid = audit_matrix["pm_score"] < 2.0
+        kine_score_limit = self.config.get("KINE_SCORE_LIMIT", 2.0)
+        kine_valid = audit_matrix["pm_score"] < kine_score_limit
+
         if "plx_score" in audit_matrix.columns:
-            kine_valid &= audit_matrix["plx_score"] < 2.0
+            kine_valid &= audit_matrix["plx_score"] < kine_score_limit
         if "rv_score" in audit_matrix.columns:
             kine_valid &= ~(
-                (audit_matrix["rv"].notna()) & (audit_matrix["rv_score"] >= 2.0)
+                (audit_matrix["rv"].notna()) & (audit_matrix["rv_score"] >= kine_score_limit)
             )
 
         # 5. 权重动态重分配与最终打分

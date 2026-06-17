@@ -173,6 +173,9 @@ CLUSTERS = {
         "PLX_REF": 7.33, "PMRA_REF": 20.10, "PMDEC_REF": -45.40,
         "RV_REF": 5.63,
         "UVW_REF": np.array([-6.05, -28.02, -14.34]),
+        "V_ERROR": 2.0,  # 速度空间容忍度 (km/s)
+        "RV_ERROR": 5.0, # 视向速度容忍度 (km/s)
+        "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛
         "PM_RADIUS": 3.0,  # 自行半径容忍度 (mas/yr)，参考 Hunt2024 Figure 3 分布范围
         "PLX_ERROR": 0.5,  # 视差误差容忍度 (mas)
         "CMD_DEV": 0.8,  # CMD 偏离容忍度 (mag)
@@ -201,6 +204,9 @@ CLUSTERS = {
         "PLX_REF": 5.35, "PMRA_REF": -36.0, "PMDEC_REF": -12.9,
         "RV_REF": 35.0,
         "UVW_REF": np.array([-34.5, -21.2, -6.8]),
+        "V_ERROR": 2.0,
+        "RV_ERROR": 5.0,
+        "KINE_SCORE_LIMIT": 2.0,
         "PM_RADIUS": 4.0,  # 自行半径容忍度 (mas/yr)
         "PLX_ERROR": 0.4,  # 视差误差/弥散容忍度 (mas)
         "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag)
@@ -230,6 +236,9 @@ CLUSTERS = {
         "PLX_REF": 21.41, "PMRA_REF": 101.10, "PMDEC_REF": -28.50,
         "RV_REF": 39.10,
         "UVW_REF": np.array([-42.24, -19.11, -1.45]),
+        "V_ERROR": 3.0, # 毕宿星团极其靠近，投影效应导致的速度残差容忍度需放宽
+        "RV_ERROR": 5.0,
+        "KINE_SCORE_LIMIT": 2.0,
         "PM_RADIUS": 12.0,  # 自行半径容忍度 (mas/yr)，离得太近导致自行发散严重
         "PLX_ERROR": 2.5,  # 视差误差/弥散容忍度 (mas)
         "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag) (主序带非常窄且干净)
@@ -258,6 +267,9 @@ CLUSTERS = {
         "PLX_REF": 11.60, "PMRA_REF": -12.11, "PMDEC_REF": -9.01,
         "RV_REF": -1.0,
         "UVW_REF": np.array([-1.7, -6.1, -1.3]),
+        "V_ERROR": 2.5,
+        "RV_ERROR": 5.0,
+        "KINE_SCORE_LIMIT": 2.0,
         "PM_RADIUS": 5.0,  # 自行散布容忍度
         "PLX_ERROR": 1.5,  # 视差绝对误差容忍度
         "CMD_DEV": 0.6,
@@ -287,6 +299,9 @@ CLUSTERS = {
         "PLX_REF": 1.17, "PMRA_REF": -10.96, "PMDEC_REF": -2.94,
         "RV_REF": 33.7,
         "UVW_REF": np.array([-21.4, -25.2, -15.1]),
+        "V_ERROR": 1.5, # 古老星团成员分布较为凝聚
+        "RV_ERROR": 3.0,
+        "KINE_SCORE_LIMIT": 2.0,
         "PM_RADIUS": 1.5,  # 远距离星团自行弥散极小
         "PLX_ERROR": 0.2,  # 视差容忍度收紧
         "CMD_DEV": 0.5,
@@ -317,6 +332,9 @@ CLUSTERS = {
         "PLX_REF": 0.14, "PMRA_REF": -3.18, "PMDEC_REF": -2.57,
         "RV_REF": -244.2,
         "UVW_REF": np.array([58.0, -241.0, 10.0]),  # 银晕轨道的典型运动学
+        "V_ERROR": 10.0, # 球状星团内部速度弥散度极高
+        "RV_ERROR": 10.0,
+        "KINE_SCORE_LIMIT": 2.5,
         "PM_RADIUS": 1.0,  # 远距离天体自行离散度极小
         "PLX_ERROR": 0.1,  # 视差门限需非常严苛
         "CMD_DEV": 0.4,  # 球状星团主序带极其狭窄
@@ -345,6 +363,9 @@ CLUSTERS = {
         "PLX_REF": 1.41, "PMRA_REF": -1.55, "PMDEC_REF": -1.05,
         "RV_REF": 34.0,
         "UVW_REF": np.array([-10.5, -20.2, -5.1]),
+        "V_ERROR": 2.0,
+        "RV_ERROR": 5.0,
+        "KINE_SCORE_LIMIT": 2.0,
         "PM_RADIUS": 2.0,  # 较远星团，自行散布较小
         "PLX_ERROR": 0.3,
         "CMD_DEV": 0.6,
