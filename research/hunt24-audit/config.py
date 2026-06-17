@@ -92,14 +92,14 @@ class TMPL:
     T_TBL = "tbl_{idx}"  # 表格逻辑名称
 
     # --- 算法结果与分析 ---
-    T_RES_SG = "pgmm_{cluster}_{category}_{mode}"  # SeedGMM 原始产出
-    T_MASTER = "master_{cluster}_{category}_{mode}" # [混合模式] 状态跟踪宽表
-    V_RES_SUB = "v_pgmm_{cluster}_{category}_{mode}_{tag}"  # 结果子集视图名模板, tag说明子集的特征(如 golden_members)
-    V_ALL = "v_wide_{cluster}_{category}_{mode}"  # 集成所有参考星表的分析大宽表
-    V_DIFF = "v_diff_{cluster}_{category}_{mode}_vs_{idx}"  # 分歧源 (与特定星表比对)
-    V_NEW = "v_new_{cluster}_{category}_{mode}_vs_{idx}"  # 全新发现源
-    V_MISS = "v_miss_{cluster}_{category}_{mode}_vs_{idx}"  # 漏检源
-    V_ADT = "v_audit_{category}_{cluster}_{mode}"  # 审计专用视图，包含交叉比对的结果和分析字段
+    T_RES_SG = "pgmm_{cluster}_{category}_{mode}_{algo}"  # SeedGMM 原始产出
+    T_MASTER = "master_{cluster}_{category}_{mode}_{algo}" # [混合模式] 状态跟踪宽表
+    V_RES_SUB = "v_pgmm_{cluster}_{category}_{mode}_{algo}_{tag}"  # 结果子集视图名模板
+    V_ALL = "v_wide_{cluster}_{category}_{mode}_{algo}"  # 集成所有参考星表的分析大宽表
+    V_DIFF = "v_diff_{cluster}_{category}_{mode}_{algo}_vs_{idx}"  # 分歧源
+    V_NEW = "v_new_{cluster}_{category}_{mode}_{algo}_vs_{idx}"  # 全新发现源
+    V_MISS = "v_miss_{cluster}_{category}_{mode}_{algo}_vs_{idx}"  # 漏检源
+    V_ADT = "v_audit_{category}_{cluster}_{mode}_{algo}"  # 审计专用视图
     V_ADT_INPUT = "v_audit_input_{src}"  # 审计输入增强视图
     V_AUDITED = "{src}_audited"  # 审计完成后的物化表名
     V_ADT_HUNT24 = "audit_report_hunt24_by_{src}"  # 针对 Hunt24 的专项审计结果
@@ -113,7 +113,7 @@ class TMPL:
     FILE_LIT_REPORT = "Lit_Audit_{label}_{cluster}_{timestamp}.csv"  # 文献审计报告
     FILE_PLOT = "{cluster}_{category}_{mode}_{prefix}_{timestamp}.png"  # 诊断图表文件名
     FILE_NEW_CANDIDATES = "new_candidates_vs_{ref}.csv"  # 新候选者验证清单
-    FILE_EXPORT_BASE = "{cluster}_{category}_{mode}"  # 导出文件名的基本前缀
+    FILE_EXPORT_BASE = "{cluster}_{category}_{mode}_{algo}"  # 导出文件名的基本前缀
     FILE_SEEDS = "{base}_seeds"  # 全量种子星导出文件名模板
     FILE_SEEDS_CORE = "{base}_seeds_core"  # 核心种子星导出文件名模板
     FILE_SEEDS_NOISE = "{base}_seeds_noise"  # 噪声种子星导出文件名模板
@@ -725,4 +725,6 @@ GMM_CONFIG = {
     "max_iter": 20,
     "tol": 1e-5,
     "use_experimental": True,  # 启用实验性功能，如基于近邻的智能初始化
+    "enable_subsampling": True,  # 是否启用背景下采样优化，以加速模型拟合
+    "subsampling_limit": 500000, # 下采样触发门限及目标样本量
 }

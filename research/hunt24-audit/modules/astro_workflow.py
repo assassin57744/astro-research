@@ -42,7 +42,7 @@ class AstroWorkflow:
         manifest (dict): 来源于数据库实例的数据配置清单。
     """
 
-    def __init__(self, db_instance, target_cluster=None, target_category=None, mode="3d"):
+    def __init__(self, db_instance, target_cluster=None, target_category=None, mode="3d", algo="dbscan"):
         """初始化工作流实例。
 
         Args:
@@ -50,17 +50,20 @@ class AstroWorkflow:
             target_cluster (str): 当前处理的星团 ID。
             target_category (str): 当前审计的类别。
             mode (str): 算法执行模式。
+            algo (str): 聚类算法名称 (如 'dbscan', 'hdbscan')。
         """
         self.db = db_instance
         self.target_cluster = target_cluster
         self.target_category = target_category
         self.mode = mode
+        self.algo = algo
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(db_instance, "data_manifest", {})
         self.t_master = cfg.TMPL.T_MASTER.format(
             cluster=self.target_cluster.lower(),
             category=self.target_category,
-            mode=self.mode
+            mode=self.mode,
+            algo=self.algo
         )
 
     def data_standardize(self, idx_data, cfg_data, manifest, ctx=None):
@@ -551,7 +554,20 @@ class AstroWorkflow:
         )
 
         self.logger.info(f"🔥 开始驱动 {kernel_name} 引擎计算...")
-        params = engine.fit(df_seeds_final, df_target_final)
+
+        # 🚀 [性能优化] 针对千万级背景样本的下采样策略
+        # 只有在 config.py 中显式开启且样本量超过门限时才执行
+        enable_sub = GMM_CONFIG.get("enable_subsampling", False)
+        sub_limit = GMM_CONFIG.get("subsampling_limit", 500000)
+
+        df_target_for_fit = df_target_final
+        if enable_sub and len(df_target_final) > sub_limit:
+            self.logger.info(
+                f"🚀 [性能优化] 背景样本量巨大 ({len(df_target_final)}), 正在下采样至 {sub_limit} 用于模型拟合..."
+            )
+            df_target_for_fit = df_target_final.sample(n=sub_limit, random_state=42)
+
+        params = engine.fit(df_seeds_final, df_target_for_fit)
         
         # 🚀 [混合模式] 步骤 2: 标记种子星类型 (Core/Noise)
         if hasattr(params, 'df_seeds_classified'):

@@ -74,7 +74,12 @@ def setup_logging(log_dir=cfg.LOG_DIR, level=logging.INFO):
 
 
 def _initialize_pipeline_components(
-    target_cluster_id: str, target_category: str, mode: str, db: AstroDB = None
+    target_cluster_id: str,
+    target_category: str,
+    mode: str,
+    algo: str,
+    result_mode: str = "brief",
+    db: AstroDB = None,
 ):
     """初始化核心管道组件和配置。"""
     ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
@@ -85,7 +90,11 @@ def _initialize_pipeline_components(
         db = AstroDB(manifest=data_manifest)
 
     wf = AstroWorkflow(
-        db, target_cluster=target_cluster_id, target_category=target_category, mode=mode
+        db,
+        target_cluster=target_cluster_id,
+        target_category=target_category,
+        mode=mode,
+        algo=algo,
     )
 
     # 🚀 优化：按需加载。只准备当前星团的 Field、Seeds 以及当前选定的审计参考表
@@ -98,9 +107,13 @@ def _initialize_pipeline_components(
         cfg.IDX_IDS_SIMBAD,
     ]
 
+    kernel_type = "PriorGMMEx (Experimental)" if cfg.GMM_CONFIG.get("use_experimental") else "PriorGMM (Standard)"
     logger.info(
-        f"🚀 初始化管道组件完成。目标星团: {target_cluster_id}, "
-        f"执行模式: {mode}, 审计参考: {target_category}"
+        f"🚀 初始化管道组件完成。星团: {target_cluster_id}, 模式: {mode}, "
+        f"内核: {kernel_type}, 算法: {algo.upper()}, "
+        f"种子处理: {cfg.GMM_CONFIG.get('cluster_algo', 'dbscan')}, "
+        f"结果等级: {result_mode.upper()}, "
+        f"审计对象: {target_category}"
     )
     return db, wf, ctx_cluster, data_manifest, ref_tables
 
@@ -126,7 +139,8 @@ def _ingest_and_prepare_data(
 
 def _execute_gmm_algorithm(wf: AstroWorkflow, ctx_cluster: dict) -> str:
     """执行核心 GMM 成员识别算法。"""
-    logger.info(f"🧠 [3/5] 启动 GMM 成员识别内核 ({wf.mode} 模式)...")
+    algo_name = cfg.GMM_CONFIG.get("cluster_algo", "unknown").upper()
+    logger.info(f"🧠 [3/5] 启动 GMM 成员识别内核 (模式: {wf.mode}, 算法: {algo_name})...")
     t_result = wf.run_pipeline(ctx_cluster)
     logger.info(f"✨ 算法推断完成，结果表: {t_result}")
     return t_result
@@ -188,13 +202,19 @@ def _export_pipeline_results(
     target_cluster_id: str,
     target_category: str,
     mode: str,
+    algo: str,
+    do_export: bool = False,
 ):
     """将管道结果导出到指定目录。"""
-    logger.info("💾 [Export] 启动数据资产导出模块...")
+    if not do_export:
+        logger.info("⏩ 跳过物理文件导出 (通过 CLI 参数禁用)。")
+        return
+
+    logger.info("💾 [Export] 正在执行耗时的数据资产导出任务...")
 
     # 构造标准化的导出文件名前缀，包含星团 ID、审计目录及执行模式
     export_base = cfg.TMPL.FILE_EXPORT_BASE.format(
-        cluster=target_cluster_id, category=target_category, mode=mode
+        cluster=target_cluster_id, category=target_category, mode=mode, algo=algo
     )
 
     # A. 导出交叉比对汇总宽表：包含 Gaia ID、算法概率、种子分类(Core/Noise)以及文献比对标签
@@ -224,6 +244,7 @@ def _log_final_report(
     v_all_audit_data: dict,
     audit_res: dict,
     deep_stats: dict,
+    algo: str,
 ):
     """记录并保存最终的合并执行报告。"""
     used_features = cfg.GMM_CONFIG["feature_map"].get(mode, [])
@@ -233,6 +254,7 @@ def _log_final_report(
         f"🏁 [管线执行最终报告 - {target_cluster_id}]",
         f"  🔹 目标星团: {target_cluster_id} ({ctx_cluster['NAME']})",
         f"  🔹 执行模式: {mode.upper()} -> 物理特征空间: {used_features}",
+        f"  🔹 聚类算法: {algo.upper()}",
         f"  🔹 审计参考: {target_category}",
         "-" * 65,
     ]
@@ -293,7 +315,7 @@ def _log_final_report(
 
     # 2. 保存到分析结果目录
     export_base = cfg.TMPL.FILE_EXPORT_BASE.format(
-        cluster=target_cluster_id, category=target_category, mode=mode
+        cluster=target_cluster_id, category=target_category, mode=mode, algo=algo
     )
     report_path = cfg.RESULTS_DIR / cfg.TMPL.FILE_FINAL_REPORT.format(base=export_base)
 
@@ -320,7 +342,7 @@ def _log_all_modes_comparison(all_results: list):
     logger.info("-" * 125)
 
     header = (
-        f"{'MODE':<8} | {'CANDIDATES':<12} | {'CORE':<6} | {'GOLDEN':<10} | {'MATCHED':<10} | "
+        f"{'MODE':<8} | {'ALGO':<8} | {'CANDIDATES':<12} | {'CORE':<6} | {'GOLDEN':<10} | {'MATCHED':<10} | "
         f"{'PG ONLY':<10} | {'RECALL':<12} | {'NEW DISCOVERY':<15} | {'PRECISION'}"
     )
     logger.info(header)
@@ -328,7 +350,7 @@ def _log_all_modes_comparison(all_results: list):
 
     for res in all_results:
         line = (
-            f"{res['mode']:<8} | {res['candidates']:<12} | {res['seed_core']:<6} | "
+            f"{res['mode']:<8} | {res['algo']:<8} | {res['candidates']:<12} | {res['seed_core']:<6} | "
             f"{res['golden']:<10} | "
             f"{res['matched']:<10} | {res['pg_only']:<10} | {res['recall']:>10.2f}% | "
             f"{res['new_finds']:<15} | {res['precision']:>9.2f}%"
@@ -347,6 +369,7 @@ def run_pipeline(
     mode: str,
     db: AstroDB = None,
     skip_setup: bool = False,
+    result_mode: str = "brief",
 ) -> dict:
     """
     驱动端到端的天文数据分析与审计管线。
@@ -359,10 +382,13 @@ def run_pipeline(
         mode (str): GMM 执行模式（如 '3d', '6d_p'）。
         db (AstroDB, optional): 已存在的数据库实例。
         skip_setup (bool): 是否跳过数据导入与标准化阶段。
+        result_mode (str): 结果产出模式 ('brief' 或 'detailed')。
     """
+    do_export = (result_mode == "detailed")
+    algo = cfg.GMM_CONFIG.get("cluster_algo", "dbscan")
     db_provided = db is not None
     db, wf, ctx_cluster, data_manifest, ref_tables = _initialize_pipeline_components(
-        target_cluster_id, target_category, mode, db=db
+        target_cluster_id, target_category, mode, algo, result_mode=result_mode, db=db
     )
 
     try:
@@ -378,7 +404,7 @@ def run_pipeline(
         )
 
         _export_pipeline_results(
-            db, wf, audit_res, v_final_audited, target_cluster_id, target_category, mode
+            db, wf, audit_res, v_final_audited, target_cluster_id, target_category, mode, algo, do_export=do_export
         )
 
         _log_final_report(
@@ -389,6 +415,7 @@ def run_pipeline(
             v_all_audit_data,
             audit_res,
             deep_stats,
+            algo,
         )
 
         # 7. 构造并返回绩效摘要用于多模式汇总对比
@@ -400,6 +427,7 @@ def run_pipeline(
         summary = {
             "cluster": target_cluster_id,
             "mode": mode.upper(),
+            "algo": algo.upper(),
             "candidates": v_all_audit_data.get("stats", {}).get("n_candidates", 0),
             "golden": v_all_audit_data.get("stats", {}).get("n_golden", 0),
             "seed_core": v_all_audit_data.get("stats", {}).get("n_seed_core", 0),
@@ -464,6 +492,13 @@ def parse_args():
         default=cfg.GMM_CONFIG.get("cluster_algo", "dbscan"),
         choices=["dbscan", "hdbscan"],
         help="种子集预处理使用的聚类算法",
+    )
+    parser.add_argument(
+        "--result",
+        type=str,
+        default="brief",
+        choices=["brief", "detailed"],
+        help="结果产出等级: brief (精简, 仅日志及轻量报告) 或 detailed (详细, 导出全量 CSV 资产)",
     )
     parser.add_argument(
         "--log-level",
@@ -551,7 +586,8 @@ def main():
         try:
             # 1. 在循环外执行一次性的全量数据加载与归一化
             _, wf_setup, ctx_cluster, _, ref_tables = _initialize_pipeline_components(
-                target_cluster_id, args.category, valid_modes[0], db=shared_db
+                target_cluster_id, args.category, valid_modes[0], args.algo, 
+                result_mode=args.result, db=shared_db
             )
             _ingest_and_prepare_data(
                 shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster
@@ -561,7 +597,8 @@ def main():
             for m in valid_modes:
                 # 2. 循环内强制跳过 setup，仅切换算法维度进行计算
                 stats = run_pipeline(
-                    target_cluster_id, args.category, m, db=shared_db, skip_setup=True
+                    target_cluster_id, args.category, m, db=shared_db, 
+                    skip_setup=True, result_mode=args.result
                 )
                 if stats:
                     all_results.append(stats)
@@ -569,7 +606,7 @@ def main():
         finally:
             shared_db.close()
     else:
-        run_pipeline(target_cluster_id, args.category, args.mode)
+        run_pipeline(target_cluster_id, args.category, args.mode, result_mode=args.result)
 
 
 if __name__ == "__main__":

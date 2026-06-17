@@ -233,7 +233,7 @@ class PriorGMMEx:
         )
         cluster_model.fit(X_core)
         self.logger.info(
-            f"✨ [内核验证] 星团先验模型拟合成功。归一化中心偏移: \n{ {f: round(v, 4) for f, v in zip(self.features, cluster_model.means_[0])} }"
+            f"✨ [内核验证] 星团先验模型拟合成功。归一化中心偏移: { {f: round(v, 4) for f, v in zip(self.features, cluster_model.means_[0])} }"
         )
 
         return GMMModelParamsEx(
