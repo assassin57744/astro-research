@@ -93,11 +93,40 @@ class UnifiedMemberValidator:
             self.logger.error(f"❌ [Validator] 未找到等龄线模型文件: {iso_path}")
             return
 
-        # 2. 使用 astropy.io.ascii 稳健解析天文表格数据 (自动处理注释头)
+        # 2. 动态检测并提取 PARSEC 等龄线文件的真实数据表头
+        self.logger.debug(f"📖 正在解析物理模型文件头: {iso_path.name}")
+        header_line = None
+        data_start_idx = 0
+
+        with open(iso_path, "r", encoding="utf-8") as f:
+            for idx, line in enumerate(f):
+                clean_line = line.strip()
+                if not clean_line:
+                    continue
+                if (
+                    clean_line.startswith("#")
+                    and "Gmag" in clean_line
+                    and "G_BPmag" in clean_line
+                ):
+                    header_line = clean_line.lstrip("#").strip().split()
+                    data_start_idx = idx + 1
+                    break
+                elif not clean_line.startswith("#"):
+                    data_start_idx = idx
+                    break
+
+        # 3. 加载并对齐列名
         try:
-            # PARSEC 格式通常在最后一个以 # 开头的行定义列名，'commented_header' 模式可完美处理
-            table = ascii.read(iso_path, format="commented_header")
-            self.isochrone_df = table.to_pandas()
+            if header_line:
+                self.isochrone_df = pd.read_csv(
+                    iso_path,
+                    skiprows=data_start_idx,
+                    sep=r"\s+",
+                    names=header_line,
+                    comment="#",
+                )
+            else:
+                self.isochrone_df = pd.read_csv(iso_path, sep=r"\s+", comment="#")
 
             self.logger.info(
                 f"✅ [Validator] 成功加载等龄线模型 ({len(self.isochrone_df)} 演化步长)"
