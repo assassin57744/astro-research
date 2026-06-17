@@ -224,6 +224,7 @@ research/hunt24-audit_bak/
 research/hunt24-audit/data/
 research/hunt24-audit/logs/
 research/hunt24-audit/analysis/
+research/hunt24-audit/notes/
 research/hunt24-audit/NOTES.md
 
 # 彻底屏蔽根目录下的 NOTES.md 及任何敏感信息备份

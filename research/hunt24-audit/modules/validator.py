@@ -52,9 +52,19 @@ class UnifiedMemberValidator:
         # 驱动完整物理边界加载
         self._setup_physical_constraints()
 
-        self.tidal_radius = self.config.get(
-            "TIDAL_RADIUS", 10.0
-        )  # 默认为 10.0，防止意外崩溃
+        self.tidal_radius = self._get_config_with_warning("TIDAL_RADIUS", 10.0)
+
+    def _get_config_with_warning(self, key: str, default_val):
+        """
+        获取星团配置项的值。如果配置项缺失，则记录警告日志并返回默认值，以防止潜在的精度或逻辑缺陷。
+        """
+        if key not in self.config:
+            self.logger.warning(
+                f"⚠️ [ConfigFallback] 星团 {self.cluster_name} ({self.cluster_id}) 配置文件中未检测到关键参数 '{key}'！"
+                f"将自动降级使用默认值 {default_val}。这可能会影响物理一致性审计的准确性，建议在 config.py 中补齐配置。"
+            )
+            return default_val
+        return self.config[key]
 
     def _setup_physical_constraints(self):
         """
@@ -113,8 +123,8 @@ class UnifiedMemberValidator:
         # 5. 执行视距离模数与红化消光修正
         # 公式: m_v - M_v = 5 * log10(d) - 5 + A_v
         try:
-            distance = self.config.get("DISTANCE_PC", 100.0)  # 默认单位: pc
-            extinction_g = self.config.get("EXT_AG", 0.0)  # G波段视消光
+            distance = self._get_config_with_warning("DISTANCE_PC", 100.0)  # 默认单位: pc
+            extinction_g = self._get_config_with_warning("EXT_AG", 0.0)  # G波段视消光
 
             # 🧪 增强逻辑：如果配置缺失 E_BP_RP，根据 EXT_AG 自动按比例估算
             extinction_bp_rp = self.config.get("E_BP_RP")
@@ -184,8 +194,8 @@ class UnifiedMemberValidator:
         )  # This SQL will now join with the cache table managed by AstroDB
         audit_matrix = self.db.execute(sql).df()
 
-        # 2. 空间投影距离计算 (基于 SQL 返回的 sep_deg)
-        cluster_dist = self.config.get("DISTANCE_PC", 100.0)
+        # 2. 空间投影距离计算 (基于 SQL 返回 of sep_deg)
+        cluster_dist = self._get_config_with_warning("DISTANCE_PC", 100.0)
         audit_matrix["distance_to_center"] = cluster_dist * np.radians(
             audit_matrix["sep_deg"]
         )
@@ -259,12 +269,12 @@ class UnifiedMemberValidator:
         """
         t_simbad_aligned = self.cache_table
 
-        c_ra = self.config.get("CENTER_RA")
-        c_dec = self.config.get("CENTER_DEC")
+        c_ra = self._get_config_with_warning("CENTER_RA", None)
+        c_dec = self._get_config_with_warning("CENTER_DEC", None)
         plx, pmra, pmdec = (
-            self.config.get("PLX_REF", 1.0),
-            self.config.get("PMRA_REF", 0.0),
-            self.config.get("PMDEC_REF", 0.0),
+            self._get_config_with_warning("PLX_REF", 1.0),
+            self._get_config_with_warning("PMRA_REF", 0.0),
+            self._get_config_with_warning("PMDEC_REF", 0.0),
         )
 
         lit_cols = (
@@ -289,45 +299,55 @@ class UnifiedMemberValidator:
             return audit_matrix
 
         # 1. 环境上下文初始化
-        dim_mode = self.config.get("DIM_MODE", "3d").lower()
+        dim_mode = self._get_config_with_warning("DIM_MODE", "3d").lower()
         is_2d, is_physical_v = (dim_mode == "2d"), (dim_mode in ["3d_v", "6d_p"])
         audit_matrix["cmd_residual"] = np.nan  # 🚀 初始化残差列，防止后续流程 KeyError
+        self.logger.info(
+            f"🔍 [PhysAudit] 启动物理一致性审计。样本总数: {len(audit_matrix)}, 维度模式: {dim_mode}"
+        )
 
         # 2. 残差计算阶段 (各维度独立计算)
         penalties = {}
 
         # A. 动力学残差 (自行 或 物理速度)
         if is_physical_v and "u" in audit_matrix.columns:
-            # 🚀 动力学审计：优先使用星团先验 UVW 速度矢量
-            v_ref = self.config.get("UVW_REF")
-            if v_ref is None:
-                self.logger.warning(f"⚠️ {self.cluster_id} 缺失 UVW_REF 配置，使用零向量作为参考 (不建议)")
-                v_ref = np.zeros(3)
-
-            v_res = np.sqrt(
-                (audit_matrix["u"] - v_ref[0]) ** 2
-                + (audit_matrix["v"] - v_ref[1]) ** 2
-                + (audit_matrix["w"] - v_ref[2]) ** 2
+            # 🚀 动力学审计：优先使用星团先验 UVW 速度矢量，若缺失则记录警告
+            v_ref = self._get_config_with_warning("UVW_REF", np.zeros(3))
+            v_res = np.linalg.norm(audit_matrix[["u", "v", "w"]].values - v_ref, axis=1)
+            penalties["pm"] = v_res / self._get_config_with_warning("V_ERROR", 2.0)
+            self.logger.info(
+                f"  ⚡ [PhysAudit] 动力学速度残差计算完成。参考速度 UVW_REF: {v_ref}, "
+                f"平均残差: {v_res.mean():.3f} km/s, 平均惩罚分: {penalties['pm'].mean():.3f}"
             )
-            # 针对不同星团，通过 V_ERROR 参数定义速度空间的“容忍半径” (km/s)
-            # 若配置缺失，则默认使用 2.0 km/s 作为典型的弥散尺度
-            penalties["pm"] = v_res / self.config.get("V_ERROR", 2.0)
         else:
             # 2D 模式下，针对不同星团，通过 PM_RADIUS 参数定义自行空间的“容忍半径” (mas/yr)
-            penalties["pm"] = audit_matrix["pm_residual"] / self.config.get(
-                "PM_RADIUS", 3.0
+            pm_rad = self._get_config_with_warning("PM_RADIUS", 3.0)
+            penalties["pm"] = audit_matrix["pm_residual"] / pm_rad
+            self.logger.info(
+                f"  ⚡ [PhysAudit] 自行残差计算完成。自行容忍度 PM_RADIUS: {pm_rad} mas/yr, "
+                f"平均残差: {audit_matrix['pm_residual'].mean():.3f} mas/yr, 平均惩罚分: {penalties['pm'].mean():.3f}"
             )
 
         # B. 视差残差 (仅 3D+)
         if not is_2d:
-            penalties["plx"] = audit_matrix["plx_residual"] / self.config.get(
-                "PLX_ERROR", 0.5
+            plx_err = self._get_config_with_warning("PLX_ERROR", 0.5)
+            penalties["plx"] = audit_matrix["plx_residual"] / plx_err
+            self.logger.info(
+                f"  ⚡ [PhysAudit] 视差残差计算完成。视差容忍度 PLX_ERROR: {plx_err} mas, "
+                f"平均残差: {audit_matrix['plx_residual'].mean():.3f} mas, 平均惩罚分: {penalties['plx'].mean():.3f}"
             )
 
         # C. 视向速度残差 (如果列存在)
         if "rv" in audit_matrix.columns:
-            rv_res = (audit_matrix["rv"] - self.config.get("RV_REF", 0.0)).abs()
-            penalties["rv"] = rv_res / self.config.get("RV_ERROR", cfg.DEFAULT_RV_ERROR)
+            rv_ref = self._get_config_with_warning("RV_REF", 0.0)
+            rv_err = self._get_config_with_warning("RV_ERROR", 5.0)
+            rv_res = (audit_matrix["rv"] - rv_ref).abs()
+            penalties["rv"] = rv_res / rv_err
+            self.logger.info(
+                f"  ⚡ [PhysAudit] 视向速度残差计算完成。RV_REF: {rv_ref} km/s, RV_ERROR: {rv_err} km/s, "
+                f"有观测样本数: {audit_matrix['rv'].notna().sum()}, 平均残差: {rv_res.mean():.3f} km/s, "
+                f"平均惩罚分: {penalties['rv'].mean():.3f}"
+            )
 
         # D. 测光演化残差 (CMD)
         if self.cmd_interpolator and all(
@@ -337,15 +357,19 @@ class UnifiedMemberValidator:
                 audit_matrix["color"].values
             )
             # 非对称修正：联星方向(负)权重减半；超出范围权重增加 1.5 倍
-            cmd_res = np.where(raw_res < 0, np.abs(raw_res) * 0.5, np.abs(raw_res))
+            cmd_res = np.where(raw_res < 0, -raw_res * 0.5, raw_res)
             out_mask = (audit_matrix["color"] < self.color_min) | (
                 audit_matrix["color"] > self.color_max
             )
             cmd_res[out_mask] *= 1.5
             audit_matrix["cmd_residual"] = cmd_res  # ✨ 持久化残差结果
-            penalties["cmd"] = pd.Series(
-                cmd_res, index=audit_matrix.index
-            ) / self.config.get("CMD_DEV", 0.8)
+            cmd_dev = self._get_config_with_warning("CMD_DEV", 0.8)
+            penalties["cmd"] = pd.Series(cmd_res, index=audit_matrix.index) / cmd_dev
+            self.logger.info(
+                f"  ⚡ [PhysAudit] 测光演化残差计算完成。CMD_DEV: {cmd_dev} mag, "
+                f"超限天体数: {out_mask.sum()}, 平均残差: {cmd_res.mean():.3f} mag, "
+                f"平均惩罚分: {penalties['cmd'].mean():.3f}"
+            )
 
         # 3. 评分归一化与持久化
         # 默认缺失处理策略：pm/plx 严厉(2.5)，rv 中性(1.0)，cmd 严厉(2.5)
@@ -354,18 +378,23 @@ class UnifiedMemberValidator:
             audit_matrix[f"{key}_score"] = np.clip(penalty, 0, 2.5).fillna(
                 fill_values.get(key, 2.5)
             )
+        self.logger.info("  ⚡ [PhysAudit] 维度评分区间截断与空值填充完成。")
 
         # 4. 硬门槛判定 (Kinematics Gate)
         # 核心逻辑：自行和视差(若存在)必须通过初步筛选，且 RV 不能偏离过大
-        kine_score_limit = self.config.get("KINE_SCORE_LIMIT", 2.0)
+        kine_score_limit = self._get_config_with_warning("KINE_SCORE_LIMIT", 2.0)
         kine_valid = audit_matrix["pm_score"] < kine_score_limit
 
         if "plx_score" in audit_matrix.columns:
             kine_valid &= audit_matrix["plx_score"] < kine_score_limit
         if "rv_score" in audit_matrix.columns:
-            kine_valid &= ~(
-                (audit_matrix["rv"].notna()) & (audit_matrix["rv_score"] >= kine_score_limit)
-            )
+            # 直观逻辑：若有视向速度观测，其评分需小于硬性限制门限，否则视为无效
+            kine_valid &= audit_matrix["rv"].isna() | (audit_matrix["rv_score"] < kine_score_limit)
+        
+        self.logger.info(
+            f"  ⚡ [PhysAudit] 动力学门槛筛选完成。门限值: {kine_score_limit}, "
+            f"通过筛选天体数: {kine_valid.sum()}/{len(audit_matrix)}"
+        )
 
         # 5. 权重动态重分配与最终打分
         # 基于 config.py 中的原始权重，自动根据当前激活的维度进行归一化
@@ -373,16 +402,17 @@ class UnifiedMemberValidator:
         if "rv" in penalties:
             base_weights["rv"] = 0.2  # 6D 模式下赋予 RV 20% 权重
 
-        active_weights = {
-            k: v
-            for k, v in base_weights.items()
-            if f"{k}_score" in audit_matrix.columns
-        }
-        norm_factor = sum(active_weights.values())
-        w = {k: v / norm_factor for k, v in active_weights.items()}
+        # 仅保留在数据框中计算了评分的维度并归一化权重
+        w = {k: v for k, v in base_weights.items() if f"{k}_score" in audit_matrix.columns}
+        w_sum = sum(w.values())
+        w = {k: v / w_sum for k, v in w.items()}
 
         audit_matrix["weighted_penalty"] = sum(
             audit_matrix[f"{k}_score"] * w[k] for k in w
+        )
+        self.logger.info(
+            f"  ⚡ [PhysAudit] 最终加权惩罚分计算完成。动态分配权重: { {k: round(v, 3) for k, v in w.items()} }, "
+            f"综合加权惩罚分均值: {audit_matrix['weighted_penalty'].mean():.3f}"
         )
 
         # 6. 身份定格
