@@ -6,17 +6,13 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
 from astropy.coordinates import SkyCoord
+from astropy.io import ascii
 import astropy.units as u
 from pathlib import Path
 import re
 
 import config as cfg
-from config import (
-    CLUSTERS,
-    STD_COLS,
-    MANIFEST,
-    IDX_IDS_SIMBAD
-)  # 导入核心配置
+from config import CLUSTERS, STD_COLS, MANIFEST, IDX_IDS_SIMBAD  # 导入核心配置
 
 
 class UnifiedMemberValidator:
@@ -47,7 +43,7 @@ class UnifiedMemberValidator:
         self.cluster_name = self.config["ID_NAME"]
 
         # 数据库持久化缓存配置
-        self.cache_table = MANIFEST[IDX_IDS_SIMBAD]["raw_table"] 
+        self.cache_table = MANIFEST[IDX_IDS_SIMBAD]["raw_table"]
         self.isochrone_df = None
         self.cmd_interpolator = None
         self.color_min = None
@@ -87,42 +83,15 @@ class UnifiedMemberValidator:
             self.logger.error(f"❌ [Validator] 未找到等龄线模型文件: {iso_path}")
             return
 
-        # 2. 动态检测并提取 PARSEC 等龄线文件的真实数据表头
-        self.logger.debug(f"📖 正在解析物理模型文件头: {iso_path.name}")
-        header_line = None
-        data_start_idx = 0
-
-        with open(iso_path, "r", encoding="utf-8") as f:
-            for idx, line in enumerate(f):
-                clean_line = line.strip()
-                if not clean_line:
-                    continue
-                if (
-                    clean_line.startswith("#")
-                    and "Gmag" in clean_line
-                    and "G_BPmag" in clean_line
-                ):
-                    header_line = clean_line.lstrip("#").strip().split()
-                    data_start_idx = idx + 1
-                    break
-                elif not clean_line.startswith("#"):
-                    data_start_idx = idx
-                    break
-
-        # 3. 加载并对齐列名
+        # 2. 使用 astropy.io.ascii 稳健解析天文表格数据 (自动处理注释头)
         try:
-            if header_line:
-                self.isochrone_df = pd.read_csv(
-                    iso_path,
-                    skiprows=data_start_idx,
-                    sep=r"\s+",
-                    names=header_line,
-                    comment="#",
-                )
-            else:
-                self.isochrone_df = pd.read_csv(iso_path, sep=r"\s+", comment="#")
+            # PARSEC 格式通常在最后一个以 # 开头的行定义列名，'commented_header' 模式可完美处理
+            table = ascii.read(iso_path, format="commented_header")
+            self.isochrone_df = table.to_pandas()
 
-            self.logger.info(f"✅ [Validator] 成功加载等龄线模型 ({len(self.isochrone_df)} 演化步长)")
+            self.logger.info(
+                f"✅ [Validator] 成功加载等龄线模型 ({len(self.isochrone_df)} 演化步长)"
+            )
         except Exception as e:
             self.logger.error(f"❌ [Validator] 解析等龄线文件失败: {str(e)}")
             return
@@ -146,11 +115,11 @@ class UnifiedMemberValidator:
         try:
             distance = self.config.get("DISTANCE_PC", 100.0)  # 默认单位: pc
             extinction_g = self.config.get("EXT_AG", 0.0)  # G波段视消光
-            
+
             # 🧪 增强逻辑：如果配置缺失 E_BP_RP，根据 EXT_AG 自动按比例估算
             extinction_bp_rp = self.config.get("E_BP_RP")
             if extinction_bp_rp is None:
-                extinction_bp_rp = extinction_g * 0.52 # 基于 Gaia DR3 经典红化律估算
+                extinction_bp_rp = extinction_g * cfg.REDDENING_RATIO_BP_RP
 
             distance_modulus = 5.0 * np.log10(distance) - 5.0
 
@@ -180,13 +149,14 @@ class UnifiedMemberValidator:
             self.cmd_interpolator = interp1d(
                 sorted_color[unique_idx],
                 sorted_g[unique_idx],
-                kind="linear",
+                kind="cubic",
                 bounds_error=False,
                 fill_value="extrapolate",
             )
 
-            self.logger.debug(f"🎨 [Validator] CMD 插值网格构建成功，色指数区间: [{self.color_min:.2f}, {self.color_max:.2f}]")
-            self.logger.debug(f"🎨 [成员校验器] CMD 插值网格构建成功，色指数区间: [{self.color_min:.2f}, {self.color_max:.2f}]")
+            self.logger.debug(
+                f"🎨 [Validator] CMD 插值网格构建成功，色指数区间: [{self.color_min:.2f}, {self.color_max:.2f}]"
+            )
         except Exception as math_err:
             self.logger.error(f"❌ [Validator] 构建 CMD 插值矩阵失败: {str(math_err)}")
 
@@ -209,57 +179,73 @@ class UnifiedMemberValidator:
         self.logger.info(f"🎬 [Validator] 启动审计管线，目标视图: {v_target_detail}")
 
         # 1. 构建并执行 SQL 获取基础数据
-        sql = self._build_audit_sql(v_target_detail) # This SQL will now join with the cache table managed by AstroDB
-        audit_df = self.db.execute(sql).df()
+        sql = self._build_audit_sql(
+            v_target_detail
+        )  # This SQL will now join with the cache table managed by AstroDB
+        audit_matrix = self.db.execute(sql).df()
 
-        # 2. 空间预处理 - 专门处理几何和空间关系
-        audit_df = self._preprocess_spatial_data(audit_df)
+        # 2. 空间投影距离计算 (基于 SQL 返回的 sep_deg)
+        cluster_dist = self.config.get("DISTANCE_PC", 100.0)
+        audit_matrix["distance_to_center"] = cluster_dist * np.radians(
+            audit_matrix["sep_deg"]
+        )
 
-        # 2. 执行物理指标校验
-        audit_df = self._calculate_phys_metrics(audit_df)
+        # 2. 物理一致性审计：验证观测数据是否符合星团物理规律
+        audit_matrix = self._audit_physical_consistency(audit_matrix)
 
-        # 🚀 优化：使用向量化操作代替 apply(axis=1) 以显著提升百万级数据处理效率
+        # 3. 文献共识审计：验证身份记录是否与科研结论一致
+        consensus_df = self._audit_literature_consensus(audit_matrix)
 
-        # 3. 批量文献标签判定
-        lit_metrics = self._evaluate_literature_labels_batch(audit_df)
-        lit_confirmed = lit_metrics["is_literature_member"]
-        phys_pass = audit_df["phys_audit_pass"]
+        is_lit_consensus = consensus_df["is_lit_consensus"]
+        is_phys_consistent = audit_matrix["is_phys_consistent"]
 
         # 4. 向量化最终规则决策 (np.select 代替 apply)
         conditions = [
-            (phys_pass == True) & (lit_confirmed == True),
-            (phys_pass == True) & (lit_confirmed == False),
-            (phys_pass == False) & (lit_confirmed == True), # Literature Only
-            (phys_pass == False) & (lit_confirmed == False) # Contamination
+            (is_phys_consistent == True) & (is_lit_consensus == True),
+            (is_phys_consistent == True) & (is_lit_consensus == False),
+            (is_phys_consistent == False)
+            & (is_lit_consensus == True),  # Literature Only
+            (is_phys_consistent == False)
+            & (is_lit_consensus == False),  # Contamination
         ]
         choices = [
-            "Confirmed Member", 
-            "New Candidate", 
-            "Literature Only", 
-            "Contamination"
+            "Confirmed Member",
+            "New Candidate",
+            "Literature Only",
+            "Contamination",
         ]
-        audit_df["audit_status"] = np.select(conditions, choices, default="Contamination")
+        audit_matrix["audit_status"] = np.select(
+            conditions, choices, default="Contamination"
+        )
 
         # 5. 向量化细化诊断备注 (处理 Literature Only 子集)
-        audit_df["audit_note"] = "N/A"
-        mask_lit = audit_df["audit_status"] == "Literature Only"
+        audit_matrix["audit_note"] = "N/A"
+        mask_lit = audit_matrix["audit_status"] == "Literature Only"
 
         if mask_lit.any():
-            # 批量计算备注
-            notes = pd.Series("", index=audit_df.index)
-            notes.loc[mask_lit & (audit_df["pm_residual"] < cfg.PHYS_LIT_PM_LIMIT) & (audit_df["cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT)] += "CMD Outlier | "
-            notes.loc[mask_lit & (audit_df["distance_to_center"] > self.tidal_radius)] += "Tidal Tail Member | "
+            # 使用 np.select 进一步优化备注生成逻辑
+            ruwe_col = (
+                audit_matrix["ruwe"]
+                if "ruwe" in audit_matrix.columns
+                else pd.Series(1.0, index=audit_matrix.index)
+            )
 
-            ruwe_col = audit_df["ruwe"] if "ruwe" in audit_df.columns else pd.Series(1.0, index=audit_df.index)
-            notes.loc[mask_lit & (ruwe_col > cfg.AUDIT_RUWE_LIMIT)] += "Gaia Data Quality Issue | "
-            
-            # 清理末尾分隔符并填充默认值
-            final_notes = notes.str.rstrip(" | ").replace("", "Standard Literature Entry")
-            audit_df.loc[mask_lit, "audit_note"] = final_notes
+            # 仅对符合 Literature Only 条件的子集进行条件判定，确保结果长度对齐
+            df_lit = audit_matrix[mask_lit]
+            conds = [
+                (df_lit["pm_residual"] < cfg.PHYS_LIT_PM_LIMIT)
+                & (df_lit["cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT),
+                (df_lit["distance_to_center"] > self.tidal_radius),
+                (ruwe_col[mask_lit] > cfg.AUDIT_RUWE_LIMIT),
+            ]
+            choices = ["CMD Outlier", "Tidal Tail Member", "Gaia Data Quality Issue"]
+            audit_matrix.loc[mask_lit, "audit_note"] = np.select(
+                conds, choices, default="Standard Literature Entry"
+            )
 
-        self._print_audit_summary(audit_df)
+        self._print_audit_summary(audit_matrix)
 
-        return audit_df
+        return audit_matrix
 
     def _build_audit_sql(self, v_target_input: str) -> str:
         """
@@ -272,7 +258,9 @@ class UnifiedMemberValidator:
             str: 组装好的 SQL 语句。
         """
         t_simbad_aligned = self.cache_table
-        
+
+        c_ra = self.config.get("CENTER_RA")
+        c_dec = self.config.get("CENTER_DEC")
         plx, pmra, pmdec = (
             self.config.get("PLX_REF", 1.0),
             self.config.get("PMRA_REF", 0.0),
@@ -280,15 +268,14 @@ class UnifiedMemberValidator:
         )
 
         lit_cols = (
-            "sim.main_id, sim.ids" # These columns are expected from the cache table
+            "sim.main_id, sim.ids"  # These columns are expected from the cache table
         )
-        lit_join = (
-            f"LEFT JOIN {t_simbad_aligned} sim ON CAST(p.id AS VARCHAR) = sim.gaia_dr3_id"
-        )
+        lit_join = f"LEFT JOIN {t_simbad_aligned} sim ON CAST(p.id AS VARCHAR) = sim.gaia_dr3_id"
 
         return f"""
         WITH physical_stage AS (
             SELECT *,
+                   haversine_distance({c_ra}, {c_dec}, ra, dec) as sep_deg,
                    ABS(plx - {plx}) AS plx_residual,
                    SQRT(POWER(pmra - {pmra}, 2) + POWER(pmdec - {pmdec}, 2)) AS pm_residual
             FROM {v_target_input}
@@ -296,246 +283,133 @@ class UnifiedMemberValidator:
         SELECT p.*, {lit_cols} FROM physical_stage p {lit_join}
         """
 
-    def _calculate_phys_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
-        """天体物理学稳健审计版本"""
-        if df.empty:
-            return df
+    def _audit_physical_consistency(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
+        """物理一致性审计：通过多维残差与加权惩罚系统评估天体与星团模型的匹配度。"""
+        if audit_matrix.empty:
+            return audit_matrix
 
-        # 1. 确保基础残差列存在
-        if "cmd_residual" not in df.columns:
-            df["cmd_residual"] = np.nan
+        # 1. 环境上下文初始化
+        dim_mode = self.config.get("DIM_MODE", "3d").lower()
+        is_2d, is_physical_v = (dim_mode == "2d"), (dim_mode in ["3d_v", "6d_p"])
+        audit_matrix["cmd_residual"] = np.nan  # 🚀 初始化残差列，防止后续流程 KeyError
 
-        pm_penalty = df["pm_residual"] / self.config.get("PM_RADIUS", 3.0)
-        plx_penalty = df["plx_residual"] / self.config.get("PLX_ERROR", 0.5)
+        # 2. 残差计算阶段 (各维度独立计算)
+        penalties = {}
 
-        if self.cmd_interpolator and all(c in df.columns for c in ["color", "mag"]):
-            theoretical_g = self.cmd_interpolator(df["color"].values)
-            df["cmd_residual"] = np.abs(df["mag"].values - theoretical_g)
-
-        cmd_dev_scale = self.config.get("CMD_DEV", 0.8)
-        cmd_penalty = df["cmd_residual"].fillna(cmd_dev_scale) / cmd_dev_scale
-
-        pm_score = np.clip(pm_penalty, 0, 2.5)
-        plx_score = np.clip(plx_penalty, 0, 2.5)
-        cmd_score = np.clip(cmd_penalty, 0, 2.5)
-
-        kinematics_valid = (pm_score < 2.0) & (plx_score < 2.0)
-
-        w = cfg.PHYS_VERIFY_WEIGHTS
-        weighted_penalty = (pm_score * w["pm"]) + (plx_score * w["plx"]) + (cmd_score * w["cmd"])
-        score_valid = (
-            weighted_penalty < cfg.PHYS_VERIFY_PENALTY_LIMIT
-        )  # 给予外围边缘星更大的生存空间
-
-        df["phys_audit_pass"] = kinematics_valid & score_valid
-
-        passed_df = df[df["phys_audit_pass"]]
-        if not passed_df.empty:
-            self.logger.info(
-                f"📈 [PhysAudit] 统计: 通过率 {len(passed_df)}/{len(df)} | "
-                f"PM残差均值: {passed_df['pm_residual'].mean():.2f} | "
-                f"CMD残差均值: {passed_df['cmd_residual'].mean():.2f}"
+        # A. 动力学残差 (自行 或 物理速度)
+        if is_physical_v and "u" in audit_matrix.columns:
+            v_ref = self.config.get("UVW_REF", np.zeros(3))
+            v_res = np.sqrt(
+                (audit_matrix["u"] - v_ref[0]) ** 2
+                + (audit_matrix["v"] - v_ref[1]) ** 2
+                + (audit_matrix["w"] - v_ref[2]) ** 2
+            )
+            penalties["pm"] = v_res / self.config.get("V_ERROR", 2.0)
+        else:
+            penalties["pm"] = audit_matrix["pm_residual"] / self.config.get(
+                "PM_RADIUS", 3.0
             )
 
-        return df
+        # B. 视差残差 (仅 3D+)
+        if not is_2d:
+            penalties["plx"] = audit_matrix["plx_residual"] / self.config.get(
+                "PLX_ERROR", 0.5
+            )
 
-    def run_full_audit(self, v_target_input: str) -> pd.DataFrame:
-        """[旧版本/兼容性入口] 以数仓为核心进行全量天体多阶段过滤。"""
-        self.logger.info(f"🎬 [Validator] 启动传统审计流，视图: {v_target_input}...")
+        # C. 视向速度残差 (如果列存在)
+        if "rv" in audit_matrix.columns:
+            rv_res = (audit_matrix["rv"] - self.config.get("RV_REF", 0.0)).abs()
+            penalties["rv"] = rv_res / self.config.get("RV_ERROR", 5.0)
 
-        if not self.db:
-            raise RuntimeError("❌ 错误: 必须绑定活跃的 AstroDB 实例。")
-
-        table_exists = self.db.table_exists(self.cache_table)
-
-        if not table_exists:
-            self.logger.warning(f"⚠️ [Validator] 未检测到文献对齐表 `{self.cache_table}`。")
-
-        plx_ref = self.config.get("PLX_REF", 1.0)
-        pmra_ref = self.config.get("PMRA_REF", 0.0)
-        pmdec_ref = self.config.get("PMDEC_REF", 0.0)
-
-        str_re = r"(?:Gaia DR[23]\s+)?([0-9]+)"
-        t_simbad_aligned = self.cache_table # Use the validator's specific cache table
-
-        lit_cols = (
-            "sim.main_id AS simbad_preferred_name, sim.ids AS simbad_all_aliases"
-        )
-        lit_join = (
-            f"LEFT JOIN {t_simbad_aligned} sim "
-            f"ON CAST(p.id AS VARCHAR) = sim.gaia_dr3_id"
-        )
-
-        # 3. 使用多行字符串构建结构化的 SQL，保持层次感
-        sql_audit_matrix = f"""
-        WITH physical_stage AS (
-            SELECT 
-                *,
-                ABS(plx - {plx_ref}) AS plx_residual,
-                SQRT(POWER(pmra - {pmra_ref}, 2) + POWER(pmdec - {pmdec_ref}, 2)) AS pm_residual
-            FROM {v_target_input}
-        ),
-        literature_stage AS (
-            SELECT 
-                p.*,
-                {lit_cols}
-            FROM physical_stage p
-            {lit_join}
-        )
-        SELECT * FROM literature_stage;
-        """
-
-        try:
-            audit_base_df = self.db.con.execute(sql_audit_matrix).df()
-        except Exception as e:
-            self.logger.error(f"❌ [Validator] 运行 SQL 审计失败: {str(e)}")
-            raise e
-
-        phys_pm_gate = audit_base_df["pm_residual"] <= self.config.get("PM_RADIUS", 3.0)
-        phys_plx_gate = audit_base_df["plx_residual"] <= self.config.get(
-            "PLX_ERROR", 0.5
-        )
-
-        if (
-            self.cmd_interpolator is not None
-            and "color" in audit_base_df.columns
-            and "mag" in audit_base_df.columns
+        # D. 测光演化残差 (CMD)
+        if self.cmd_interpolator and all(
+            c in audit_matrix.columns for c in ["color", "mag"]
         ):
-            # 批量获取理论等龄线视星等值
-            theoretical_g = self.cmd_interpolator(audit_base_df["color"].values)
-            cmd_residuals = np.abs(audit_base_df["mag"].values - theoretical_g)
-
-            audit_base_df["cmd_residual"] = cmd_residuals
-            phys_cmd_gate = (
-                (cmd_residuals <= self.config.get("CMD_DEV", 0.8))
-                & (audit_base_df["color"] >= self.color_min)
-                & (audit_base_df["color"] <= self.color_max)
+            raw_res = audit_matrix["mag"].values - self.cmd_interpolator(
+                audit_matrix["color"].values
             )
-        else:
-            audit_base_df["cmd_residual"] = np.nan
-            phys_cmd_gate = True
+            # 非对称修正：联星方向(负)权重减半；超出范围权重增加 1.5 倍
+            cmd_res = np.where(raw_res < 0, np.abs(raw_res) * 0.5, np.abs(raw_res))
+            out_mask = (audit_matrix["color"] < self.color_min) | (
+                audit_matrix["color"] > self.color_max
+            )
+            cmd_res[out_mask] *= 1.5
+            audit_matrix["cmd_residual"] = cmd_res  # ✨ 持久化残差结果
+            penalties["cmd"] = pd.Series(
+                cmd_res, index=audit_matrix.index
+            ) / self.config.get("CMD_DEV", 0.8)
 
-        audit_base_df["phys_audit_pass"] = phys_pm_gate & phys_plx_gate & phys_cmd_gate
-        audit_base_df["audit_status"] = audit_base_df.apply(
-            self._finalize_status_rules, axis=1
-        )
-        self._print_audit_summary(audit_base_df)
+        # 3. 评分归一化与持久化
+        # 默认缺失处理策略：pm/plx 严厉(2.5)，rv 中性(1.0)，cmd 严厉(2.5)
+        fill_values = {"pm": 2.5, "plx": 2.5, "rv": 1.0, "cmd": 2.5}
+        for key, penalty in penalties.items():
+            audit_matrix[f"{key}_score"] = np.clip(penalty, 0, 2.5).fillna(
+                fill_values.get(key, 2.5)
+            )
 
-        return audit_base_df
+        # 4. 硬门槛判定 (Kinematics Gate)
+        # 核心逻辑：自行和视差(若存在)必须通过初步筛选，且 RV 不能偏离过大
+        kine_valid = audit_matrix["pm_score"] < 2.0
+        if "plx_score" in audit_matrix.columns:
+            kine_valid &= audit_matrix["plx_score"] < 2.0
+        if "rv_score" in audit_matrix.columns:
+            kine_valid &= ~(
+                (audit_matrix["rv"].notna()) & (audit_matrix["rv_score"] >= 2.0)
+            )
 
-    def _finalize_status_rules(self, row) -> str:
-        """⚙️ 【星团身份判定多路决策树规则】"""
-        phys_pass = row.get("phys_audit_pass", False)
-        literature_results = self.verify_literature_membership(row)
-        literature_confirmed = literature_results["is_literature_confirmed"]
+        # 5. 权重动态重分配与最终打分
+        # 基于 config.py 中的原始权重，自动根据当前激活的维度进行归一化
+        base_weights = cfg.PHYS_VERIFY_WEIGHTS.copy()
+        if "rv" in penalties:
+            base_weights["rv"] = 0.2  # 6D 模式下赋予 RV 20% 权重
 
-        if phys_pass:
-            if literature_confirmed:
-                return "Confirmed Member"
-            else:
-                return "New Candidate"
-        else:
-            if literature_confirmed:
-                return "Literature Only"
-            else:
-                return "Contamination"
-
-    def verify_literature_membership(self, row) -> dict:
-        """
-        [单条校验] 验证天体别名集合是否包含目标星团关键字。
-
-        Args:
-            row (dict | pd.Series): 包含 simbad_all_aliases 的数据行。
-
-        Returns:
-            dict: 包含判定结果（confirmed, potential 等）。
-        """
-        def normalize_name(name):
-            if pd.isna(name) or str(name).strip().upper() == "NONE":
-                return ""
-            return re.sub(r"\s+", " ", str(name)).strip().upper()
-
-        simbad_aliases = normalize_name(row.get("simbad_all_aliases"))
-        simbad_preferred = normalize_name(row.get("simbad_preferred_name"))
-
-        cluster_keyword = self.cluster_name.replace("_", " ").upper()
-        cluster_keyword = re.sub(r"\s+", " ", cluster_keyword).strip()
-
-        is_strict_match = (cluster_keyword in simbad_aliases) or (
-            cluster_keyword in simbad_preferred
-        )
-        is_potential_match = "CL*" in simbad_preferred
-
-        # self.logger.info(
-        #     f"🔍 文献验证: {row.get('gaia_dr3_id')} - Strict: {is_strict_match}, Potential: {is_potential_match}"
-        # )
-        # self.logger.info(f"   验证星团关键词: '{cluster_keyword}'")
-
-        return {
-            "confirmed": is_strict_match,
-            "potential": is_potential_match,
-            "is_literature_confirmed": is_strict_match or is_potential_match,
+        active_weights = {
+            k: v
+            for k, v in base_weights.items()
+            if f"{k}_score" in audit_matrix.columns
         }
+        norm_factor = sum(active_weights.values())
+        w = {k: v / norm_factor for k, v in active_weights.items()}
+
+        audit_matrix["weighted_penalty"] = sum(
+            audit_matrix[f"{k}_score"] * w[k] for k in w
+        )
+
+        # 6. 身份定格
+        score_valid = audit_matrix["weighted_penalty"] < cfg.PHYS_VERIFY_PENALTY_LIMIT
+        audit_matrix["is_phys_consistent"] = kine_valid & score_valid
+
+        # 7. 统计输出
+        self._log_phys_audit_stats(audit_matrix)
+        return audit_matrix
+
+    def _log_phys_audit_stats(self, df):
+        """内部工具：输出物理审计统计日志"""
+        passed = df[df["is_phys_consistent"]]
+        if not passed.empty:
+            self.logger.info(
+                f"📈 [PhysAudit] 统计: 通过率 {len(passed)}/{len(df)} | "
+                f"PM残差均值: {passed['pm_residual'].mean():.2f} | "
+                f"CMD残差均值: {passed['cmd_residual'].mean():.2f} | "
+                f"平均加权惩罚分: {passed['weighted_penalty'].mean():.2f}"
+            )
 
     def _print_audit_summary(self, df: pd.DataFrame):
         """控制台高亮输出最终统计摘要"""
         total = len(df)
         stats = df["audit_status"].value_counts().to_dict()
-        
-        msg = [ # Use f-strings for cleaner formatting
+
+        msg = [  # Use f-strings for cleaner formatting
             f"{'='*70}",
             f"📊 [审计摘要] 星团: {self.cluster_name} | 样本总数: {total}",
             f"  🔹 确认成员 (物理+文献一致):  {stats.get('Confirmed Member', 0)}",
             f"  ✨ 算法新发现 (仅物理符合):   {stats.get('New Candidate', 0)}",
             f"  ⚠️ 文献孤儿星 (仅文献收录):   {stats.get('Literature Only', 0)}",
             f"  ❌ 背景污染噪点:             {stats.get('Contamination', 0)}",
-            f"{'='*70}"
+            f"{'='*70}",
         ]
         for line in msg:
             self.logger.info(line)
-
-    def validate_member(self, star_row) -> bool:
-        """向后兼容单星测光与动力学快检接口"""
-        return bool(star_row.get("phys_audit_pass", False))
-
-    def _refine_literature_status(self, row) -> str:
-        """
-        生成天体身份审计的深度诊断备注。
-
-        用于解释为什么某个被文献标记为成员的天体在物理上被拒绝。
-        """
-        notes = []
-
-        if row["pm_residual"] < cfg.PHYS_LIT_PM_LIMIT and row["cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT:
-            notes.append("CMD Outlier")
-
-        if row.get("distance_to_center", 0) > self.tidal_radius:
-            notes.append("Tidal Tail Member")
-
-        if row.get("ruwe", 1.0) > cfg.AUDIT_RUWE_LIMIT:
-            notes.append("Gaia Data Quality Issue")
-
-        if not notes:
-            return "Standard Literature Entry"
-        return " | ".join(notes)
-
-    def _preprocess_spatial_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """[私有方法] 计算每个源到星团中心的物理投影距离 (单位: pc)。"""
-        if df.empty:
-            return df
-
-        center = SkyCoord(
-            ra=self.config["CENTER_RA"] * u.deg, dec=self.config["CENTER_DEC"] * u.deg
-        )
-        stars = SkyCoord(ra=df["ra"].values * u.deg, dec=df["dec"].values * u.deg)
-
-        # 2. 计算天球角距离（先拿到弧度值，方便后续物理转换）
-        separation_rad = stars.separation(center).radian
-
-        cluster_distance_pc = self.config.get("DISTANCE_PC") or 136.2
-
-        df["distance_to_center"] = cluster_distance_pc * separation_rad
-        return df
 
     # =========================================================================
     # 🌟 高性能批量跨网络与本地缓存的星团成员判定引擎
@@ -554,50 +428,56 @@ class UnifiedMemberValidator:
         df_final_merged = self.db.sync_simbad_cache(
             source_ids=source_ids,
             cache_table_name=self.cache_table,
-            prefix="Gaia DR3 ", # SIMBAD typically expects "Gaia DR3 ID" format
-            chunk_size=chunk_size
+            prefix="Gaia DR3 ",  # SIMBAD typically expects "Gaia DR3 ID" format
+            chunk_size=chunk_size,
         )
 
         if not df_final_merged.empty:
-            membership_metrics = self._evaluate_literature_labels_batch(df_final_merged)
-            df_final_merged = pd.concat([df_final_merged, membership_metrics], axis=1)
+            consensus_df = self._audit_literature_consensus(df_final_merged)
+            df_final_merged = pd.concat([df_final_merged, consensus_df], axis=1)
 
         return df_final_merged
 
-    def _evaluate_literature_labels_batch(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _audit_literature_consensus(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
         """
-        [私有方法] 利用向量化字符串操作批量判定文献身份标签。
+        [私有方法] 批量执行文献共识审计。
+        通过向量化字符串操作，评估天体别名系统与目标星团身份的匹配程度。
         """
-        if df.empty:
-            return pd.DataFrame(columns=["is_literature_member", "match_type"])
+        if audit_matrix.empty:
+            return pd.DataFrame(columns=["is_lit_consensus", "match_type"])
 
         cluster_keyword = self.cluster_name.replace("_", " ").upper()
         cluster_keyword = re.sub(r"\s+", " ", cluster_keyword).strip()
 
         def clean_series(series):
-            return series.fillna("").astype(str).str.upper() \
-                         .str.replace(r"\s+", " ", regex=True) \
-                         .str.strip() \
-                         .replace("NONE", "")
+            return (
+                series.fillna("")
+                .astype(str)
+                .str.upper()
+                .str.replace(r"\s+", " ", regex=True)
+                .str.strip()
+                .replace("NONE", "")
+            )
 
-        norm_aliases = clean_series(df["ids"])
-        norm_preferred = clean_series(df["main_id"])
+        norm_aliases = clean_series(audit_matrix["ids"])
+        norm_preferred = clean_series(audit_matrix["main_id"])
 
-        is_strict = norm_aliases.str.contains(cluster_keyword, regex=False, na=False) | \
-                    norm_preferred.str.contains(cluster_keyword, regex=False, na=False)
-        
+        is_strict = norm_aliases.str.contains(
+            cluster_keyword, regex=False, na=False
+        ) | norm_preferred.str.contains(cluster_keyword, regex=False, na=False)
+
         is_potential = norm_preferred.str.contains("CL*", regex=False, na=False)
 
-        is_literature_member = is_strict | is_potential
+        is_lit_consensus = is_strict | is_potential
 
-        match_type = pd.Series("Unmatched", index=df.index)
+        match_type = pd.Series("Unmatched", index=audit_matrix.index)
         match_type.mask(is_potential, "Potential", inplace=True)
         match_type.mask(is_strict, "Strict", inplace=True)
 
-        return pd.DataFrame({
-            "is_literature_member": is_literature_member,
-            "match_type": match_type
-        })
+        return pd.DataFrame(
+            {"is_lit_consensus": is_lit_consensus, "match_type": match_type}
+        )
+
 
 def run_simbad_batch_audit():
     # 2. 配置高亮日志，以便直观观测“本地缓存命中”与“CDS 远程跨网打包下载”的细节

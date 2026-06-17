@@ -51,6 +51,7 @@ PHYS_VERIFY_WEIGHTS = {"pm": 0.4, "plx": 0.4, "cmd": 0.2}
 PHYS_VERIFY_PENALTY_LIMIT = 1.1
 PHYS_LIT_PM_LIMIT = 1.5
 PHYS_LIT_CMD_LIMIT = 3.0
+REDDENING_RATIO_BP_RP = 0.52  # E(BP-RP) / A_G 比例系数 (基于 Gaia DR3 经验红化律)
 
 
 # =================================================================
