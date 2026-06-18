@@ -111,11 +111,28 @@ class PriorGMM:
         # 4. 训练星团核心模型 (Cluster Model)
         X_seeds_scaled = scaler.transform(df_seeds_proc[self.features])
         if self.cluster_algo == "hdbscan":
-            db = HDBSCAN(
-                min_cluster_size=self.hdbscan_min_cluster_size,
-                min_samples=self.hdbscan_min_samples,
-                cluster_selection_epsilon=self.hdbscan_eps
-            ).fit(X_seeds_scaled)
+            # 同步实验核的 Bug 修复逻辑至标准核
+            X_input = X_seeds_scaled.astype(np.float64, order='C')
+            X_input += np.random.normal(0, 1e-8, X_input.shape)
+            
+            try:
+                db = HDBSCAN(
+                    min_cluster_size=self.hdbscan_min_cluster_size,
+                    min_samples=self.hdbscan_min_samples,
+                    cluster_selection_epsilon=self.hdbscan_eps,
+                    copy=True
+                ).fit(X_input)
+            except TypeError as te:
+                if "converted to Python scalars" in str(te) and self.hdbscan_eps > 0:
+                    self.logger.warning("💥 HDBSCAN epsilon 搜索算法崩溃 (标准核)，自动降级运行...")
+                    db = HDBSCAN(
+                        min_cluster_size=self.hdbscan_min_cluster_size,
+                        min_samples=self.hdbscan_min_samples,
+                        cluster_selection_epsilon=0.0,
+                        copy=True
+                    ).fit(X_input)
+                else:
+                    raise te
             algo_name = "HDBSCAN"
         else:
             db = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(X_seeds_scaled)

@@ -146,6 +146,10 @@ class PriorGMMEx:
         if len(df_seeds) < n_seeds_orig:
             self.logger.warning(f"🧹 字段清洗：剔除种子星集中 {n_seeds_orig - len(df_seeds)} 颗不完备星。")
 
+        # 🛡️ 防御性编程：剔除特征空间中的完全重复点，防止 HDBSCAN 在处理重合点且 epsilon > 0 时
+        # 触发 tree_to_labels 的 Cython 标量转换错误 (scikit-learn 内部 Bug)
+        df_seeds = df_seeds.drop_duplicates(subset=self.features).copy()
+
         self.logger.info(f"📊 训练样本集: 种子星={len(df_seeds)} 颗 | 全域背景={len(df_field)} 颗")
 
         if len(df_seeds) < self.dbscan_min_samples:
@@ -179,11 +183,32 @@ class PriorGMMEx:
         # 4. 稳健密度修剪与星团核心先验模型 (Cluster Model)
         # --------------------------------==================--------------------------------
         if self.cluster_algo == "hdbscan":
-            db = HDBSCAN(
-                min_cluster_size=self.hdbscan_min_cluster_size,
-                min_samples=self.hdbscan_min_samples,
-                cluster_selection_epsilon=self.hdbscan_eps
-            ).fit(X_seeds_scaled)
+            # 🛡️ [Bugfix] 解决 sklearn HDBSCAN 的 tree_to_labels 崩溃问题
+            # 原因：当 epsilon > 0 且数据中存在极近点（距离平局）时，内部 Cython 树遍历会触发类型转换错误。
+            X_input = X_seeds_scaled.astype(np.float64, order='C')
+            # 注入稍微明显的噪声 (1e-8) 以彻底打破数值平局
+            X_input += np.random.normal(0, 1e-8, X_input.shape)
+
+            try:
+                db = HDBSCAN(
+                    min_cluster_size=self.hdbscan_min_cluster_size,
+                    min_samples=self.hdbscan_min_samples,
+                    cluster_selection_epsilon=self.hdbscan_eps,
+                    copy=True
+                ).fit(X_input)
+            except TypeError as te:
+                # 如果依然触发该特定 Bug，强制降级 epsilon 为 0 以保全管线运行
+                if "converted to Python scalars" in str(te) and self.hdbscan_eps > 0:
+                    self.logger.warning("💥 HDBSCAN epsilon 搜索算法崩溃，正在启动兜底方案：禁用 epsilon 搜索并重试...")
+                    db = HDBSCAN(
+                        min_cluster_size=self.hdbscan_min_cluster_size,
+                        min_samples=self.hdbscan_min_samples,
+                        cluster_selection_epsilon=0.0,
+                        copy=True
+                    ).fit(X_input)
+                else:
+                    raise te
+
             algo_name = "HDBSCAN"
         else:
             db = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(

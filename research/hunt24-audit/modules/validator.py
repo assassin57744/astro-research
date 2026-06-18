@@ -93,40 +93,31 @@ class UnifiedMemberValidator:
             self.logger.error(f"❌ [Validator] 未找到等龄线模型文件: {iso_path}")
             return
 
-        # 2. 动态检测并提取 PARSEC 等龄线文件的真实数据表头
-        self.logger.debug(f"📖 正在解析物理模型文件头: {iso_path.name}")
-        header_line = None
-        data_start_idx = 0
-
-        with open(iso_path, "r", encoding="utf-8") as f:
-            for idx, line in enumerate(f):
-                clean_line = line.strip()
-                if not clean_line:
-                    continue
-                if (
-                    clean_line.startswith("#")
-                    and "Gmag" in clean_line
-                    and "G_BPmag" in clean_line
-                ):
-                    header_line = clean_line.lstrip("#").strip().split()
-                    data_start_idx = idx + 1
-                    break
-                elif not clean_line.startswith("#"):
-                    data_start_idx = idx
-                    break
-
-        # 3. 加载并对齐列名
+        # 2. 稳健解析等龄线文件 (恢复至之前的兼容算法，解决 astropy 无法识别格式的问题)
         try:
-            if header_line:
+            # PARSEC 等龄线表头通常位于注释行的最后一行，手动提取以确保列名映射准确
+            with open(iso_path, 'r', encoding='utf-8') as f:
+                col_names = None
+                last_comment_idx = 0
+                for idx, line in enumerate(f):
+                    if line.startswith('#'):
+                        last_comment_idx = idx
+                        # 记录最后一行包含关键字段的注释作为列名
+                        if "Gmag" in line and "G_BPmag" in line:
+                            col_names = line.lstrip('#').strip().split()
+                    elif not line.strip():
+                        continue
+                    else:
+                        break
+            
+            # 使用 pandas 高效加载数据，sep=r'\s+' 处理变长空格，comment='#' 跳过所有注释行
+            if col_names:
                 self.isochrone_df = pd.read_csv(
-                    iso_path,
-                    skiprows=data_start_idx,
-                    sep=r"\s+",
-                    names=header_line,
-                    comment="#",
+                    iso_path, sep=r'\s+', comment='#', names=col_names, 
+                    skiprows=last_comment_idx, engine='python'
                 )
             else:
-                self.isochrone_df = pd.read_csv(iso_path, sep=r"\s+", comment="#")
+                self.isochrone_df = pd.read_csv(iso_path, sep=r'\s+', comment='#')
 
             self.logger.info(
                 f"✅ [Validator] 成功加载等龄线模型 ({len(self.isochrone_df)} 演化步长)"
