@@ -747,6 +747,6 @@ GMM_CONFIG = {
     "max_iter": 20,
     "tol": 1e-5,
     "use_experimental": True,  # 启用实验性功能，如基于近邻的智能初始化
-    "enable_subsampling": True,  # 是否启用背景下采样优化，以加速模型拟合
+    "enable_subsampling": False,  # 是否启用背景下采样优化，以加速模型拟合
     "subsampling_limit": 500000, # 下采样触发门限及目标样本量
 }
