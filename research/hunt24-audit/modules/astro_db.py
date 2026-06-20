@@ -171,7 +171,7 @@ class AstroDB:
             SELECT res.*, phys.* EXCLUDE ({id_col}) 
             FROM {v_src} AS res 
             JOIN {t_base} AS phys ON res.{id_col} = phys.{id_col}
-            {where_clause}
+            -- {where_clause}
         """
 
     def enrich_with_gaia_data(self, v_target, t_base, needed_fields=None):

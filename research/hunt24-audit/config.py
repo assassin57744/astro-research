@@ -179,9 +179,9 @@ CLUSTERS = {
         "PM_RADIUS": 3.0,  # 自行半径容忍度 (mas/yr)，参考 Hunt2024 Figure 3 分布范围
         "PLX_ERROR": 0.5,  # 视差误差容忍度 (mas)
         "CMD_DEV": 0.8,  # CMD 偏离容忍度 (mag)
-        "SEED_RADIUS": 2.0,
-        "SEED_PLX_LIM": 1.5,
-        "SEED_MAX_MAG": 18.0,
+        "SEED_RADIUS": 2.0, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)
+        "SEED_PLX_LIM": 1.5,# 单位：mas, 源星种子搜索视差容忍度(第一次实验取值:1.5, 第二次实验取值:0.5)
+        "SEED_MAX_MAG": 18.0, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
         "SEED_MAX_RUWE": 1.2,
     },
     "M44": {

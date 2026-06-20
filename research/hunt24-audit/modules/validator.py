@@ -214,6 +214,15 @@ class UnifiedMemberValidator:
         )  # This SQL will now join with the cache table managed by AstroDB
         audit_matrix = self.db.execute(sql).df()
 
+        # 🚀 【防御机制】如果数据集为空，直接初始化结构并提前退出，防止下游 KeyError
+        if audit_matrix.empty:
+            self.logger.warning(f"⚠️ [Validator] 目标视图 {v_target_detail} 未提取到任何样本，跳过后续矩阵计算。")
+            # 补齐关键列名，确保下游合并或读取时不会崩溃
+            empty_cols = ["distance_to_center", "cmd_residual", "is_phys_consistent", "audit_status", "audit_note"]
+            for col in empty_cols:
+                audit_matrix[col] = pd.Series(dtype=object)
+            return audit_matrix
+
         # 2. 空间投影距离计算 (基于 SQL 返回 of sep_deg)
         cluster_dist = self._get_config_with_warning("DISTANCE_PC", 100.0)
         audit_matrix["distance_to_center"] = cluster_dist * np.radians(
@@ -459,17 +468,36 @@ class UnifiedMemberValidator:
         total = len(df)
         stats = df["audit_status"].value_counts().to_dict()
 
-        msg = [  # Use f-strings for cleaner formatting
-            f"{'='*70}",
-            f"📊 [审计摘要] 星团: {self.cluster_name} | 样本总数: {total}",
-            f"  🔹 确认成员 (物理+文献一致):  {stats.get('Confirmed Member', 0)}",
-            f"  ✨ 算法新发现 (仅物理符合):   {stats.get('New Candidate', 0)}",
-            f"  ⚠️ 文献孤儿星 (仅文献收录):   {stats.get('Literature Only', 0)}",
-            f"  ❌ 背景污染噪点:             {stats.get('Contamination', 0)}",
-            f"{'='*70}",
-        ]
-        for line in msg:
-            self.logger.info(line)
+        # 提取矩阵核心计数 (TP/FP/FN/TN)
+        tp = stats.get('Confirmed Member', 0)  # 物理(+) & 文献(+)
+        fp = stats.get('New Candidate', 0)     # 物理(+) & 文献(-)
+        fn = stats.get('Literature Only', 0)   # 物理(-) & 文献(+)
+        tn = stats.get('Contamination', 0)     # 物理(-) & 文献(-)
+
+        # 计算边缘汇总 (Marginal Totals)
+        phys_pos_total = tp + fp
+        phys_neg_total = fn + tn
+        lit_pos_total = tp + fn
+        lit_neg_total = fp + tn
+
+        # 1. 打印基础摘要
+        self.logger.info("=" * 72)
+        self.logger.info(f"📊 [验证结果摘要] 星团: {self.cluster_name} | 样本总数: {total}")
+        self.logger.info(f"  ✨ 物理验证通过:             {fp}")
+        self.logger.info(f"  🔹 --其中物理+文献全部通过:    {tp}")
+        self.logger.info(f"  ⚠️ 仅文献验证通过:           {fn}")
+        self.logger.info(f"  ❌ 双验证均未通过(背景污染):  {tn}")
+        
+        # 2. 打印二维判别矩阵 (Contingency Matrix)
+        self.logger.info("-" * 72)
+        self.logger.info("深度审计判别矩阵 (物理检查 vs 文献共识):")
+        self.logger.info("-" * 72)
+        self.logger.info(f"{'':<18} | {'文献证实 (+)':<12} | {'文献缺失 (-)':<12} | 物理汇总") # header
+        self.logger.info(f"{'物理符合 (+)':<14} | {tp:<16} | {fp:<16} | {phys_pos_total}")
+        self.logger.info(f"{'物理偏离 (-)':<14} | {fn:<16} | {tn:<16} | {phys_neg_total}")
+        self.logger.info("-" * 72)
+        self.logger.info(f"{'文献汇总':<14} | {lit_pos_total:<16} | {lit_neg_total:<16} | {total}") # footer
+        self.logger.info("=" * 72)
 
     # =========================================================================
     # 🌟 高性能批量跨网络与本地缓存的星团成员判定引擎

@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from astroquery.simbad import Simbad  # pylint: disable=unused-import
 from utils.decorators import astro_checkpoint  # 1. 导入装饰器
+
 # 扁平化后的内部导入
 from modules.astro_db import AstroDB
 from modules.pg_core import PriorGMM
@@ -42,7 +43,14 @@ class AstroWorkflow:
         manifest (dict): 来源于数据库实例的数据配置清单。
     """
 
-    def __init__(self, db_instance, target_cluster=None, target_category=None, mode="3d", algo="dbscan"):
+    def __init__(
+        self,
+        db_instance,
+        target_cluster=None,
+        target_category=None,
+        mode="3d",
+        algo="dbscan",
+    ):
         """初始化工作流实例。
 
         Args:
@@ -63,7 +71,7 @@ class AstroWorkflow:
             cluster=self.target_cluster.lower(),
             category=self.target_category,
             mode=self.mode,
-            algo=self.algo
+            algo=self.algo,
         )
 
     def data_standardize(self, idx_data, cfg_data, manifest, ctx=None):
@@ -76,13 +84,15 @@ class AstroWorkflow:
             ctx (dict, optional): 包含星团几何信息的上下文。
         """
         self.logger.info(f"🚀 正在执行数据标准化, 当前源: {idx_data}")
-        
+
         # 🛡️ 核心重构：确保 CAT_NAME 的解析优先级
         local_ctx = ctx.copy() if ctx else {}
         cluster_id = local_ctx.get("id")
-        
+
         # 默认 CAT_NAME 使用星团的 ID_NAME 或 NAME
-        local_ctx.setdefault("CAT_NAME", local_ctx.get("ID_NAME", local_ctx.get("NAME")))
+        local_ctx.setdefault(
+            "CAT_NAME", local_ctx.get("ID_NAME", local_ctx.get("NAME"))
+        )
 
         if cluster_id:
             adapter = getattr(cfg, "CATALOG_NAMING_ADAPTER", {})
@@ -91,7 +101,7 @@ class AstroWorkflow:
                 local_ctx["CAT_NAME"] = override_name
 
         actions = cfg_data.get("actions", {})
-        for layer in ["std", "stx", "aln"]: 
+        for layer in ["std", "stx", "aln"]:
             if layer in actions:
                 self.logger.debug(f"  ∟ 正在执行层级动作: {layer.upper()}")
                 action_func = actions[layer]
@@ -112,7 +122,7 @@ class AstroWorkflow:
         v_src = cfg_src["aln_view"]
         query = f"SELECT * FROM {v_src}"
         df_raw = self.db.query(query)
-        
+
         # 🚀 优化：仅针对当前运行模式所需的特征执行 dropna
         # 这样在 2D 模式下，即便视差 (plx) 缺失，只要自行 (pm) 还在，种子星就不会被丢弃。
         if required_features:
@@ -122,12 +132,12 @@ class AstroWorkflow:
             df_seeds = df_raw.dropna(subset=available_features).copy()
         else:
             df_seeds = df_raw.dropna().copy()
-            
+
         self.logger.info(f"从数据源 [{v_src}] 提取了 {len(df_seeds)} 颗种子星")
 
         # 🚀 [混合模式] 初始化种子标签：先全部标记为 'raw_seed'
-        df_tag = df_seeds[[cfg.STD_COLS['ID']]].copy()
-        df_tag['seed_type'] = 'raw_seed'
+        df_tag = df_seeds[[cfg.STD_COLS["ID"]]].copy()
+        df_tag["seed_type"] = "raw_seed"
         self.db.tag_master_table(self.t_master, df_tag)
         return df_seeds
 
@@ -175,18 +185,28 @@ class AstroWorkflow:
         Args:
             t_main_results (str): 算法结果总表名称。
         """
-        self.logger.info(f"[{self.target_cluster}] 启动 post_pipeline: 执行主表标签状态同步...")
+        self.logger.info(
+            f"[{self.target_cluster}] 启动 post_pipeline: 执行主表标签状态同步..."
+        )
         try:
             # 1. 动态增加成员分类标签列 (如果不存在)
-            self.db.execute(f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE")
-            self.db.execute(f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE")
+            self.db.execute(
+                f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
+            )
+            self.db.execute(
+                f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
+            )
 
             # 2. 直接在 Master 表中执行状态标记
             condi_golden = f"{STD_COLS['PROB']} >= {GOLDEN_SAMPLE_THRESHOLD}"
             condi_candidates = f"{STD_COLS['PROB']} > {MEMBER_SAMPLE_THRESHOLD}"
 
-            self.db.execute(f"UPDATE {self.t_master} SET is_golden = TRUE WHERE {condi_golden}")
-            self.db.execute(f"UPDATE {self.t_master} SET is_candidate = TRUE WHERE {condi_candidates}")
+            self.db.execute(
+                f"UPDATE {self.t_master} SET is_golden = TRUE WHERE {condi_golden}"
+            )
+            self.db.execute(
+                f"UPDATE {self.t_master} SET is_candidate = TRUE WHERE {condi_candidates}"
+            )
 
             # 3. 统计摘要
             stats_sql = f"""
@@ -211,7 +231,9 @@ class AstroWorkflow:
 
             # 为后续步骤提供一个逻辑上的“候选者”入口视图
             v_candidates = f"v_candidates_{self.target_cluster.lower()}"
-            self.db.register_view_from_sql(v_candidates, f"SELECT * FROM {self.t_master} WHERE is_candidate = TRUE")
+            self.db.register_view_from_sql(
+                v_candidates, f"SELECT * FROM {self.t_master} WHERE is_candidate = TRUE"
+            )
 
             return {
                 "status": "success",
@@ -221,7 +243,7 @@ class AstroWorkflow:
                     "n_candidates": n_candidates,
                     "n_seeds": n_seeds,
                     "n_seed_core": n_seed_core,
-                    "n_seed_noise": n_seed_noise
+                    "n_seed_noise": n_seed_noise,
                 },
             }
         except Exception as e:
@@ -246,38 +268,54 @@ class AstroWorkflow:
             }
 
         self.logger.info(f"⚡ 发现审计目标表 '{v_target}'，开始交叉比对...")
-        
+
         # 🚀 [混合模式重构] 直接在 Master 表更新 x_match_tag
-        col_x = cfg.MASTER_COLS['X_MATCH']
+        col_x = cfg.MASTER_COLS["X_MATCH"]
         sql_cross = f"""
             SELECT 
-                m.id,
+                COALESCE(m.id, h.id) as id,
                 CASE 
                     WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} AND h.id IS NOT NULL THEN 'Matched'
                     WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} AND h.id IS NULL     THEN 'PG Only'
-                    WHEN (m.prob <= {cfg.MEMBER_SAMPLE_THRESHOLD} OR m.prob IS NULL) AND h.id IS NOT NULL THEN 'Ref Only'
+                    WHEN (m.id IS NULL OR m.prob <= {cfg.MEMBER_SAMPLE_THRESHOLD} OR m.prob IS NULL) 
+                        AND h.id IS NOT NULL THEN 'Ref Only'
                 END as {col_x}
             FROM {self.t_master} m
-            LEFT JOIN {v_target} h ON m.id = h.id
+            FULL OUTER JOIN {v_target} h ON m.id = h.id
             WHERE m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} OR h.id IS NOT NULL
         """
         df_x = self.db.query(sql_cross)
         self.db.tag_master_table(self.t_master, df_x)
 
-        # 为深度审计准备输入视图（仅针对 PG Only 部分）
-        v_audit_target = f"v_tmp_audit_pg_only"
-        self.db.register_view_from_sql(v_audit_target, f"SELECT * FROM {self.t_master} WHERE {col_x} = 'PG Only'")
+        self.logger.info(f"🚀 直接在 Master 表更新 x_match_tag 完成.")
+        self.logger.info(f"🚀 - Master 表记录总数: {self.db.get_row_count(self.t_master)}")
+        self.logger.info(f"🚀 - Master 表更新记录总数: {df_x.shape[0]}")
+
+        # 为深度审计准备输入视图（PG Only 和 Ref Only）
+        v_audit_pg_only = f"v_tmp_audit_pg_only"
+        v_audit_ref_only = f"v_tmp_audit_ref_only"
+        self.db.register_view_from_sql(
+            v_audit_pg_only, 
+            f"SELECT * FROM {self.t_master} WHERE {col_x} = 'PG Only'"
+        )
+        self.db.register_view_from_sql(
+            v_audit_ref_only,
+            f"SELECT * FROM {self.t_master} WHERE {col_x} = 'Ref Only'",
+        )
 
         # 统计并日志
         st_sql = f"SELECT {col_x}, count(*) FROM {self.t_master} WHERE {col_x} IS NOT NULL GROUP BY {col_x}"
         stats_raw = self.db.execute(st_sql).fetchall()
         stats_cross = {row[0]: row[1] for row in stats_raw}
-        self.logger.info(f"📊 [交叉审计] Matched: {stats_cross.get('Matched', 0)} | PG Only: {stats_cross.get('PG Only', 0)} | Ref Only: {stats_cross.get('Ref Only', 0)}")
+        self.logger.info(
+            f"📊 [交叉审计] Matched: {stats_cross.get('Matched', 0)} | PG Only: {stats_cross.get('PG Only', 0)} | Ref Only: {stats_cross.get('Ref Only', 0)}"
+        )
 
         return {
             "status": "success",
-            "v_audit_target": v_audit_target,
-            "stats": stats_cross
+            "v_audit_pg_only": v_audit_pg_only,
+            "v_audit_ref_only": v_audit_ref_only,
+            "stats": stats_cross,
         }
 
     def _verify_audit_target_exists(self, v_target: str) -> bool:
@@ -320,7 +358,7 @@ class AstroWorkflow:
             self._warm_up_literature_cache(validator, v_audit_input)
 
             audit_report_df = validator.run_full_audit_ex(v_audit_input)
-            
+
             # 🚀 [混合模式重构] 审计结果回灌 Master 表
             self.logger.info(f"📥 正在将深度审计结果同步至 Master 表...")
             self.db.tag_master_table(self.t_master, audit_report_df)
@@ -328,14 +366,19 @@ class AstroWorkflow:
             # 🚀 [混合模式] 审计完成后，返回 Master 表的一个逻辑视图作为“审计报告”
             # 这样既不需要创建新物理表，又能保证返回的内容仅包含审计过的星源
             v_report = f"{self.t_master}_audited_report"
-            self.db.register_view_from_sql(v_report, f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL")
+            self.db.register_view_from_sql(
+                v_report,
+                f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL",
+            )
             return v_report
 
         except Exception as e:
-            self.logger.error(f"❌ [Workflow] 审计流程运行期间发生严重故障: {str(e)}", exc_info=True)
+            self.logger.error(
+                f"❌ [Workflow] 审计流程运行期间发生严重故障: {str(e)}", exc_info=True
+            )
             raise e
 
-    def _warm_up_literature_cache(self, validator : UnifiedMemberValidator, v_source):
+    def _warm_up_literature_cache(self, validator: UnifiedMemberValidator, v_source):
         """[私有方法] 提取视图中所有天体 ID 并触发文献缓存预热。
 
         利用 DuckDB 的 ANTI JOIN 在数据库侧直接计算差集，仅提取本地缺失的 ID，
@@ -352,7 +395,7 @@ class AstroWorkflow:
             FROM {v_source} v
             ANTI JOIN {cache_table} c ON CAST(v.id AS VARCHAR) = c.gaia_dr3_id
         """
-        
+
         self.logger.info(f"🔍 正在检索 [{v_source}] 中缺失的文献缓存记录...")
         df_missing = self.db.con.execute(sql_missing).df()
         ids_to_sync = df_missing["id"].tolist()
@@ -361,7 +404,9 @@ class AstroWorkflow:
             self.logger.info("✅ 缓存对齐完成：所有源均已在本地缓存中，跳过网络同步。")
             return
 
-        self.logger.info(f"🌐 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热...")
+        self.logger.info(
+            f"🌐 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热..."
+        )
         validator.sync_simbad_cache(ids_to_sync)
 
     def pre_audit(self, v_target):
@@ -378,7 +423,7 @@ class AstroWorkflow:
         try:
             # 调用 DB 层提供的标准化审计输入视图构建接口
             field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
-            t_base = DATA[field_idx]['stx_view']
+            t_base = DATA[field_idx]["stx_view"]
             v_result = self.db.register_audit_input_view(v_target, t_base)
             self.logger.info(f"✅ 审计数据准备完成，输入视图: {v_result}")
             return v_result
@@ -401,7 +446,9 @@ class AstroWorkflow:
         self.logger.debug(f"当前 GMM_CONFIG 中的 feature_map 配置:\n {feature_map}")
 
         if current_mode not in feature_map:
-            raise ValueError(f"未知的运行模式: {current_mode}，请核实 feature_map 配置。")
+            raise ValueError(
+                f"未知的运行模式: {current_mode}，请核实 feature_map 配置。"
+            )
 
         required_features = feature_map[current_mode]
         self.logger.info(
@@ -443,17 +490,19 @@ class AstroWorkflow:
         X_array = transformer.fit_transform(df_raw, mode=mode)
 
         if X_array.shape[1] != len(required_features):
-            raise KeyError(
-                f"Transformer 转换矩阵列数与配置不匹配！"
-            )
+            raise KeyError(f"Transformer 转换矩阵列数与配置不匹配！")
 
         cols_upper = [col.upper() for col in required_features]
         cols_lower = [col.lower() for col in required_features]
 
         # 提取转换后的特征矩阵 (在此之前不得删除原始列)
-        df_features = pd.DataFrame(X_array, columns=required_features, index=df_raw.index)
+        df_features = pd.DataFrame(
+            X_array, columns=required_features, index=df_raw.index
+        )
 
-        existing_dup_cols = [col for col in df_raw.columns if col in (cols_upper + cols_lower)]
+        existing_dup_cols = [
+            col for col in df_raw.columns if col in (cols_upper + cols_lower)
+        ]
         if existing_dup_cols:
             self.logger.info(
                 f"🔄 [Bridge] 模式 [{mode}] 触发列名防重机制，从原始表中移除了已存在的列: {existing_dup_cols}"
@@ -476,9 +525,7 @@ class AstroWorkflow:
             pd.DataFrame: 清洗后的纯净数据。
         """
         if df_extended is None:
-            self.logger.error(
-                f"❌ [数据清洗 - {label}] 数据为空，无法进行无效值过滤。"
-            )
+            self.logger.error(f"❌ [数据清洗 - {label}] 数据为空，无法进行无效值过滤。")
             return pd.DataFrame()
 
         initial_count = len(df_extended)
@@ -491,10 +538,14 @@ class AstroWorkflow:
                 f"⚠️ [防御性过滤 - {label}]: 剔除了 {dropped} 颗特征不完整(含NaN)的天体，剩余有效样本: {len(df_clean)}。"
             )
         else:
-            self.logger.info(f"✅ [数据预检 - {label}] 样本特征完备，共计 {len(df_clean)} 颗星。")
+            self.logger.info(
+                f"✅ [数据预检 - {label}] 样本特征完备，共计 {len(df_clean)} 颗星。"
+            )
         return df_clean
 
-    @astro_checkpoint(cache_table_template="cache_{cluster}_{category}_{mode}_res", force_refresh=True)
+    @astro_checkpoint(
+        cache_table_template="cache_{cluster}_{category}_{mode}_res", force_refresh=True
+    )
     def run_pipeline(self, ctx_cluster):
         """驱动核心 GMM 计算流水线：执行双轨制内核推理并固化结果。
 
@@ -514,7 +565,7 @@ class AstroWorkflow:
         )
 
         self.logger.info("📡 正在准备特征工程输入数据...")
-        
+
         # 🚀 [核心修复] 调整初始化顺序：必须先初始化 Master 表，因为 _get_seeds 会尝试更新它
         field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
         df_target_raw = self._get_target(
@@ -523,7 +574,7 @@ class AstroWorkflow:
             manifest=self.manifest,
             ctx=ctx_cluster,
         )
-        
+
         # 🚀 [混合模式] 步骤 1: 初始化主表
         self.db.init_master_table(self.t_master, df_target_raw)
 
@@ -534,7 +585,7 @@ class AstroWorkflow:
             cfg_src=DATA[seed_idx],
             manifest=self.manifest,
             ctx=ctx_cluster,
-            required_features=required_features
+            required_features=required_features,
         )
 
         self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
@@ -568,10 +619,10 @@ class AstroWorkflow:
             df_target_for_fit = df_target_final.sample(n=sub_limit, random_state=42)
 
         params = engine.fit(df_seeds_final, df_target_for_fit)
-        
+
         # 🚀 [混合模式] 步骤 2: 标记种子星类型 (Core/Noise)
-        if hasattr(params, 'df_seeds_classified'):
-            updates = params.df_seeds_classified[[cfg.STD_COLS['ID'], 'density_status']]
+        if hasattr(params, "df_seeds_classified"):
+            updates = params.df_seeds_classified[[cfg.STD_COLS["ID"], "density_status"]]
             self.db.tag_master_table(self.t_master, updates)
 
         df_prob = engine.predict(df_target_final, params)

@@ -107,7 +107,11 @@ def _initialize_pipeline_components(
         cfg.IDX_IDS_SIMBAD,
     ]
 
-    kernel_type = "PriorGMMEx (Experimental)" if cfg.GMM_CONFIG.get("use_experimental") else "PriorGMM (Standard)"
+    kernel_type = (
+        "PriorGMMEx (Experimental)"
+        if cfg.GMM_CONFIG.get("use_experimental")
+        else "PriorGMM (Standard)"
+    )
     logger.info(
         f"🚀 初始化管道组件完成。星团: {target_cluster_id}, 模式: {mode}, "
         f"内核: {kernel_type}, 算法: {algo.upper()}, "
@@ -140,7 +144,9 @@ def _ingest_and_prepare_data(
 def _execute_gmm_algorithm(wf: AstroWorkflow, ctx_cluster: dict) -> str:
     """执行核心 GMM 成员识别算法。"""
     algo_name = cfg.GMM_CONFIG.get("cluster_algo", "unknown").upper()
-    logger.info(f"🧠 [3/5] 启动 GMM 成员识别内核 (模式: {wf.mode}, 算法: {algo_name})...")
+    logger.info(
+        f"🧠 [3/5] 启动 GMM 成员识别内核 (模式: {wf.mode}, 算法: {algo_name})..."
+    )
     t_result = wf.run_pipeline(ctx_cluster)
     logger.info(f"✨ 算法推断完成，结果表: {t_result}")
     return t_result
@@ -162,7 +168,7 @@ def _perform_cross_audit(
     v_all_audit_data: dict,
     data_manifest: dict,
     target_cluster_id: str,
-) -> tuple[dict, str, dict]:
+) -> tuple[dict, str, str, dict, dict]:
     """执行交叉验证和新发现的深度审计。"""
     logger.info(f"⚖️ [5/5] 执行多源文献交叉审计, 参考类别: {wf.target_category}")
 
@@ -174,31 +180,51 @@ def _perform_cross_audit(
     if audit_res.get("status") != "success":
         logger.warning(f"⚠️ 交叉比对审计未完全成功: {audit_res.get('message')}")
         # 如果交叉比对不成功，深度审计将无法进行，返回默认值
-        return audit_res, None, {}
+        return audit_res, None, None, {}, {}
 
-    v_audit_target = audit_res.get("v_audit_target")
+    v_audit_pg_only = audit_res.get("v_audit_pg_only")
+    v_audit_ref_only = audit_res.get("v_audit_ref_only")
 
-    v_final_audited = None
-    deep_stats = {}
-    if not v_audit_target or audit_res.get("stats", {}).get("PG Only", 0) == 0:
-        logger.warning("⚠️ 未找到算法独有候选 (PG Only)，跳过深度审计。")
+    logger.info(f"✅ 交叉审计完成，PG Only: {v_audit_pg_only}, Ref Only: {v_audit_ref_only}")
+
+    v_final_pg_audited = None
+    v_final_ref_audited = None
+    deep_stats_pg = {}
+    deep_stats_ref = {}
+
+    # 对 PG Only 执行深度审计
+    if not v_audit_pg_only or audit_res.get("stats", {}).get("PG Only", 0) == 0:
+        logger.warning("⚠️ 未找到算法独有候选 (PG Only)，跳过 PG Only 深度审计。")
     else:
-        logger.info(f"🔍 准备深度审计，目标视图: {v_audit_target}")
-        v_final_audited = wf.run_audit(target=v_audit_target)
+        logger.info(f"🔍 准备 PG Only 深度审计，目标视图: {v_audit_pg_only}")
+        v_final_pg_audited = wf.run_audit(target=v_audit_pg_only)
 
         # 获取深度审计统计汇总
-        if v_final_audited:
-            # 此时 v_final_audited 已经是 Master 表的审计子集视图
-            st_sql = f"SELECT audit_status, count(*) FROM {v_final_audited} WHERE audit_status IS NOT NULL GROUP BY audit_status"
-            deep_stats = dict(wf.db.con.execute(st_sql).fetchall())
-    return audit_res, v_final_audited, deep_stats
+        if v_final_pg_audited:
+            st_sql = f"SELECT audit_status, count(*) FROM {v_final_pg_audited} WHERE audit_status IS NOT NULL GROUP BY audit_status"
+            deep_stats_pg = dict(wf.db.con.execute(st_sql).fetchall())
+
+    # 对 Ref Only 执行深度审计
+    if not v_audit_ref_only or audit_res.get("stats", {}).get("Ref Only", 0) == 0:
+        logger.warning("⚠️ 未找到文献独有候选 (Ref Only)，跳过 Ref Only 深度审计。")
+    else:
+        logger.info(f"🔍 准备 Ref Only 深度审计，目标视图: {v_audit_ref_only}")
+        v_final_ref_audited = wf.run_audit(target=v_audit_ref_only)
+
+        # 获取深度审计统计汇总
+        if v_final_ref_audited:
+            st_sql = f"SELECT audit_status, count(*) FROM {v_final_ref_audited} WHERE audit_status IS NOT NULL GROUP BY audit_status"
+            deep_stats_ref = dict(wf.db.con.execute(st_sql).fetchall())
+
+    return audit_res, v_final_pg_audited, v_final_ref_audited, deep_stats_pg, deep_stats_ref
 
 
 def _export_pipeline_results(
     db: AstroDB,
     wf: AstroWorkflow,
     audit_res: dict,
-    v_final_audited: str,
+    v_final_pg_audited: str,
+    v_final_ref_audited: str,
     target_cluster_id: str,
     target_category: str,
     mode: str,
@@ -225,11 +251,20 @@ def _export_pipeline_results(
         export_dir=cfg.RESULTS_DIR,
     )
 
-    # B. 导出深度审计详细报告：仅包含被深度校验过的样本（PG Only 集合）
-    if v_final_audited:
+    # B. 导出深度审计详细报告：PG Only 集合
+    if v_final_pg_audited:
         db.export_table(
-            v_final_audited,
-            filename=cfg.TMPL.FILE_DEEP_AUDIT.format(base=export_base),
+            v_final_pg_audited,
+            filename=cfg.TMPL.FILE_DEEP_AUDIT.format(base=export_base + "_pg_only"),
+            format="csv",
+            export_dir=cfg.RESULTS_DIR,
+        )
+
+    # C. 导出深度审计详细报告：Ref Only 集合
+    if v_final_ref_audited:
+        db.export_table(
+            v_final_ref_audited,
+            filename=cfg.TMPL.FILE_DEEP_AUDIT.format(base=export_base + "_ref_only"),
             format="csv",
             export_dir=cfg.RESULTS_DIR,
         )
@@ -243,7 +278,8 @@ def _log_final_report(
     ctx_cluster: dict,
     v_all_audit_data: dict,
     audit_res: dict,
-    deep_stats: dict,
+    deep_stats_pg: dict,
+    deep_stats_ref: dict,
     algo: str,
 ):
     """记录并保存最终的合并执行报告。"""
@@ -259,13 +295,82 @@ def _log_final_report(
         "-" * 65,
     ]
 
+    # 添加算法参数详情
+    report_lines.append("  [算法参数配置]")
+    if algo == "dbscan":
+        report_lines.append(
+            f"      - DBSCAN eps: {cfg.GMM_CONFIG.get('dbscan_eps', 'N/A')}"
+        )
+        report_lines.append(
+            f"      - DBSCAN min_samples: {cfg.GMM_CONFIG.get('dbscan_min_samples', 'N/A')}"
+        )
+    elif algo == "hdbscan":
+        report_lines.append(
+            f"      - HDBSCAN min_cluster_size: {cfg.GMM_CONFIG.get('hdbscan_min_cluster_size', 'N/A')}"
+        )
+        report_lines.append(
+            f"      - HDBSCAN min_samples: {cfg.GMM_CONFIG.get('hdbscan_min_samples', 'N/A')}"
+        )
+        report_lines.append(
+            f"      - HDBSCAN cluster_selection_epsilon: {cfg.GMM_CONFIG.get('hdbscan_cluster_selection_epsilon', 'N/A')}"
+        )
+    report_lines.append(
+        f"      - GMM covariance_type: {cfg.GMM_CONFIG.get('gmm_covariance_type', 'N/A')}"
+    )
+    report_lines.append(
+        f"      - GMM max_iter: {cfg.GMM_CONFIG.get('max_iter', 'N/A')}"
+    )
+    report_lines.append(f"      - GMM tol: {cfg.GMM_CONFIG.get('tol', 'N/A')}")
+    report_lines.append(
+        f"      - use_experimental: {cfg.GMM_CONFIG.get('use_experimental', 'N/A')}"
+    )
+    report_lines.append(
+        f"      - enable_subsampling: {cfg.GMM_CONFIG.get('enable_subsampling', 'N/A')}"
+    )
+    if cfg.GMM_CONFIG.get("enable_subsampling"):
+        report_lines.append(
+            f"      - subsampling_limit: {cfg.GMM_CONFIG.get('subsampling_limit', 'N/A')}"
+        )
+    report_lines.append("-" * 65)
+
+    # 添加 pipeline 筛选参数
+    report_lines.append("  [Pipeline 筛选参数]")
+    report_lines.append(
+        f"      - PM_RADIUS: {ctx_cluster.get('PM_RADIUS', 'N/A')} mas/yr"
+    )
+    report_lines.append(f"      - PLX_ERROR: {ctx_cluster.get('PLX_ERROR', 'N/A')} mas")
+    report_lines.append(f"      - RV_ERROR: {ctx_cluster.get('RV_ERROR', 'N/A')} km/s")
+    report_lines.append(f"      - CMD_DEV: {ctx_cluster.get('CMD_DEV', 'N/A')} mag")
+    report_lines.append(
+        f"      - KINE_SCORE_LIMIT: {ctx_cluster.get('KINE_SCORE_LIMIT', 'N/A')}"
+    )
+    report_lines.append(
+        f"      - SEED_RADIUS: {ctx_cluster.get('SEED_RADIUS', 'N/A')} pc"
+    )
+    report_lines.append(
+        f"      - SEED_PLX_LIM: {ctx_cluster.get('SEED_PLX_LIM', 'N/A')} mas"
+    )
+    report_lines.append(
+        f"      - SEED_MAX_MAG: {ctx_cluster.get('SEED_MAX_MAG', 'N/A')}"
+    )
+    report_lines.append(
+        f"      - SEED_MAX_RUWE: {ctx_cluster.get('SEED_MAX_RUWE', 'N/A')}"
+    )
+    report_lines.append("-" * 65)
+
     p_stats = v_all_audit_data.get("stats", {})
     report_lines.append("  [1] 算法发现阶段 (GMM Inference):")
-    report_lines.append(f"      - 原始输入种子数量 (Seeds): {p_stats.get('n_seeds', 0)}")
+    report_lines.append(
+        f"      - 原始输入种子数量 (Seeds): {p_stats.get('n_seeds', 0)}"
+    )
     report_lines.append(f"      - 成员星候选总数: {p_stats.get('n_candidates', 0)}")
     report_lines.append(f"      - 高置信金种子星: {p_stats.get('n_golden', 0)}")
-    report_lines.append(f"      - 种子集核心样本 (Core): {p_stats.get('n_seed_core', 0)}")
-    report_lines.append(f"      - 种子集噪声剔除 (Noise): {p_stats.get('n_seed_noise', 0)}")
+    report_lines.append(
+        f"      - 种子集核心样本 (Core): {p_stats.get('n_seed_core', 0)}"
+    )
+    report_lines.append(
+        f"      - 种子集噪声剔除 (Noise): {p_stats.get('n_seed_noise', 0)}"
+    )
 
     # 🚀 [混合模式] 更新统计键名以匹配 prepare_audit_data 中的 SQL 标签
     a_stats = audit_res.get("stats", {})
@@ -283,26 +388,84 @@ def _log_final_report(
         f"      - 算法独有候选 (PG Only):   {a_stats.get('PG Only', 0)}"
     )
 
-    if deep_stats:
-        total_audited = sum(deep_stats.values())
-        confirmed_both = deep_stats.get("Confirmed Member", 0)
-        new_pure_candidates = deep_stats.get("New Candidate", 0)
-        new_finds = confirmed_both + new_pure_candidates
-        discovery_precision = (
-            (new_finds / total_audited * 100) if total_audited > 0 else 0
+    # PG Only 深度审计结果
+    if deep_stats_pg:
+        total_audited_pg = sum(deep_stats_pg.values())
+        tp_pg = deep_stats_pg.get("Confirmed Member", 0)
+        fp_pg = deep_stats_pg.get("New Candidate", 0)
+        fn_pg = deep_stats_pg.get("Literature Only", 0)
+        tn_pg = deep_stats_pg.get("Contamination", 0)
+
+        new_finds_pg = tp_pg + fp_pg
+        discovery_precision_pg = (
+            (new_finds_pg / total_audited_pg * 100) if total_audited_pg > 0 else 0
         )
 
-        report_lines.append("  [3] 深度审计结果 (Deep Validation):")
-        report_lines.append(f"      - 深度审计样本总数: {total_audited} 颗")
-        report_lines.append(f"      - 双重确认成员 (物理+文献): {confirmed_both} 颗")
+        report_lines.append("  [3] 深度审计结果 - PG Only (算法独有候选):")
+        report_lines.append(f"      - 深度审计样本总数: {total_audited_pg} 颗")
+        report_lines.append(f"      - 双重确认成员 (物理+文献): {tp_pg} 颗")
         report_lines.append(
-            f"      - 物理验证通过 (New Discovery): {new_finds} 颗 (发现准确率: {discovery_precision:.2f}%)"
+            f"      - 物理验证通过 (New Discovery): {new_finds_pg} 颗 (发现准确率: {discovery_precision_pg:.2f}%)"
+        )
+        report_lines.append(f"      - 确认为背景噪点 (Contamination): {tn_pg}")
+        report_lines.append(f"      - 仅文献收录 (Lit. Only):       {fn_pg}")
+
+        # 增加二维判别矩阵 (Contingency Matrix)
+        report_lines.append("      " + "-" * 72)
+        report_lines.append("      审计判别矩阵 (物理检查 vs 文献共识):")
+        report_lines.append("      " + "-" * 72)
+        report_lines.append(
+            f"      {'':<18} | {'文献证实 (+)':<12} | {'文献缺失 (-)':<12} | 物理汇总"
         )
         report_lines.append(
-            f"      - 确认为背景噪点 (Contamination): {deep_stats.get('Contamination', 0)}"
+            f"      {'物理符合 (+)':<14} | {tp_pg:<16} | {fp_pg:<16} | {tp_pg + fp_pg}"
         )
         report_lines.append(
-            f"      - 仅文献收录 (Lit. Only):       {deep_stats.get('Literature Only', 0)}"
+            f"      {'物理偏离 (-)':<14} | {fn_pg:<16} | {tn_pg:<16} | {fn_pg + tn_pg}"
+        )
+        report_lines.append("      " + "-" * 72)
+        report_lines.append(
+            f"      {'文献汇总':<14} | {tp_pg + fn_pg:<16} | {fp_pg + tn_pg:<16} | {total_audited_pg}"
+        )
+
+    # Ref Only 深度审计结果
+    if deep_stats_ref:
+        total_audited_ref = sum(deep_stats_ref.values())
+        tp_ref = deep_stats_ref.get("Confirmed Member", 0)
+        fp_ref = deep_stats_ref.get("New Candidate", 0)
+        fn_ref = deep_stats_ref.get("Literature Only", 0)
+        tn_ref = deep_stats_ref.get("Contamination", 0)
+
+        new_finds_ref = tp_ref + fp_ref
+        discovery_precision_ref = (
+            (new_finds_ref / total_audited_ref * 100) if total_audited_ref > 0 else 0
+        )
+
+        report_lines.append("  [4] 深度审计结果 - Ref Only (文献独有候选):")
+        report_lines.append(f"      - 深度审计样本总数: {total_audited_ref} 颗")
+        report_lines.append(f"      - 双重确认成员 (物理+文献): {tp_ref} 颗")
+        report_lines.append(
+            f"      - 物理验证通过 (New Discovery): {new_finds_ref} 颗 (发现准确率: {discovery_precision_ref:.2f}%)"
+        )
+        report_lines.append(f"      - 确认为背景噪点 (Contamination): {tn_ref}")
+        report_lines.append(f"      - 仅文献收录 (Lit. Only):       {fn_ref}")
+
+        # 增加二维判别矩阵 (Contingency Matrix)
+        report_lines.append("      " + "-" * 72)
+        report_lines.append("      审计判别矩阵 (物理检查 vs 文献共识):")
+        report_lines.append("      " + "-" * 72)
+        report_lines.append(
+            f"      {'':<18} | {'文献一致 (+)':<12} | {'文献缺失 (-)':<12} | 物理汇总"
+        )
+        report_lines.append(
+            f"      {'物理符合 (+)':<14} | {tp_ref:<16} | {fp_ref:<16} | {tp_ref + fp_ref}"
+        )
+        report_lines.append(
+            f"      {'物理偏离 (-)':<14} | {fn_ref:<16} | {tn_ref:<16} | {fn_ref + tn_ref}"
+        )
+        report_lines.append("      " + "-" * 72)
+        report_lines.append(
+            f"      {'文献汇总':<14} | {tp_ref + fn_ref:<16} | {fp_ref + tn_ref:<16} | {total_audited_ref}"
         )
 
     report_lines.append("-" * 65)
@@ -367,6 +530,7 @@ def run_pipeline(
     target_cluster_id: str,
     target_category: str,
     mode: str,
+    algo: str = "dbscan",
     db: AstroDB = None,
     skip_setup: bool = False,
     result_mode: str = "brief",
@@ -380,12 +544,12 @@ def run_pipeline(
         target_cluster_id (str): 目标星团标识符（例如 'M45'）。
         target_category (str): 用于审计比对的参考星表类别（例如 'hunt'）。
         mode (str): GMM 执行模式（如 '3d', '6d_p'）。
+        algo (str): 聚类算法（'dbscan' 或 'hdbscan'）。
         db (AstroDB, optional): 已存在的数据库实例。
         skip_setup (bool): 是否跳过数据导入与标准化阶段。
         result_mode (str): 结果产出模式 ('brief' 或 'detailed')。
     """
-    do_export = (result_mode == "detailed")
-    algo = cfg.GMM_CONFIG.get("cluster_algo", "dbscan")
+    do_export = result_mode == "detailed"
     db_provided = db is not None
     db, wf, ctx_cluster, data_manifest, ref_tables = _initialize_pipeline_components(
         target_cluster_id, target_category, mode, algo, result_mode=result_mode, db=db
@@ -399,12 +563,21 @@ def run_pipeline(
 
         v_all_audit_data = _post_process_results(wf, t_result)
 
-        audit_res, v_final_audited, deep_stats = _perform_cross_audit(
+        audit_res, v_final_pg_audited, v_final_ref_audited, deep_stats_pg, deep_stats_ref = _perform_cross_audit(
             wf, v_all_audit_data, data_manifest, target_cluster_id
         )
 
         _export_pipeline_results(
-            db, wf, audit_res, v_final_audited, target_cluster_id, target_category, mode, algo, do_export=do_export
+            db,
+            wf,
+            audit_res,
+            v_final_pg_audited,
+            v_final_ref_audited,
+            target_cluster_id,
+            target_category,
+            mode,
+            algo,
+            do_export=do_export,
         )
 
         _log_final_report(
@@ -414,7 +587,8 @@ def run_pipeline(
             ctx_cluster,
             v_all_audit_data,
             audit_res,
-            deep_stats,
+            deep_stats_pg,
+            deep_stats_ref,
             algo,
         )
 
@@ -433,18 +607,20 @@ def run_pipeline(
             "seed_core": v_all_audit_data.get("stats", {}).get("n_seed_core", 0),
             "matched": matched,
             "pg_only": a_stats.get("PG Only", 0),
+            "ref_only": a_stats.get("Ref Only", 0),
             "recall": (matched / ref_total * 100) if ref_total > 0 else 0,
             "new_finds": 0,
             "precision": 0.0,
         }
-        if deep_stats:
-            total_audited = sum(deep_stats.values())
-            new_finds = deep_stats.get("Confirmed Member", 0) + deep_stats.get(
+        # 使用 PG Only 的深度审计结果计算 new_finds 和 precision
+        if deep_stats_pg:
+            total_audited_pg = sum(deep_stats_pg.values())
+            new_finds_pg = deep_stats_pg.get("Confirmed Member", 0) + deep_stats_pg.get(
                 "New Candidate", 0
             )
-            summary["new_finds"] = new_finds
+            summary["new_finds"] = new_finds_pg
             summary["precision"] = (
-                (new_finds / total_audited * 100) if total_audited > 0 else 0
+                (new_finds_pg / total_audited_pg * 100) if total_audited_pg > 0 else 0
             )
 
         return summary
@@ -545,26 +721,20 @@ def handle_maintenance(args):
     return False
 
 
-def main():
-    """主程序入口：编排参数解析、环境初始化与流水线执行。"""
-    parser, args = parse_args()
-
-    # 1. 初始化日志系统
-    numeric_level = getattr(logging, args.log_level.upper(), None)
+def _initialize_logging(log_level: str) -> None:
+    """初始化日志系统。"""
+    numeric_level = getattr(logging, log_level.upper(), None)
     if not isinstance(numeric_level, int):
         numeric_level = logging.INFO
     setup_logging(level=numeric_level)
 
-    # 2. 检查维护命令（若执行则退出主逻辑）
-    if handle_maintenance(args):
-        return
 
-    # 3. 校验流水线运行必填参数
+def _validate_cluster_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> str:
+    """验证星团参数并返回标准化的星团 ID。"""
     if not args.cluster:
         parser.error("运行管线模式必须提供 cluster 参数。使用 --help 查看维护命令。")
-
-    # 覆盖配置中的聚类算法
-    cfg.GMM_CONFIG["cluster_algo"] = args.algo
 
     cluster_input = args.cluster.upper()
     cluster_map = {k.upper(): k for k in cfg.CLUSTERS.keys()}
@@ -575,38 +745,76 @@ def main():
         )
         sys.exit(1)
 
-    target_cluster_id = cluster_map[cluster_input]
+    return cluster_map[cluster_input]
+
+
+def _run_all_modes(
+    target_cluster_id: str,
+    target_category: str,
+    algo: str,
+    result_mode: str,
+) -> None:
+    """循环执行所有模式的流水线分析。"""
+    shared_db = AstroDB(manifest=cfg.MANIFEST)
+    valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
+    try:
+        # 在循环外执行一次性的全量数据加载与归一化
+        _, wf_setup, ctx_cluster, _, ref_tables = _initialize_pipeline_components(
+            target_cluster_id,
+            target_category,
+            valid_modes[0],
+            algo,
+            result_mode=result_mode,
+            db=shared_db,
+        )
+        _ingest_and_prepare_data(
+            shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster
+        )
+
+        all_results = []
+        for mode in valid_modes:
+            # 循环内强制跳过 setup，仅切换算法维度进行计算
+            stats = run_pipeline(
+                target_cluster_id,
+                target_category,
+                mode,
+                algo,
+                db=shared_db,
+                skip_setup=True,
+                result_mode=result_mode,
+            )
+            if stats:
+                all_results.append(stats)
+        _log_all_modes_comparison(all_results)
+    finally:
+        shared_db.close()
+
+
+def main():
+    """主程序入口：编排参数解析、环境初始化与流水线执行。"""
+    parser, args = parse_args()
+
+    _initialize_logging(args.log_level)
+
+    if handle_maintenance(args):
+        return
+
+    target_cluster_id = _validate_cluster_args(parser, args)
+
     logger.info(
         f"🚀 启动分析管道 - 目标: {target_cluster_id}, 模式: {args.mode}, 参考: {args.category}"
     )
 
     if args.mode == "all":
-        shared_db = AstroDB(manifest=cfg.MANIFEST)
-        valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
-        try:
-            # 1. 在循环外执行一次性的全量数据加载与归一化
-            _, wf_setup, ctx_cluster, _, ref_tables = _initialize_pipeline_components(
-                target_cluster_id, args.category, valid_modes[0], args.algo, 
-                result_mode=args.result, db=shared_db
-            )
-            _ingest_and_prepare_data(
-                shared_db, wf_setup, target_cluster_id, ref_tables, ctx_cluster
-            )
-
-            all_results = []
-            for m in valid_modes:
-                # 2. 循环内强制跳过 setup，仅切换算法维度进行计算
-                stats = run_pipeline(
-                    target_cluster_id, args.category, m, db=shared_db, 
-                    skip_setup=True, result_mode=args.result
-                )
-                if stats:
-                    all_results.append(stats)
-            _log_all_modes_comparison(all_results)
-        finally:
-            shared_db.close()
+        _run_all_modes(target_cluster_id, args.category, args.algo, args.result)
     else:
-        run_pipeline(target_cluster_id, args.category, args.mode, result_mode=args.result)
+        run_pipeline(
+            target_cluster_id,
+            args.category,
+            args.mode,
+            args.algo,
+            result_mode=args.result,
+        )
 
 
 if __name__ == "__main__":
