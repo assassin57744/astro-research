@@ -143,9 +143,9 @@ def _ingest_and_prepare_data(
 
 def _execute_gmm_algorithm(wf: AstroWorkflow, ctx_cluster: dict) -> str:
     """执行核心 GMM 成员识别算法。"""
-    algo_name = cfg.GMM_CONFIG.get("cluster_algo", "unknown").upper()
+    # algo_name = cfg.GMM_CONFIG.get("cluster_algo", "unknown").upper()
     logger.info(
-        f"🧠 [3/5] 启动 GMM 成员识别内核 (模式: {wf.mode}, 算法: {algo_name})..."
+        f"🧠 [3/5] 启动 GMM 成员识别内核 (模式: {wf.mode}, 算法: {wf.algo})..."
     )
     t_result = wf.run_pipeline(ctx_cluster)
     logger.info(f"✨ 算法推断完成，结果表: {t_result}")
@@ -201,7 +201,8 @@ def _perform_cross_audit(
 
         # 获取深度审计统计汇总
         if v_final_pg_audited:
-            st_sql = f"SELECT audit_status, count(*) FROM {v_final_pg_audited} WHERE audit_status IS NOT NULL GROUP BY audit_status"
+            st_sql = f"SELECT audit_status, count(*) FROM {v_final_pg_audited} "
+            st_sql += f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
             deep_stats_pg = dict(wf.db.con.execute(st_sql).fetchall())
 
     # 对 Ref Only 执行深度审计
@@ -213,7 +214,8 @@ def _perform_cross_audit(
 
         # 获取深度审计统计汇总
         if v_final_ref_audited:
-            st_sql = f"SELECT audit_status, count(*) FROM {v_final_ref_audited} WHERE audit_status IS NOT NULL GROUP BY audit_status"
+            st_sql = f"SELECT audit_status, count(*) FROM {v_final_ref_audited} "
+            st_sql += f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
             deep_stats_ref = dict(wf.db.con.execute(st_sql).fetchall())
 
     return audit_res, v_final_pg_audited, v_final_ref_audited, deep_stats_pg, deep_stats_ref
@@ -529,7 +531,7 @@ def _log_all_modes_comparison(all_results: list):
 def run_pipeline(
     target_cluster_id: str,
     target_category: str,
-    mode: str,
+    mode: str = "5d",
     algo: str = "dbscan",
     db: AstroDB = None,
     skip_setup: bool = False,
@@ -563,9 +565,13 @@ def run_pipeline(
 
         v_all_audit_data = _post_process_results(wf, t_result)
 
-        audit_res, v_final_pg_audited, v_final_ref_audited, deep_stats_pg, deep_stats_ref = _perform_cross_audit(
-            wf, v_all_audit_data, data_manifest, target_cluster_id
-        )
+        (
+            audit_res,
+            v_final_pg_audited,
+            v_final_ref_audited,
+            deep_stats_pg,
+            deep_stats_ref,
+        ) = _perform_cross_audit(wf, v_all_audit_data, data_manifest, target_cluster_id)
 
         _export_pipeline_results(
             db,

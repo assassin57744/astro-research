@@ -8,7 +8,7 @@ from astroquery.simbad import Simbad
 
 import config as cfg  # config.py 位于 modules/ 的上一级目录
 from config import (  # config.py 位于 modules/ 的上一级目录
-    MANIFEST as DATA,
+    MANIFEST as MANIFEST,
     STD_COLS,
     TMPL,
 )
@@ -79,7 +79,7 @@ class AstroAnalyzer:
         if key_ref is None:
             key_ref = self.target_category
 
-        ref_cfg = DATA.get(key_ref)
+        ref_cfg = MANIFEST.get(key_ref)
         if not ref_cfg:
             self.logger.warning(f"⚠️ [VPD] 未找到参考星表配置: {key_ref}，将不绘制背景。")
             t_ref = None
@@ -195,7 +195,7 @@ class AstroAnalyzer:
             t_source (str): 物理参数源表。
             key_ref (str, optional): 参考背景星源。
         """
-        t_ref = DATA.get(key_ref, {}).get("stx_view") if key_ref else None
+        t_ref = MANIFEST.get(key_ref, {}).get("stx_view") if key_ref else None
         df = self.db.enrich_with_gaia_data(
             v_target, t_source, needed_fields=self.FEATURE_GROUPS["photometry"]
         )
@@ -297,7 +297,7 @@ class AstroAnalyzer:
         if key_ref is None:
             key_ref = self.target_category or cfg.DEFAULT_CATEGORY
 
-        t_ref = DATA.get(key_ref, {}).get("stx_view", "none")
+        t_ref = MANIFEST.get(key_ref, {}).get("stx_view", "none")
 
         self.logger.info(f"🚀 正在生成诊断仪表盘: {v_target} vs {t_ref}...")
 
@@ -352,7 +352,7 @@ class AstroAnalyzer:
 
     def vld_and_exp_discoveries(self, v_candidates, key_ref, validator):
         """阶段二：执行物理参数验证并保存结果"""
-        t_ref = DATA[key_ref]["stx_view"]
+        t_ref = MANIFEST[key_ref]["stx_view"]
         len_candidates = self.db.get_row_count(v_candidates)
         self.logger.info(f"🚀 开始对 {len_candidates} 个候选进行验证")
         if len_candidates <= 0:
@@ -361,7 +361,7 @@ class AstroAnalyzer:
 
         # 1. 诊断图组 (可视化验证)
         seed_idx = cfg.CLUSTERS[self.target_cluster]["SEED_IDX"]
-        t_gaia = DATA[seed_idx]["stx_view"]
+        t_gaia = MANIFEST[seed_idx]["stx_view"]
         self.plot_diagnostic_suite(v_candidates, t_gaia, key_ref)
 
         # 2. 物理审核
@@ -447,7 +447,7 @@ class AstroAnalyzer:
             key_ref = self.target_category
 
         seed_idx = cfg.CLUSTERS[self.target_cluster]["SEED_IDX"]
-        gaia_table = DATA[seed_idx]["stx_view"]
+        gaia_table = MANIFEST[seed_idx]["stx_view"]
         
         self.logger.info(f"🚀 正在生成空间分布对比图 (基于 Master 状态机): {t_master}")
 
@@ -796,7 +796,7 @@ class AstroAnalyzer:
 
         # 1. 从审计表中提取被标记为“遗漏”的源，并关联 Gaia 物理参数
         field_idx = cfg.CLUSTERS[self.target_cluster]["FIELD_IDX"]
-        t_base = DATA[field_idx]["stx_view"]
+        t_base = MANIFEST[field_idx]["stx_view"]
 
         prob_col = STD_COLS["PROB"]
         query = f"""
@@ -863,7 +863,7 @@ class AstroAnalyzer:
         """
         from config import IDX_HUNT
 
-        v_hunt = DATA[IDX_HUNT]["aln_view"]
+        v_hunt = MANIFEST[IDX_HUNT]["aln_view"]
 
         # 结果表名：标识是对 Hunt24 的审计结果
         t_audit_report = TMPL.V_ADT_HUNT24.format(src=t_candidates)

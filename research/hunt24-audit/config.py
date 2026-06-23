@@ -47,7 +47,7 @@ AUDIT_PLX_RESIDUAL_LIMIT = 1.0   # 视差残差允许度 (mas)
 AUDIT_MAG_LIMIT_HUNT24 = 19.0    # Hunt2024 文献深度参考线
 
 # 物理验证权重与细分容忍度
-PHYS_VERIFY_WEIGHTS = {"pm": 0.4, "plx": 0.4, "cmd": 0.2}
+PHYS_VERIFY_WEIGHTS = {"pm": 0.4, "plx": 0.4, "cmd": 0.2}   # TODO: 需要调整到与星团相关, 且考虑到不同维度的加权
 PHYS_VERIFY_PENALTY_LIMIT = 1.1
 PHYS_LIT_PM_LIMIT = 1.5
 PHYS_LIT_CMD_LIMIT = 3.0
@@ -157,6 +157,7 @@ CLUSTERS = {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M45,
         "SEED_IDX": IDX_FIELD_CLUSTER_M45_SEEDS,
         "NAME": "Pleiades",
+        "SIMBAD_NAME": "Cl Melotte 22",
         "ID_NAME": "melotte_22",
         "CAT_NAME": "Melotte_22",
         "ISO_FILE": "pleiades_126myr.dat",
@@ -175,7 +176,7 @@ CLUSTERS = {
         "UVW_REF": np.array([-6.05, -28.02, -14.34]),
         "V_ERROR": 2.0,  # 速度空间容忍度 (km/s)
         "RV_ERROR": 5.0, # 视向速度容忍度 (km/s)
-        "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛
+        "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛     # TODO: 可以细化到分pm, plx, cmd, rv
         "PM_RADIUS": 3.0,  # 自行半径容忍度 (mas/yr)，参考 Hunt2024 Figure 3 分布范围
         "PLX_ERROR": 0.5,  # 视差误差容忍度 (mas)
         "CMD_DEV": 0.8,  # CMD 偏离容忍度 (mag)

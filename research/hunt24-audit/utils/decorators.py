@@ -11,12 +11,13 @@ def astro_checkpoint(cache_table_template: str, force_refresh: bool = False):
             db = getattr(self, "db", None)
             
             # 动态渲染缓存表名，注入星团 ID、审计对象及维度模式
-            cluster_id = getattr(self, "target_cluster", "default").lower()
-            category = getattr(self, "target_category", "none").lower()
-            mode = cfg.GMM_CONFIG.get("dim_mode", "3d").lower()
+            cluster_id = getattr(self, "target_cluster", "m45").lower()
+            category = getattr(self, "target_category", "hunt").lower()
+            mode = getattr(self, "mode", "5d").lower()
+            algo = getattr(self, "algo", "dbscan").lower()
 
             cache_table_name = cache_table_template.format(
-                cluster=cluster_id, category=category, mode=mode
+                cluster=cluster_id, category=category, mode=mode, algo=algo
             )
 
             cache_exists = db.con.execute(

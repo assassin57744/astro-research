@@ -114,7 +114,7 @@ class AstroDB:
         """加载并合并本地天文常用格式文件 (FITS/CSV/Parquet/VOTable)。"""
         if not file_list:
             return pd.DataFrame()
-            
+
         dfs = []
         for f in file_list:
             if f.endswith(".fits"):
@@ -484,7 +484,7 @@ class AstroDB:
         if target_cluster_id and target_cluster_id in cfg.CLUSTERS:
             target_indices.add(cfg.CLUSTERS[target_cluster_id].get("FIELD_IDX"))
             target_indices.add(cfg.CLUSTERS[target_cluster_id].get("SEED_IDX"))
-            
+
             for cid, cinfo in cfg.CLUSTERS.items():
                 if cid != target_cluster_id:
                     other_clusters_indices.add(cinfo.get("FIELD_IDX"))
@@ -496,7 +496,7 @@ class AstroDB:
                 continue
 
             mode = config.get("sync_mode", "HYBRID")
-            
+
             # [核心重构]：如果模式是 VIRTUAL，说明该项是一个逻辑视图（如种子集），
             # 它直接引用 base_idx 对应的 raw 表，不需要物理文件同步。
             if mode == "VIRTUAL":
@@ -569,30 +569,30 @@ class AstroDB:
             col_type = type_map.get(col, "VARCHAR")
             self.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {col_type}")
 
-    def tag_master_table(self, master_name, df_updates, join_col='id'):
-        """[混合模式核心] 执行增量标签/结果回灌。"""
+    def tag_master_table(self, master_name, df_updates, key_col='id'):
+        """ 执行增量标签/结果回灌。"""
         if df_updates is None or df_updates.empty:
             return
 
-        # 🚀 [安全性修复] 获取目标表已有的列，仅更新匹配的列，防止物理参数（如 ra/dec）被误灌回 Master 表导致报错
+        # 🚀 获取目标表已有的列，仅更新匹配的列，防止物理参数（如 ra/dec）被误灌回 Master 表导致报错
         dest_cols = self.con.execute(f"PRAGMA table_info('{master_name}')").df()['name'].tolist()
-        
-        update_cols = [c for c in df_updates.columns if c != join_col and c in dest_cols]
-        
+
+        update_cols = [c for c in df_updates.columns if c != key_col and c in dest_cols]
+
         if not update_cols:
             self.logger.debug(f"⚠️ [Tag] {master_name} 没有匹配的列需要更新 (跳过)")
             return
 
         temp_name = f"tmp_tag_{int(time.time())}_{random.randint(0, 1000)}"
         self.register_view_from_df(temp_name, df_updates)
-        
+
         set_clause = ", ".join([f"{c} = src.{c}" for c in update_cols])
-        
+
         sql = f"""
             UPDATE {master_name} AS dest
             SET {set_clause}
             FROM {temp_name} AS src
-            WHERE dest.{join_col} = src.{join_col}
+            WHERE dest.{key_col} = src.{key_col}
         """
         try:
             self.execute(sql)
@@ -690,59 +690,81 @@ class AstroDB:
     # 🌟 高性能批量跨网络与本地数据库同步服务
     # =========================================================================
 
-    def sync_simbad_cache(self, source_ids, cache_table_name, prefix="Gaia DR3 ", chunk_size: int = 500) -> pd.DataFrame:
+    def sync_simbad_cache(
+        self, source_ids, cache_table_name, prefix="Gaia DR3 ", chunk_size: int = 500
+    ) -> pd.DataFrame:
         """
-        🚀 [核心接口] 跨网络与本地数据库同步 SIMBAD 缓存。
-        
-        采用 DuckDB 数据库侧集合运算，支持增量同步与网络熔断机制。
+        🚀 [核心接口] 跨网络与本地数据库同步 SIMBAD 缓存 (支持 Parent 自动补全)。
         """
+        # 1. 动态 DDL 升维防御 (确保 parent 列存在)
+        if self.table_exists(cache_table_name):
+            col_info = self.con.execute(f"PRAGMA table_info({cache_table_name})").df()
+            if "parent" not in col_info["name"].values:
+                self.logger.warning(f"⚠️ 发现本地缓存表 `{cache_table_name}` 缺失 `parent` 字段，正在动态追加...")
+                try:
+                    self.con.execute(f"ALTER TABLE {cache_table_name} ADD COLUMN parent VARCHAR;")
+                except Exception as ddl_err:
+                    self.logger.error(f"❌ 动态追加 parent 列失败: {str(ddl_err)}")
+
         df_input = self._normalize_input_ids(source_ids)
         self.con.register("temp_sync_input", df_input)
-        
-        # 1. 创建缓存表（如果不存在）
+
+        # 1. 创建缓存表（如果不存在，冷启动直接包含 parent 列）
         self.execute(f"""
             CREATE TABLE IF NOT EXISTS {cache_table_name} (
                 gaia_dr3_id VARCHAR PRIMARY KEY,
                 main_id VARCHAR,
-                ids VARCHAR
+                ids VARCHAR,
+                parent VARCHAR  -- 🌟 显式内嵌 parent 存储通道
             )
         """)
 
-        # 2. 检查本地命中
-        df_cached_hits = self.con.execute(f"""
-            SELECT i.gaia_dr3_id, c.main_id, c.ids
+        # 2. 检查本地命中（🌟 显式将 c.parent 捞出来）
+        df_cached = self.con.execute(f"""
+            SELECT i.gaia_dr3_id, c.main_id, c.ids, c.parent
             FROM temp_sync_input i
             JOIN {cache_table_name} c ON i.gaia_dr3_id = c.gaia_dr3_id
         """).df()
-        df_cached_hits["cache_hit"] = True
 
-        # 3. 找出本地缺失项
+        # 识别需要补全 parent 的行 (为空、None 或字符串 'None')
+        mask_needs_repair = df_cached['parent'].isna() | \
+                            (df_cached['parent'] == '') | \
+                            (df_cached['parent'].str.lower() == 'none')
+        
+        df_valid_cached = df_cached[~mask_needs_repair].copy()
+        df_valid_cached["cache_hit"] = True
+        
+        # 4. 获取需要在线同步或修复的 ID 列表
         df_missing = self.con.execute(f"""
             SELECT DISTINCT i.gaia_dr3_id
             FROM temp_sync_input i
             ANTI JOIN {cache_table_name} c ON i.gaia_dr3_id = c.gaia_dr3_id
         """).df()
         
-        ids_missing = df_missing["gaia_dr3_id"].tolist()
+        ids_to_repair = df_cached.loc[mask_needs_repair, "gaia_dr3_id"].tolist()
+        ids_to_fetch = df_missing["gaia_dr3_id"].tolist() + ids_to_repair
+        
         self.con.unregister("temp_sync_input")
 
-        df_online_results = pd.DataFrame(columns=["gaia_dr3_id", "main_id", "ids", "cache_hit"])
+        # 5. 执行网络同步 (必须确保 _perform_online_sync 内部逻辑支持 UPSERT)
+        df_online_results = pd.DataFrame(columns=["gaia_dr3_id", "main_id", "ids", "parent", "cache_hit"])
+        if ids_to_fetch:
+            # 在这里调用你更新后的逻辑，确保 _perform_online_sync 
+            # 会通过 Simbad.query_hierarchy 补全并覆盖写入本地库
+            df_online_results = self._perform_online_sync(ids_to_fetch, cache_table_name, prefix, chunk_size)
+            df_online_results["cache_hit"] = False
 
-        # 4. 执行网络同步
-        if ids_missing:
-            df_online_results = self._perform_online_sync(ids_missing, cache_table_name, prefix, chunk_size)
+        # 6. 合并结果
+        df_final_merged = pd.concat([df_valid_cached, df_online_results], ignore_index=True)
 
-        # 5. 合并结果
-        df_final_merged = pd.concat([df_cached_hits, df_online_results], ignore_index=True)
-        
         self.logger.info(
-            f"🎯 [SimbadCache] 同步完成: 总计 {len(df_input)} 颗 | "
-            f"命中缓存: {len(df_cached_hits)} | 增量下载: {len(df_online_results)}"
+            f"🎯 [SimbadCache] 同步完成: "
+            f"命中有效缓存 {len(df_valid_cached)} | "
+            f"修复/新增同步 {len(df_online_results)} 颗"
         )
 
-        # ✨ 关键逻辑：同步更新本地文件系统，打通执行链条
-        if not df_online_results.empty or not df_cached_hits.empty:
-            # 1. 更新 RAW 目录下的原始参考源（带 3 代备份）
+        # 7. 同步更新本地文件系统
+        if not df_online_results.empty or not df_valid_cached.empty:
             simbad_cfg = self.data_manifest.get(cfg.IDX_IDS_SIMBAD, {})
             rel_path = simbad_cfg.get("params", {}).get("file_pattern")
             if rel_path:
@@ -751,7 +773,7 @@ class AstroDB:
                     # 1. 备份当前有效的主文件
                     if source_file.exists():
                         self._rotate_backups(source_file)
-                    
+
                     # 2. 写入临时文件
                     temp_file = source_file.parent / f"{source_file.stem}_tmp{source_file.suffix}"
                     self.con.execute(f"COPY {cache_table_name} TO '{temp_file.as_posix()}' (FORMAT PARQUET)")
@@ -775,7 +797,7 @@ class AstroDB:
         """[私有方法] 分批次从远程 SIMBAD 同步数据并回灌缓存。"""
         self.logger.info(f"🌐 [SimbadSync] 正在从 CDS 增量抓取 {len(ids_missing)} 个源...")
         self._bypass_ssl_verification()
-        
+
         online_records = []
         for i in range(0, len(ids_missing), chunk_size):
             if self._check_user_interrupt():
@@ -784,7 +806,7 @@ class AstroDB:
 
             chunk_ids = ids_missing[i : i + chunk_size]
             batch_results = self._fetch_simbad_batch(chunk_ids, prefix)
-            
+
             if batch_results:
                 df_batch = pd.DataFrame(batch_results)
                 self._save_local_cache_incremental(df_batch, table_name)
@@ -797,58 +819,84 @@ class AstroDB:
         df_online = pd.DataFrame(online_records)
         if not df_online.empty:
             df_online["cache_hit"] = False
+        else:
+            # 🌟 确保存储列结构即使为空时也能完美对齐下游合并
+            df_online = pd.DataFrame(columns=["gaia_dr3_id", "main_id", "ids", "parent", "cache_hit"])
         return df_online
 
     def _fetch_simbad_batch(self, chunk_ids: list, prefix: str) -> list:
-        """执行单批次网络请求。"""
+        """执行批次网络请求，并实时调用 query_hierarchy 补全父节点。"""
         query_names = [f"{prefix}{mid}" for mid in chunk_ids]
-        # 匹配 Gaia ID 的正则，用于从 SIMBAD 的 user_specified_id 回溯
+        # 匹配 Gaia ID 的正则表达式，用于从 SIMBAD 的 user_specified_id 回溯
         id_pattern = re.compile(r"(\d+)$")
-        
+
         batch_results = []
-        found_ids = set()
 
         try:
             Simbad.reset_votable_fields()
             Simbad.add_votable_fields("ids")
+            # 注意：此处不再试图通过 query_objects 获取 parents，因为它不支持
             table = Simbad.query_objects(query_names)
-            
+
             if table is not None:
                 for row in table:
-                    # 提取原始 ID
                     match = id_pattern.search(str(row["user_specified_id"]))
                     if not match: continue
-                    
                     gid = match.group(1)
-                    found_ids.add(gid)
                     
                     main_id = str(row["main_id"])
+                    is_empty = (main_id.strip().upper() in ["NONE", ""])
                     ids = row["ids"].decode("utf-8") if isinstance(row["ids"], bytes) else str(row["ids"])
                     
-                    is_empty = (main_id.strip().upper() in ["NONE", ""])
+                    # 🛠️ 【核心逻辑】：如果存在有效 main_id，实时查询家谱补全 parent
+                    parent_val = "None"
+                    if not is_empty:
+                        try:
+                            # 调用官方家谱查询接口
+                            hierarchy = Simbad.query_hierarchy(main_id, hierarchy='parents', detailed_hierarchy=False)
+                            if hierarchy is not None and len(hierarchy) > 0:
+                                # 提取所有父节点名称并用 | 分隔
+                                parent_list = [str(p['main_id']) for p in hierarchy]
+                                parent_val = " | ".join(parent_list)
+                                self.logger.info(f"🌟 [SimbadSync] 家谱查询成功 {main_id}: {parent_val}")
+                        except Exception as sub_e:
+                            self.logger.warning(f"⚠️ [SimbadSync] 家谱查询失败 {main_id}: {sub_e}")
+
                     batch_results.append({
                         "gaia_dr3_id": gid,
                         "main_id": "None" if is_empty else main_id,
-                        "ids": "None" if is_empty else ids
+                        "ids": "None" if is_empty else ids,
+                        "parent": parent_val
                     })
             
-            # 补全未找到的项
+            # 补全未命中的 ID
+            found_ids = {res["gaia_dr3_id"] for res in batch_results}
             for mid in chunk_ids:
                 if str(mid) not in found_ids:
-                    batch_results.append({"gaia_dr3_id": str(mid), "main_id": "None", "ids": "None"})
-                    
+                    batch_results.append({"gaia_dr3_id": str(mid), "main_id": "None", "ids": "None", "parent": "None"})
+
         except Exception as e:
             self.logger.error(f"❌ [SimbadSync] 网络请求失败: {str(e)}")
-            
+
         return batch_results
 
     def _save_local_cache_incremental(self, df_new: pd.DataFrame, table_name: str):
         """增量更新数据库表。"""
+        # 🛡️ 安全防御：确保存储前 DataFrame 结构中具有 parent 属性
+        if "parent" not in df_new.columns:
+            df_new["parent"] = "None"
+
         self.con.register("tmp_inc", df_new)
         # 修正：DuckDB 在没有明确 PRIMARY KEY/UNIQUE 约束时不支持 INSERT OR REPLACE。
         # 由于缓存表可能在 import_raw 阶段通过 Parquet 重新物化（导致约束丢失），此处采用 DELETE + INSERT 模式实现 UPSERT。
         self.execute(f"DELETE FROM {table_name} WHERE gaia_dr3_id IN (SELECT gaia_dr3_id FROM tmp_inc)")
-        self.execute(f"INSERT INTO {table_name} SELECT * FROM tmp_inc")
+        
+        # 🌟 核心修改：显式指定目标表和数据源的列名对齐，防止因 SELECT * 造成字段顺序错位或缺失崩溃
+        self.execute(f"""
+            INSERT INTO {table_name} (gaia_dr3_id, main_id, ids, parent) 
+            SELECT gaia_dr3_id, main_id, ids, parent FROM tmp_inc
+        """)
+        
         self.con.unregister("tmp_inc")
 
     def _check_user_interrupt(self) -> bool:
@@ -861,7 +909,8 @@ class AstroDB:
             else:
                 import select
                 if select.select([sys.stdin], [], [], 0)[0]: return sys.stdin.read(1).lower() == 'q'
-        except: pass
+        except:
+            pass
         return False
 
 

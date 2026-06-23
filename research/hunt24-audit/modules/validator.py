@@ -7,6 +7,7 @@ import pandas as pd
 from scipy.interpolate import interp1d
 from astropy.coordinates import SkyCoord
 from astropy.io import ascii
+from astroquery.simbad import Simbad
 import astropy.units as u
 from pathlib import Path
 import re
@@ -31,13 +32,14 @@ class UnifiedMemberValidator:
         config (dict): 从 CLUSTERS 中提取的物理先验配置。
     """
 
-    def __init__(self, cluster_id, db_instance=None, cache_dir=None):
+    def __init__(self, cluster_id, mode="5d", db_instance=None, cache_dir=None):
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
 
         if cluster_id not in CLUSTERS:
             raise ValueError(f"❌ 星团 {cluster_id} 不在配置文件中！")
 
         self.cluster_id = cluster_id
+        self.mode = mode
         self.db = db_instance
         self.config = CLUSTERS[cluster_id]
         self.cluster_name = self.config["ID_NAME"]
@@ -96,28 +98,32 @@ class UnifiedMemberValidator:
         # 2. 稳健解析等龄线文件 (恢复至之前的兼容算法，解决 astropy 无法识别格式的问题)
         try:
             # PARSEC 等龄线表头通常位于注释行的最后一行，手动提取以确保列名映射准确
-            with open(iso_path, 'r', encoding='utf-8') as f:
+            with open(iso_path, "r", encoding="utf-8") as f:
                 col_names = None
                 last_comment_idx = 0
                 for idx, line in enumerate(f):
-                    if line.startswith('#'):
+                    if line.startswith("#"):
                         last_comment_idx = idx
                         # 记录最后一行包含关键字段的注释作为列名
                         if "Gmag" in line and "G_BPmag" in line:
-                            col_names = line.lstrip('#').strip().split()
+                            col_names = line.lstrip("#").strip().split()
                     elif not line.strip():
                         continue
                     else:
                         break
-            
+
             # 使用 pandas 高效加载数据，sep=r'\s+' 处理变长空格，comment='#' 跳过所有注释行
             if col_names:
                 self.isochrone_df = pd.read_csv(
-                    iso_path, sep=r'\s+', comment='#', names=col_names, 
-                    skiprows=last_comment_idx, engine='python'
+                    iso_path,
+                    sep=r"\s+",
+                    comment="#",
+                    names=col_names,
+                    skiprows=last_comment_idx,
+                    engine="python",
                 )
             else:
-                self.isochrone_df = pd.read_csv(iso_path, sep=r'\s+', comment='#')
+                self.isochrone_df = pd.read_csv(iso_path, sep=r"\s+", comment="#")
 
             self.logger.info(
                 f"✅ [Validator] 成功加载等龄线模型 ({len(self.isochrone_df)} 演化步长)"
@@ -143,7 +149,9 @@ class UnifiedMemberValidator:
         # 5. 执行视距离模数与红化消光修正
         # 公式: m_v - M_v = 5 * log10(d) - 5 + A_v
         try:
-            distance = self._get_config_with_warning("DISTANCE_PC", 100.0)  # 默认单位: pc
+            distance = self._get_config_with_warning(
+                "DISTANCE_PC", 100.0
+            )  # 默认单位: pc
             extinction_g = self._get_config_with_warning("EXT_AG", 0.0)  # G波段视消光
 
             # 🧪 增强逻辑：如果配置缺失 E_BP_RP，根据 EXT_AG 自动按比例估算
@@ -216,9 +224,17 @@ class UnifiedMemberValidator:
 
         # 🚀 【防御机制】如果数据集为空，直接初始化结构并提前退出，防止下游 KeyError
         if audit_matrix.empty:
-            self.logger.warning(f"⚠️ [Validator] 目标视图 {v_target_detail} 未提取到任何样本，跳过后续矩阵计算。")
+            self.logger.warning(
+                f"⚠️ [Validator] 目标视图 {v_target_detail} 未提取到任何样本，跳过后续矩阵计算。"
+            )
             # 补齐关键列名，确保下游合并或读取时不会崩溃
-            empty_cols = ["distance_to_center", "cmd_residual", "is_phys_consistent", "audit_status", "audit_note"]
+            empty_cols = [
+                "distance_to_center",
+                "cmd_residual",
+                "is_phys_consistent",
+                "audit_status",
+                "audit_note",
+            ]
             for col in empty_cols:
                 audit_matrix[col] = pd.Series(dtype=object)
             return audit_matrix
@@ -306,9 +322,7 @@ class UnifiedMemberValidator:
             self._get_config_with_warning("PMDEC_REF", 0.0),
         )
 
-        lit_cols = (
-            "sim.main_id, sim.ids"  # These columns are expected from the cache table
-        )
+        lit_cols = "sim.main_id, sim.ids, sim.parent"  # These columns are expected from the cache table
         lit_join = f"LEFT JOIN {t_simbad_aligned} sim ON CAST(p.id AS VARCHAR) = sim.gaia_dr3_id"
 
         return f"""
@@ -328,7 +342,10 @@ class UnifiedMemberValidator:
             return audit_matrix
 
         # 1. 环境上下文初始化
-        dim_mode = self._get_config_with_warning("DIM_MODE", "3d").lower()
+        # dim_mode = self._get_config_with_warning("DIM_MODE", "3d").lower()
+        dim_mode = self.mode
+
+        # 对2d和含有速度矢量的维度模式(3d_v和6d_p)进行特殊处理
         is_2d, is_physical_v = (dim_mode == "2d"), (dim_mode in ["3d_v", "6d_p"])
         audit_matrix["cmd_residual"] = np.nan  # 🚀 初始化残差列，防止后续流程 KeyError
         self.logger.info(
@@ -418,8 +435,10 @@ class UnifiedMemberValidator:
             kine_valid &= audit_matrix["plx_score"] < kine_score_limit
         if "rv_score" in audit_matrix.columns:
             # 直观逻辑：若有视向速度观测，其评分需小于硬性限制门限，否则视为无效
-            kine_valid &= audit_matrix["rv"].isna() | (audit_matrix["rv_score"] < kine_score_limit)
-        
+            kine_valid &= audit_matrix["rv"].isna() | (
+                audit_matrix["rv_score"] < kine_score_limit
+            )
+
         self.logger.info(
             f"  ⚡ [PhysAudit] 动力学门槛筛选完成。门限值: {kine_score_limit}, "
             f"通过筛选天体数: {kine_valid.sum()}/{len(audit_matrix)}"
@@ -432,7 +451,11 @@ class UnifiedMemberValidator:
             base_weights["rv"] = 0.2  # 6D 模式下赋予 RV 20% 权重
 
         # 仅保留在数据框中计算了评分的维度并归一化权重
-        w = {k: v for k, v in base_weights.items() if f"{k}_score" in audit_matrix.columns}
+        w = {
+            k: v
+            for k, v in base_weights.items()
+            if f"{k}_score" in audit_matrix.columns
+        }
         w_sum = sum(w.values())
         w = {k: v / w_sum for k, v in w.items()}
 
@@ -469,10 +492,10 @@ class UnifiedMemberValidator:
         stats = df["audit_status"].value_counts().to_dict()
 
         # 提取矩阵核心计数 (TP/FP/FN/TN)
-        tp = stats.get('Confirmed Member', 0)  # 物理(+) & 文献(+)
-        fp = stats.get('New Candidate', 0)     # 物理(+) & 文献(-)
-        fn = stats.get('Literature Only', 0)   # 物理(-) & 文献(+)
-        tn = stats.get('Contamination', 0)     # 物理(-) & 文献(-)
+        tp = stats.get("Confirmed Member", 0)  # 物理(+) & 文献(+)
+        fp = stats.get("New Candidate", 0)  # 物理(+) & 文献(-)
+        fn = stats.get("Literature Only", 0)  # 物理(-) & 文献(+)
+        tn = stats.get("Contamination", 0)  # 物理(-) & 文献(-)
 
         # 计算边缘汇总 (Marginal Totals)
         phys_pos_total = tp + fp
@@ -482,21 +505,32 @@ class UnifiedMemberValidator:
 
         # 1. 打印基础摘要
         self.logger.info("=" * 72)
-        self.logger.info(f"📊 [验证结果摘要] 星团: {self.cluster_name} | 样本总数: {total}")
-        self.logger.info(f"  ✨ 物理验证通过:             {fp}")
-        self.logger.info(f"  🔹 --其中物理+文献全部通过:    {tp}")
-        self.logger.info(f"  ⚠️ 仅文献验证通过:           {fn}")
+        self.logger.info(
+            f"📊 [验证结果摘要] 星团: {self.cluster_name} | 样本总数: {total}"
+        )
+        self.logger.info(f"  ✨ 物理验证通过总数 (TP+FP): {phys_pos_total}")
+        self.logger.info(f"      --其中文献也证实 (TP):    {tp}")
+        self.logger.info(f"      --其中文献缺失 (FP):      {fp}")
+        self.logger.info(f"  ⚠️ 文献通过但物理偏离 (FN): {fn}")
         self.logger.info(f"  ❌ 双验证均未通过(背景污染):  {tn}")
-        
+
         # 2. 打印二维判别矩阵 (Contingency Matrix)
         self.logger.info("-" * 72)
         self.logger.info("深度审计判别矩阵 (物理检查 vs 文献共识):")
         self.logger.info("-" * 72)
-        self.logger.info(f"{'':<18} | {'文献证实 (+)':<12} | {'文献缺失 (-)':<12} | 物理汇总") # header
-        self.logger.info(f"{'物理符合 (+)':<14} | {tp:<16} | {fp:<16} | {phys_pos_total}")
-        self.logger.info(f"{'物理偏离 (-)':<14} | {fn:<16} | {tn:<16} | {phys_neg_total}")
+        self.logger.info(
+            f"{'':<18} | {'文献证实 (+)':<12} | {'文献缺失 (-)':<12} | 物理汇总"
+        )  # header
+        self.logger.info(
+            f"{'物理符合 (+)':<14} | {tp:<16} | {fp:<16} | {phys_pos_total}"
+        )
+        self.logger.info(
+            f"{'物理偏离 (-)':<14} | {fn:<16} | {tn:<16} | {phys_neg_total}"
+        )
         self.logger.info("-" * 72)
-        self.logger.info(f"{'文献汇总':<14} | {lit_pos_total:<16} | {lit_neg_total:<16} | {total}") # footer
+        self.logger.info(
+            f"{'文献汇总':<14} | {lit_pos_total:<16} | {lit_neg_total:<16} | {total}"
+        )  # footer
         self.logger.info("=" * 72)
 
     # =========================================================================
@@ -528,42 +562,168 @@ class UnifiedMemberValidator:
 
     def _audit_literature_consensus(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
         """
-        [私有方法] 批量执行文献共识审计。
-        通过向量化字符串操作，评估天体别名系统与目标星团身份的匹配程度。
+        [重构版] 基于 SIMBAD 实时父级语义树的权威审计引擎。
         """
         if audit_matrix.empty:
             return pd.DataFrame(columns=["is_lit_consensus", "match_type"])
 
-        cluster_keyword = self.cluster_name.replace("_", " ").upper()
-        cluster_keyword = re.sub(r"\s+", " ", cluster_keyword).strip()
+        self.logger.debug(
+            f" 🟢 [emantic Audit]----------待审计数据---------------\n {audit_matrix}"
+        )
 
-        def clean_series(series):
-            return (
-                series.fillna("")
-                .astype(str)
-                .str.upper()
-                .str.replace(r"\s+", " ", regex=True)
-                .str.strip()
-                .replace("NONE", "")
+        # 1. 动态构建星团的规范化核心词及缩写别名网
+        keywords = []
+        for key in ["NAME", "SIMBAD_NAME", "ID_NAME", "CAT_NAME"]:
+            val = self.config.get(key)
+            if val:
+                val_upper = str(val).upper()
+                keywords.append(val_upper)
+                keywords.append(val_upper.replace("_", " "))
+                keywords.append(val_upper.replace("_", ""))
+                keywords.append(re.sub(r"\s+", "", val_upper.replace("_", " ")))
+
+        # 针对常见的前缀提取数字生成缩写 (如 Melotte 22 -> Mel 22, Mel.22; NGC 2632 -> NGC 2632)
+        for kw in list(keywords):
+            match_num = re.search(r"\d+", kw)
+            if match_num:
+                num = match_num.group()
+                if "MELOTTE" in kw or "MEL" in kw:
+                    keywords.extend([f"MEL {num}", f"MEL.{num}", f"MELOTTE {num}"])
+                elif "MESSIER" in kw or kw.startswith("M") or "M" in kw:
+                    if "MELOTTE" not in kw:
+                        keywords.extend([f"M {num}", f"M{num}", f"MESSIER {num}"])
+                elif "NGC" in kw:
+                    keywords.extend([f"NGC {num}", f"NGC{num}"])
+
+        # 星团ID前缀解析
+        match_id_num = re.search(r"\d+", self.cluster_id)
+        if match_id_num:
+            num = match_id_num.group()
+            if self.cluster_id.startswith("M"):
+                keywords.extend([f"M {num}", f"M{num}", f"MESSIER {num}"])
+            elif self.cluster_id.startswith("NGC"):
+                keywords.extend([f"NGC {num}", f"NGC{num}"])
+
+        # 预设已知星团的特殊别名 (安全防御)
+        special_aliases = {
+            "M45": ["PLEIADES", "SUBARU", "MELOTTE 22", "MEL 22", "M 45", "M45"],
+            "M44": ["PRAESEPE", "BEEHIVE", "NGC 2632", "NGC2632", "M 44", "M44"],
+            "Mel25": ["HYADES", "MELOTTE 25", "MEL 25", "MEL.25"],
+            "Mel111": ["COMA BERENICES", "COMA BER", "MELOTTE 111", "MEL 111"],
+        }
+        if self.cluster_id in special_aliases:
+            keywords.extend(special_aliases[self.cluster_id])
+
+        # keywords = list(set([k.strip().upper() for k in keywords if k.strip()]))
+        keywords = sorted(
+            list(set([k.strip().upper() for k in keywords if k.strip()])),
+            key=len,
+            reverse=True,
+        )
+        self.logger.info(
+            f"🧬 [Semantic Audit] 激活语义审计核心，检索空间词网: {keywords}"
+        )
+
+        # 2. 向量化 Parent 审计 (优先使用已缓存的 parent 关系)
+        is_parent_match = pd.Series(False, index=audit_matrix.index, dtype=bool)
+        # kw_pattern = "|".join(re.escape(k) for k in keywords)
+        # parent_pattern = rf"(?:^|\||\s)(?:{kw_pattern})(?:\b|\||$)"
+        # 核心重构：简化正则，忽略严格边界，重点在于匹配关键词的“存在性”
+        # 使用 re.IGNORECASE 替代预先的 .str.upper()，增强容错
+        # 将所有空格替换为 \s+，这样能匹配 1 个或多个空格
+        kw_pattern = "|".join([re.escape(k).replace(r"\ ", r"\s+") for k in keywords])
+        # 只要字符串包含该关键词序列，无论前后是什么
+        parent_pattern = rf"{kw_pattern}"
+
+        def clean_text(s):
+            """将多空格压缩为单个空格，确保匹配一致性"""
+            return re.sub(r"\s+", " ", str(s).strip().upper())
+
+        if "parent" in audit_matrix.columns:
+            parent_series = audit_matrix["parent"].fillna("NONE").apply(clean_text)
+            # parent_series = parent_series.replace(r"\s+", " ", regex=True)
+            with pd.option_context(
+                "display.max_rows",
+                None,
+                "display.max_columns",
+                None,
+                "display.width",
+                1000,
+                "display.max_colwidth",
+                None,
+            ):
+                self.logger.debug(
+                    f"🔎 [Semantic Audit] 检索父级名字：\n{parent_series}"
+                )
+
+            is_parent_match = parent_series.str.contains(
+                parent_pattern, regex=True, case=False, na=False
+            )
+        else:
+            # 💡 容错与向后兼容：如果输入中缺失 'parent' 字段，则执行按天体查询 Simbad 的兜底逻辑，并给出警告
+            self.logger.warning(
+                "⚠️ 输入矩阵中缺失 'parent' 字段，将执行实时网络家谱查询（这会非常慢！）"
+            )
+            unique_mids = [
+                m
+                for m in audit_matrix["main_id"].unique()
+                if pd.notna(m) and str(m).strip().upper() not in ["", "NONE"]
+            ]
+            mid_to_parent_match = {}
+            for mid in unique_mids:
+                try:
+                    hierarchy = Simbad.query_hierarchy(mid, hierarchy="parents")
+                    if hierarchy is not None:
+                        parent_names = [str(p["main_id"]).upper() for p in hierarchy]
+                        for kw in keywords:
+                            if any(kw in p for p in parent_names):
+                                mid_to_parent_match[mid] = True
+                                break
+                except Exception as e:
+                    self.logger.warning(f"⚠️ [实时家谱审计] 天体 {mid} 查询失败: {e}")
+            is_parent_match = (
+                audit_matrix["main_id"]
+                .map(mid_to_parent_match)
+                .fillna(False)
+                .astype(bool)
             )
 
-        norm_aliases = clean_series(audit_matrix["ids"])
-        norm_preferred = clean_series(audit_matrix["main_id"])
+        # 3. 基于正则表达式的“成员/子天体”语法边界匹配 (兜底逻辑)
+        is_strict = pd.Series(False, index=audit_matrix.index, dtype=bool)
+        norm_aliases = audit_matrix["ids"].fillna("").apply(clean_text)
+        norm_preferred = audit_matrix["main_id"].fillna("").apply(clean_text)
 
+        strict_pattern = (
+            # rf"(?:^|\||\s)(?:CL\*|NAME|NAME\s+)?(?:{kw_pattern})(?:\b|\||$)"
+            rf"(?:^|\||\s)(?:{kw_pattern})(?:\s*\||$)"
+        )
         is_strict = norm_aliases.str.contains(
-            cluster_keyword, regex=False, na=False
-        ) | norm_preferred.str.contains(cluster_keyword, regex=False, na=False)
+            strict_pattern, regex=True, na=False, case=False
+        ) | norm_preferred.str.contains(
+            strict_pattern, regex=True, na=False, case=False
+        )
 
-        is_potential = norm_preferred.str.contains("CL*", regex=False, na=False)
+        # 4. 聚合判定
+        is_potential = norm_preferred.str.contains(
+            r"^CL\*", regex=True, na=False
+        ).astype(bool)
+        is_literature_member = (is_parent_match | is_strict | is_potential).astype(bool)
 
-        is_lit_consensus = is_strict | is_potential
-
-        match_type = pd.Series("Unmatched", index=audit_matrix.index)
-        match_type.mask(is_potential, "Potential", inplace=True)
-        match_type.mask(is_strict, "Strict", inplace=True)
+        # 5. 生成匹配类型矩阵，使用 np.select 彻底规避类型与 mask inplace 警告
+        condlist = [is_parent_match, is_strict, is_potential]
+        choicelist = [
+            "Parent Relation Confirmed",
+            "Strict Name Bound Match",
+            "Potential Cluster Member Form",
+        ]
+        match_type = pd.Series(
+            np.select(condlist, choicelist, default="Unmatched"),
+            index=audit_matrix.index,
+            dtype=object,
+        )
 
         return pd.DataFrame(
-            {"is_lit_consensus": is_lit_consensus, "match_type": match_type}
+            {"is_lit_consensus": is_literature_member, "match_type": match_type}
         )
 
 
@@ -576,7 +736,7 @@ def run_simbad_batch_audit():
     logger = logging.getLogger("AstroPipeline.BatchRunner")
 
     # 3. 声明数仓路径与目标星表视图信息
-    db_path = r"D:/git/repo/Alapha/cluster_audit/data/warehouse/astrodb_internal.db"
+    db_path = str(cfg.DATA_DIR / "warehouse" / "astrodb_internal.db")
     target_table = "v_audit_hunt_melotte_22_pgmm_only_audited"
     id_column = "id"
 
@@ -650,7 +810,7 @@ def run_simbad_batch_audit():
                     "gaia_dr3_id",
                     "main_id",
                     "cache_hit",
-                    "is_literature_member",
+                    "is_lit_consensus",
                     "match_type",
                 ]
             ].head(200)
