@@ -1,0 +1,14 @@
+
+[build-system]
+requires=["setuptools>=68","wheel"]
+build-backend="setuptools.build_meta"
+
+[project]
+name="gaia-plot"
+version="0.1.0"
+description="Gaia DR3 plotting utilities"
+requires-python=">=3.10"
+dependencies=["matplotlib","pandas","numpy"]
+
+[tool.setuptools]
+packages=["gaia_plot"]

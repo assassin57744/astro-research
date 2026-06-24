@@ -144,18 +144,16 @@ def _ingest_and_prepare_data(
 def _execute_gmm_algorithm(wf: AstroWorkflow, ctx_cluster: dict) -> str:
     """执行核心 GMM 成员识别算法。"""
     # algo_name = cfg.GMM_CONFIG.get("cluster_algo", "unknown").upper()
-    logger.info(
-        f"🧠 [3/5] 启动 GMM 成员识别内核 (模式: {wf.mode}, 算法: {wf.algo})..."
-    )
-    t_result = wf.run_pipeline(ctx_cluster)
+    logger.info(f"🧠 [3/5] 启动 GMM 成员识别内核 (模式: {wf.mode}, 算法: {wf.algo})...")
+    t_result = wf.run_pgmm(ctx_cluster)
     logger.info(f"✨ 算法推断完成，结果表: {t_result}")
     return t_result
 
 
-def _post_process_results(wf: AstroWorkflow, t_result: str) -> dict:
+def _process_pgmm_results(wf: AstroWorkflow, t_result: str) -> dict:
     """执行后处理和候选者分类。"""
     logger.info("📊 [4/5] 正在合成分析宽表并提取候选成员视图...")
-    v_all_audit_data = wf.post_pipeline(t_result)
+    v_all_audit_data = wf.post_pgmm(t_result)
     if v_all_audit_data.get("status") != "success":
         logger.error(f"❌ 后处理流程失败: {v_all_audit_data.get('message')}")
         raise RuntimeError(f"后处理流程失败: {v_all_audit_data.get('message')}")
@@ -185,7 +183,9 @@ def _perform_cross_audit(
     v_audit_pg_only = audit_res.get("v_audit_pg_only")
     v_audit_ref_only = audit_res.get("v_audit_ref_only")
 
-    logger.info(f"✅ 交叉审计完成，PG Only: {v_audit_pg_only}, Ref Only: {v_audit_ref_only}")
+    logger.info(
+        f"✅ 交叉审计完成，PG Only: {v_audit_pg_only}, Ref Only: {v_audit_ref_only}"
+    )
 
     v_final_pg_audited = None
     v_final_ref_audited = None
@@ -197,7 +197,9 @@ def _perform_cross_audit(
         logger.warning("⚠️ 未找到算法独有候选 (PG Only)，跳过 PG Only 深度审计。")
     else:
         logger.info(f"🔍 准备 PG Only 深度审计，目标视图: {v_audit_pg_only}")
-        v_final_pg_audited = wf.run_audit(target=v_audit_pg_only)
+        v_final_pg_audited = wf.run_audit(
+            target=v_audit_pg_only, audit_type="pg_only"
+        )  # 小写
 
         # 获取深度审计统计汇总
         if v_final_pg_audited:
@@ -210,7 +212,9 @@ def _perform_cross_audit(
         logger.warning("⚠️ 未找到文献独有候选 (Ref Only)，跳过 Ref Only 深度审计。")
     else:
         logger.info(f"🔍 准备 Ref Only 深度审计，目标视图: {v_audit_ref_only}")
-        v_final_ref_audited = wf.run_audit(target=v_audit_ref_only)
+        v_final_ref_audited = wf.run_audit(
+            target=v_audit_ref_only, audit_type="ref_only"  # 小写
+        )
 
         # 获取深度审计统计汇总
         if v_final_ref_audited:
@@ -218,7 +222,13 @@ def _perform_cross_audit(
             st_sql += f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
             deep_stats_ref = dict(wf.db.con.execute(st_sql).fetchall())
 
-    return audit_res, v_final_pg_audited, v_final_ref_audited, deep_stats_pg, deep_stats_ref
+    return (
+        audit_res,
+        v_final_pg_audited,
+        v_final_ref_audited,
+        deep_stats_pg,
+        deep_stats_ref,
+    )
 
 
 def _export_pipeline_results(
@@ -248,8 +258,8 @@ def _export_pipeline_results(
     # A. 导出交叉比对汇总宽表：包含 Gaia ID、算法概率、种子分类(Core/Noise)以及文献比对标签
     db.export_table(
         wf.t_master,
-        filename=cfg.TMPL.FILE_CROSS_SUMMARY.format(base=export_base),
-        format="csv",
+        # filename=cfg.TMPL.FILE_CROSS_SUMMARY.format(base=export_base),
+        # format="csv",
         export_dir=cfg.RESULTS_DIR,
     )
 
@@ -270,6 +280,7 @@ def _export_pipeline_results(
             format="csv",
             export_dir=cfg.RESULTS_DIR,
         )
+
     logger.info("✅ 结果导出完成。")
 
 
@@ -381,7 +392,7 @@ def _log_final_report(
     ref_total = ref_missed + matched
     miss_rate = (ref_missed / ref_total * 100) if ref_total > 0 else 0
 
-    report_lines.append("  [2] 文献交叉比对 (Cross Match):")
+    report_lines.append("  [2] 审计目标交叉比对 (Cross Match):")
     report_lines.append(f"      - 双方共识成员 (Matched):   {matched} 颗")
     report_lines.append(
         f"      - 算法漏检 (Recall/Missed): {ref_missed} 颗 (漏检率: {miss_rate:.2f}%)"
@@ -414,7 +425,9 @@ def _log_final_report(
 
         # 增加二维判别矩阵 (Contingency Matrix)
         report_lines.append("      " + "-" * 72)
-        report_lines.append("      审计判别矩阵 (物理检查 vs 文献共识):")
+        report_lines.append(
+            "      PG Only (算法独有候选) 审计判别矩阵 (物理检查 vs 文献共识):"
+        )
         report_lines.append("      " + "-" * 72)
         report_lines.append(
             f"      {'':<18} | {'文献证实 (+)':<12} | {'文献缺失 (-)':<12} | 物理汇总"
@@ -429,6 +442,7 @@ def _log_final_report(
         report_lines.append(
             f"      {'文献汇总':<14} | {tp_pg + fn_pg:<16} | {fp_pg + tn_pg:<16} | {total_audited_pg}"
         )
+        report_lines.append("      " + "-" * 72)
 
     # Ref Only 深度审计结果
     if deep_stats_ref:
@@ -454,7 +468,9 @@ def _log_final_report(
 
         # 增加二维判别矩阵 (Contingency Matrix)
         report_lines.append("      " + "-" * 72)
-        report_lines.append("      审计判别矩阵 (物理检查 vs 文献共识):")
+        report_lines.append(
+            "      Ref Only (文献独有候选) 审计判别矩阵 (物理检查 vs 文献共识):"
+        )
         report_lines.append("      " + "-" * 72)
         report_lines.append(
             f"      {'':<18} | {'文献一致 (+)':<12} | {'文献缺失 (-)':<12} | 物理汇总"
@@ -469,6 +485,7 @@ def _log_final_report(
         report_lines.append(
             f"      {'文献汇总':<14} | {tp_ref + fn_ref:<16} | {fp_ref + tn_ref:<16} | {total_audited_ref}"
         )
+        report_lines.append("      " + "-" * 72)
 
     report_lines.append("-" * 65)
     report_lines.append(f"  ✅ 任务状态: 成功完成 | 资产导出路径: {cfg.RESULTS_DIR}")
@@ -551,6 +568,8 @@ def run_pipeline(
         skip_setup (bool): 是否跳过数据导入与标准化阶段。
         result_mode (str): 结果产出模式 ('brief' 或 'detailed')。
     """
+
+    # 初始化核心管道组件和配置
     do_export = result_mode == "detailed"
     db_provided = db is not None
     db, wf, ctx_cluster, data_manifest, ref_tables = _initialize_pipeline_components(
@@ -558,13 +577,17 @@ def run_pipeline(
     )
 
     try:
+        # 在循环外执行一次性的全量数据加载与归一化
         if not skip_setup:
             _ingest_and_prepare_data(db, wf, target_cluster_id, ref_tables, ctx_cluster)
 
+        # 执行 GMM 算法
         t_result = _execute_gmm_algorithm(wf, ctx_cluster)
 
-        v_all_audit_data = _post_process_results(wf, t_result)
+        # 执行后处理
+        v_all_audit_data = _process_pgmm_results(wf, t_result)
 
+        # 执行交叉审计
         (
             audit_res,
             v_final_pg_audited,
@@ -573,6 +596,7 @@ def run_pipeline(
             deep_stats_ref,
         ) = _perform_cross_audit(wf, v_all_audit_data, data_manifest, target_cluster_id)
 
+        # 导出结果
         _export_pipeline_results(
             db,
             wf,
@@ -586,6 +610,7 @@ def run_pipeline(
             do_export=do_export,
         )
 
+        # 打印最终报告
         _log_final_report(
             target_cluster_id,
             target_category,
@@ -598,7 +623,7 @@ def run_pipeline(
             algo,
         )
 
-        # 7. 构造并返回绩效摘要用于多模式汇总对比
+        # 构造并返回绩效摘要用于多模式汇总对比
         a_stats = audit_res.get("stats", {})
         ref_missed = a_stats.get("Ref Only", 0)
         matched = a_stats.get("Matched", 0)

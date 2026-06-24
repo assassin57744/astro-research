@@ -180,7 +180,7 @@ class AstroWorkflow:
                 ctx=ctx_cluster,
             )
 
-    def post_pipeline(self, t_main_results):
+    def post_pgmm(self, t_main_results):
         """算法后处理流水线：生成成员子集视图并计算统计摘要。
 
         Args:
@@ -334,13 +334,14 @@ class AstroWorkflow:
         sql = f"SELECT 1 FROM information_schema.tables WHERE table_name = '{v_target}'"
         return self.db.con.execute(sql).fetchone() is not None
 
-    def run_audit(self, target):
+    def run_audit(self, target, audit_type="default"):
         """驱动完整审计管线：涵盖数据补全、文献预热、物理校验与结果导出。
 
         流程包含：数据预处理(补全特征)、文献缓存预热(SIMBAD批量查询)、深度物理核实以及结果落库。
 
         Args:
             target (str): 待审计的目标视图名称（通常是算法发现的新源）。
+            audit_type (str): 审计类型标识 (例如 'pg_only' 或 'ref_only')，用于隔离输出视图。
 
         Returns:
             str: 审计报告表名称。
@@ -367,11 +368,18 @@ class AstroWorkflow:
 
             # 🚀 [混合模式] 审计完成后，返回 Master 表的一个逻辑视图作为“审计报告”
             # 这样既不需要创建新物理表，又能保证返回的内容仅包含审计过的星源
-            v_report = f"{self.t_master}_audited_report"
-            self.db.register_view_from_sql(
-                v_report,
-                f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL",
-            )
+            v_report = f"{self.t_master}_{audit_type}_audited_report"
+            # 这里的 WHERE 条件不仅判断 audit_status 不为空，还要限定对应交叉匹配类型的星源
+            # 从而保证 PG Only 的报告里只有 PG Only，Ref Only 的报告里只有 Ref Only
+            col_x = cfg.MASTER_COLS["X_MATCH"]
+            x_match_val = "PG Only" if audit_type == "pg_only" else "Ref Only" if audit_type == "ref_only" else None
+            
+            if x_match_val:
+                sql_filter = f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL AND {col_x} = '{x_match_val}'"
+            else:
+                sql_filter = f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL"
+
+            self.db.register_view_from_sql(v_report, sql_filter)
             return v_report
 
         except Exception as e:
@@ -587,7 +595,7 @@ class AstroWorkflow:
     @astro_checkpoint(
         cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res", force_refresh=False
     )
-    def run_pipeline(self, ctx_cluster):
+    def run_pgmm(self, ctx_cluster):
         """驱动核心 GMM 计算流水线：执行双轨制内核推理并固化结果。
 
         Args:
@@ -673,5 +681,6 @@ class AstroWorkflow:
         self.db.tag_master_table(self.t_master, df_prob)
 
         # 🚀 [混合模式] 固化 Master 表当前状态并作为结果返回
-        self.db.save_to_warehouse(self.t_master)
+        # 此处 master 表的数据还不完整, 不是合适导出的时机
+        # self.db.save_to_warehouse(self.t_master)
         return self.t_master
