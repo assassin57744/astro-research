@@ -161,7 +161,9 @@ CLUSTERS = {
         "ID_NAME": "melotte_22",
         "CAT_NAME": "Melotte_22",
         "ISO_FILE": "pleiades_126myr.dat",
-        "CENTER_RA": 56.75, "CENTER_DEC": 24.12, "RADIUS": 17.78,
+        # "CENTER_RA": 56.75, "CENTER_DEC": 24.12, "RADIUS": 17.78,
+        # 基于hunt24的星团成员的均值
+        "CENTER_RA": 56.61398997432307, "CENTER_DEC": 24.09029596042996, "RADIUS": 17.78, 
         "RA_MIN": 44.0, "RA_MAX": 66.0, "DEC_MIN": 16.0, "DEC_MAX": 36.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.3,  # 单位：pc
         "HALF_MASS_RADIUS": 3.5,  # 单位：pc
@@ -171,15 +173,19 @@ CLUSTERS = {
         "DISTANCE_MODULUS": 5.66,
         "EXT_AG": 0.12,  # Gaia G波段消光
         "E_BP_RP": 0.06,  # 对应色余 E(BP-RP)
-        "PLX_REF": 7.33, "PMRA_REF": 20.10, "PMDEC_REF": -45.40,
+        # "PLX_REF": 7.33, "PMRA_REF": 20.10, "PMDEC_REF": -45.40,
+        # 基于hunt24的星团成员的均值
+        "PLX_REF": 7.329881851789656, 
+        "PLX_ERROR": 0.5,  # 视差误差容忍度 (mas)
+        "PMRA_REF": 19.816076644561296, "PMDEC_REF": -45.02481613280063,
+        "PM_RADIUS": 3.0,  # 自行空间容忍度 (mas/yr)，参考 Hunt2024 Figure 3 分布范围
         "RV_REF": 5.63,
+        "RV_ERROR": 5.0, # 视向速度容忍度 (km/s)        
         "UVW_REF": np.array([-6.05, -28.02, -14.34]),
         "V_ERROR": 2.0,  # 速度空间容忍度 (km/s)
-        "RV_ERROR": 5.0, # 视向速度容忍度 (km/s)
-        "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛     # TODO: 可以细化到分pm, plx, cmd, rv
-        "PM_RADIUS": 3.0,  # 自行半径容忍度 (mas/yr)，参考 Hunt2024 Figure 3 分布范围
-        "PLX_ERROR": 0.5,  # 视差误差容忍度 (mas)
+        
         "CMD_DEV": 0.8,  # CMD 偏离容忍度 (mag)
+        "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛     # TODO: 可以细化到分pm, plx, cmd, rv
         "SEED_RADIUS": 2.0, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)
         "SEED_PLX_LIM": 1.5,# 单位：mas, 源星种子搜索视差容忍度(第一次实验取值:1.5, 第二次实验取值:0.5)
         "SEED_MAX_MAG": 18.0, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
