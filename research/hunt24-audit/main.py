@@ -193,10 +193,7 @@ def _prepare_context(cluster_id: str, category: str) -> tuple[dict, dict, list[s
         else "PriorGMM (Standard)"
     )
     logger.info(
-        f"🚀 初始化管道组件完成。星团: {cluster_id}, "
-        f"内核: {kernel_type}, 算法: {cfg.GMM_CONFIG.get('cluster_algo', 'dbscan').upper()}, "
-        f"种子处理: {cfg.GMM_CONFIG.get('cluster_algo', 'dbscan')}, "
-        f"审计对象: {category}"
+        f"🚀 初始化管道组件完成。PGMM内核: {kernel_type}"
     )
 
     return ctx_cluster, data_manifest, ref_tables
