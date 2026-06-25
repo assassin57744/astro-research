@@ -163,7 +163,7 @@ class AstroWorkflow:
 
         return df_target
 
-    def prepare_field_data(self, ref_tables, ctx_cluster):
+    def data_standardize_all(self, ref_tables, ctx_cluster):
         """[批量调度] 执行参考星表的层级标准化过程（STD -> STX -> ALN）。
 
         Args:

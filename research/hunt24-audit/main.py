@@ -105,6 +105,14 @@ def parse_args() -> argparse.Namespace:
         help="控制台日志输出级别",
     )
 
+    parser.add_argument(
+        "--cfg-from",
+        type=str,
+        default="file",
+        choices=["file", "db"],
+        help="配置来源: file (静态 config.py) 或 db (从历史数据重建物理参数)",
+    )
+
     maint_group = parser.add_argument_group("资产维护命令 (Maintenance)")
     maint_group.add_argument(
         "--backup", action="store_true", help="手动备份 data/raw 目录"
@@ -395,6 +403,7 @@ def run_pipeline(
     algo: str = "dbscan",
     db: AstroDB = None,
     result_mode: str = "brief",
+    cfg_from: str = "file",
 ) -> dict | None:
     """驱动端到端的天文数据分析与审计管线。
 
@@ -416,11 +425,26 @@ def run_pipeline(
 
         # [2/5] 数据对齐
         logger.info(
-            f"📐 [2/5] 正在执行数据对齐与虚拟视图创建 "
-            f"({target_cluster_id}, 模式: {mode})..."
+            f"📐 [2/5] 正在执行数据对齐与虚拟视图创建 ({target_cluster_id}, 模式: {mode})..."
         )
-        wf.prepare_field_data(ref_tables, ctx_cluster)
+        wf.data_standardize_all(ref_tables, ctx_cluster)
         logger.info("✅ 数据准备阶段完成。")
+
+        # [2.5/5] 可选：从历史数据重建物理参数
+        if cfg_from == "db":
+            logger.info("🧬 [2.5/5] 尝试从历史数据中重建星团物理先验参数...")
+            from modules.config_manager import ClusterConfigManager
+            tmp_mgr = ClusterConfigManager(db)
+            recon = tmp_mgr.reconstruct_cl_params_from_db(target_cluster_id)
+            logger.debug(f"target_cluster_id: {target_cluster_id}")
+            if not recon:
+                logger.warning(
+                    "⚠️ 历史数据重建返回空结果，将降级使用静态 config.py 参数。"
+                )
+            else:
+                logger.info(
+                    f"✅ 成功从历史数据重建 {len(recon)} 个物理参数，已持久化至 DuckDB 配置底座。"
+                )
 
         return _run_single_mode(
             db, wf, ctx_cluster, data_manifest,
@@ -440,6 +464,7 @@ def _run_all_modes(
     target_category: str,
     algo: str,
     result_mode: str,
+    cfg_from: str = "file",
 ) -> None:
     """循环所有特征空间模式，产出汇总对比报告。"""
     db = AstroDB(manifest=cfg.MANIFEST)
@@ -455,8 +480,24 @@ def _run_all_modes(
         db.import_raw(target_cluster_id=target_cluster_id, force=False)
 
         wf_setup = AstroWorkflow(db, target_cluster_id, target_category, valid_modes[0], algo)
-        wf_setup.prepare_field_data(ref_tables, ctx_cluster)
+        wf_setup.data_standardize_all(ref_tables, ctx_cluster)
         logger.info("✅ 数据准备阶段完成（全模式共享）。")
+
+        # 可选：从历史数据重建物理参数（所有模式共享）
+        if cfg_from == "db":
+            logger.info("🧬 尝试从历史数据中重建星团物理先验参数...")
+            from modules.config_manager import ClusterConfigManager
+            tmp_mgr = ClusterConfigManager(db)
+            recon = tmp_mgr.reconstruct_cl_params_from_db(target_cluster_id)
+            if not recon:
+                logger.warning(
+                    "⚠️ 历史数据重建返回空结果，将降级使用静态 config.py 参数。"
+                )
+            else:
+                logger.info(
+                    f"✅ 成功从历史数据重建 {len(recon)} 个物理参数，"
+                    "已持久化至 DuckDB 配置底座。"
+                )
 
         all_results = []
         for mode in valid_modes:
@@ -496,11 +537,11 @@ def main() -> None:
     )
 
     if args.mode == "all":
-        _run_all_modes(target_cluster_id, args.category, args.algo, args.result)
+        _run_all_modes(target_cluster_id, args.category, args.algo, args.result, cfg_from=args.cfg_from)
     else:
         run_pipeline(
             target_cluster_id, args.category, args.mode, args.algo,
-            result_mode=args.result,
+            result_mode=args.result, cfg_from=args.cfg_from,
         )
 
 

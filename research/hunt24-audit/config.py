@@ -652,6 +652,7 @@ MANIFEST = {
             "pmra": "pmRA",
             "pmdec": "pmDE",
             "plx": "Plx",
+            "rv": "RV",
             "mag": "Gmag",
             "color": "BP-RP",
             "cluster": "Name",

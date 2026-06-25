@@ -61,19 +61,27 @@ class UnifiedMemberValidator:
 
     def get_param(self, param_name: str, default=None):
         """
-        🎯 修复版：安全穿透检索，切断循环递归依赖
+        🎯 修复版：安全穿透检索，切断循环递归依赖。
+
+        三级检索：动态配置管理器 (内存/DB) → 静态 config.py → default。
+        仅当三级全部未命中时才发出警告。
         """
         if not self.cluster_obj or not hasattr(self.cluster_obj, "cfg_mgr"):
             # 降级采用静态配置
             return self.config.get(param_name, default)
-        
-        # 直接越过中间代理，从底层底层容器获取，防止与实例属性读取形成死循环
+
+        # 直接从底层容器获取，防止与实例属性读取形成死循环
         val = self.cluster_obj.cfg_mgr.get_param(self.cluster_id, param_name)
+        if val is not None:
+            return val
+
+        # 降级采用静态配置
+        val = self.config.get(param_name, default)
         if val is None:
-            # 降级采用静态配置
-            val = self.config.get(param_name, default)
-            self.logger.warn(f"⚠️ 星团 {self.cluster_name} 配置文件中未找到参数 {param_name}。")
-        return val 
+            self.logger.warn(
+                f"⚠️ 星团 {self.cluster_name} 在动态配置和静态配置中均未找到参数 {param_name}。"
+            )
+        return val
 
     def _setup_physical_constraints(self):
         """
@@ -375,7 +383,6 @@ class UnifiedMemberValidator:
         # =====================================================================
         if is_physical_v and all(c in audit_matrix.columns for c in ["u", "v", "w"]):
             # 🚀 3D 速度空间解耦（读取 cluster 进化或静态的 [U,V,W]_ERROR 属性）
-
             uvw_ref = self.get_param("UVW_REF")
 
             u_res = audit_matrix["u"] - uvw_ref[0]
@@ -592,16 +599,15 @@ class UnifiedMemberValidator:
 
         return df_final_merged
 
-    def _audit_literature_consensus(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
-        """[无损保留] 基于 SIMBAD 实时父级语义树及已知星团特殊别名的权威语义树过滤算法"""
-        if audit_matrix.empty:
-            return pd.DataFrame(columns=["is_lit_consensus", "match_type"])
+    def _build_cluster_keywords(self) -> list:
+        """动态构建星团的规范化核心词及缩写别名网。
 
-        self.logger.debug(
-            f" 🟢 [Semantic Audit]----------待审计数据---------------\n {audit_matrix}"
-        )
+        从配置参数 (NAME, SIMBAD_NAME, ID_NAME, CAT_NAME)、星团 ID 前缀、
+        及预设特殊别名中提取并派生所有可能的别名变体。
 
-        # 1. 动态构建星团的规范化核心词及缩写别名网
+        Returns:
+            去重并按长度降序排列的关键词列表，最长的优先匹配。
+        """
         keywords = []
         for key in ["NAME", "SIMBAD_NAME", "ID_NAME", "CAT_NAME"]:
             val = self.get_param(key)
@@ -644,7 +650,6 @@ class UnifiedMemberValidator:
         if self.cluster_id in special_aliases:
             keywords.extend(special_aliases[self.cluster_id])
 
-        # keywords = list(set([k.strip().upper() for k in keywords if k.strip()]))
         keywords = sorted(
             list(set([k.strip().upper() for k in keywords if k.strip()])),
             key=len,
@@ -653,6 +658,19 @@ class UnifiedMemberValidator:
         self.logger.info(
             f"🧬 [Semantic Audit] 激活语义审计核心，检索空间词网: {keywords}"
         )
+        return keywords
+
+    def _audit_literature_consensus(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
+        """[无损保留] 基于 SIMBAD 实时父级语义树及已知星团特殊别名的权威语义树过滤算法"""
+        if audit_matrix.empty:
+            return pd.DataFrame(columns=["is_lit_consensus", "match_type"])
+
+        self.logger.debug(
+            f" 🟢 [Semantic Audit]----------待审计数据---------------\n {audit_matrix}"
+        )
+
+        # 1. 动态构建星团的规范化核心词及缩写别名网
+        keywords = self._build_cluster_keywords()
 
         # 2. 向量化 Parent 审计 (优先使用已缓存的 parent 关系)
         is_parent_match = pd.Series(False, index=audit_matrix.index, dtype=bool)

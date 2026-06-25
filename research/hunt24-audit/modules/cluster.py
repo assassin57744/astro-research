@@ -39,10 +39,9 @@ class StarCluster:
         # 2. 运动学逆协方差矩阵（用于马氏距离倾斜椭圆切割）
         self.pm_inv_cov = self._load_pm_inverse_covariance()
 
-        # 3. 测光控制：加载连续样条插值器并记录物理网格边界
+        # 3. 测光控制：插值器由 Validator._setup_physical_constraints() 根据真实等龄线文件动态构建
         self.cmd_interpolator = None
         self.cmd_color_bounds = (0.0, 3.5)  # 默认保底边界
-        self._setup_cmd_constraints()
 
     # =====================================================================
     # 内部数据处理与模型平移逻辑
