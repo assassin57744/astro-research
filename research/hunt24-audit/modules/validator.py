@@ -1,3 +1,4 @@
+# modules/validator.py
 import os
 import sys
 import logging
@@ -14,6 +15,7 @@ import re
 
 import config as cfg
 from config import CLUSTERS, STD_COLS, MANIFEST, IDX_IDS_SIMBAD  # 导入核心配置
+from modules.cluster import StarCluster  # 🎯 引入重构后的星团物理实体类
 
 
 class UnifiedMemberValidator:
@@ -21,52 +23,57 @@ class UnifiedMemberValidator:
     统一天体成员验证与多维度交叉审计引擎。
 
     集成物理模型约束与文献大数据验证，提供以下核心功能：
-    1. 动态解析 PARSEC 等龄线模型，构建基于测光演化的非线性插值器（CMD 约束）。
-    2. 执行多维动力学残差审计（自行与视差）及空间分布校验。
+    1. 彻底解耦物理实体层，由绑定的 StarCluster 自适应驱动测光演化（CMD 约束）与逆协方差空间计算。
+    2. 执行多维动力学残差审计（自行与视差各向异性或 3D 银道坐标系）及空间分布校验。
     3. 联动数仓执行全自动文献交叉审计。
     4. 内置高性能本地缓存型 SIMBAD 批量查询接口，支持百万级数据增量同步。
 
     Attributes:
         cluster_id (str): 星团标识符（如 'M45'）。
-        db (AstroDB): 绑定的数据库实例。
-        config (dict): 从 CLUSTERS 中提取的物理先验配置。
+        db (duckdb.Connect): 绑定的数据库实例。
+        mode (str): 动力学审计维度模式 (2d, 3d_v, 5d, 6d_p 等)。
     """
 
-    def __init__(self, cluster_id, mode="5d", db_instance=None, cache_dir=None):
+    def __init__(self, cluster_id: str, mode="5d", db_instance=None, cache_dir=None):
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
 
         if cluster_id not in CLUSTERS:
             raise ValueError(f"❌ 星团 {cluster_id} 不在配置文件中！")
 
-        self.cluster_id = cluster_id
+        self.cluster_id = cluster_id.upper()
         self.mode = mode
         self.db = db_instance
+
+        # 🎯 核心改变：实例化纯粹的天体物理实体类，由它承载原本凌乱的配置读取与插值计算
+        self.cluster_obj = StarCluster(
+            cluster_id=self.cluster_id, db_instance=db_instance
+        )
+
+        # 为了兼容你原本的类属性命名习惯，保留以下别名映射
+        self.cluster_name = CLUSTERS[cluster_id]["ID_NAME"]
         self.config = CLUSTERS[cluster_id]
-        self.cluster_name = self.config["ID_NAME"]
 
         # 数据库持久化缓存配置
         self.cache_table = MANIFEST[IDX_IDS_SIMBAD]["raw_table"]
-        self.isochrone_df = None
-        self.cmd_interpolator = None
-        self.color_min = None
-        self.color_max = None
 
-        # 驱动完整物理边界加载
+        # 🎯 必须显式启动自适应测光演化模型，构建 CMD 插值网格
         self._setup_physical_constraints()
 
-        self.tidal_radius = self._get_config_with_warning("TIDAL_RADIUS", 10.0)
-
-    def _get_config_with_warning(self, key: str, default_val):
+    def get_param(self, param_name: str, default=None):
         """
-        获取星团配置项的值。如果配置项缺失，则记录警告日志并返回默认值，以防止潜在的精度或逻辑缺陷。
+        🎯 修复版：安全穿透检索，切断循环递归依赖
         """
-        if key not in self.config:
-            self.logger.warning(
-                f"⚠️ [ConfigFallback] 星团 {self.cluster_name} ({self.cluster_id}) 配置文件中未检测到关键参数 '{key}'！"
-                f"将自动降级使用默认值 {default_val}。这可能会影响物理一致性审计的准确性，建议在 config.py 中补齐配置。"
-            )
-            return default_val
-        return self.config[key]
+        if not self.cluster_obj or not hasattr(self.cluster_obj, "cfg_mgr"):
+            # 降级采用静态配置
+            return self.config.get(param_name, default)
+        
+        # 直接越过中间代理，从底层底层容器获取，防止与实例属性读取形成死循环
+        val = self.cluster_obj.cfg_mgr.get_param(self.cluster_id, param_name)
+        if val is None:
+            # 降级采用静态配置
+            val = self.config.get(param_name, default)
+            self.logger.warn(f"⚠️ 星团 {self.cluster_name} 配置文件中未找到参数 {param_name}。")
+        return val 
 
     def _setup_physical_constraints(self):
         """
@@ -79,7 +86,7 @@ class UnifiedMemberValidator:
         )
 
         # 1. 动态提取配置文件中的等龄线路径
-        iso_file_name = self.config.get("ISO_FILE", "")
+        iso_file_name = self.get_param("ISO_FILE", "")
         if not iso_file_name:
             self.logger.warning(
                 f"⚠️ 星团 {self.cluster_name} 未配置 ISO_FILE。将跳过测光演化审计。"
@@ -149,13 +156,11 @@ class UnifiedMemberValidator:
         # 5. 执行视距离模数与红化消光修正
         # 公式: m_v - M_v = 5 * log10(d) - 5 + A_v
         try:
-            distance = self._get_config_with_warning(
-                "DISTANCE_PC", 100.0
-            )  # 默认单位: pc
-            extinction_g = self._get_config_with_warning("EXT_AG", 0.0)  # G波段视消光
+            distance = self.get_param("DISTANCE_PC", 100.0)  # 默认单位: pc
+            extinction_g = self.get_param("EXT_AG", 0.0)  # G波段视消光
 
             # 🧪 增强逻辑：如果配置缺失 E_BP_RP，根据 EXT_AG 自动按比例估算
-            extinction_bp_rp = self.config.get("E_BP_RP")
+            extinction_bp_rp = self.get_param("E_BP_RP")
             if extinction_bp_rp is None:
                 extinction_bp_rp = extinction_g * cfg.REDDENING_RATIO_BP_RP
 
@@ -167,8 +172,8 @@ class UnifiedMemberValidator:
                 + distance_modulus
                 + extinction_g
             )
-            model_bp = self.isochrone_df[col_mapping["BP"]].values
-            model_rp = self.isochrone_df[col_mapping["RP"]].values
+            model_bp = self.isochrone_df[col_mapping["BP"]].values + distance_modulus
+            model_rp = self.isochrone_df[col_mapping["RP"]].values + distance_modulus
             model_color = (model_bp - model_rp) + extinction_bp_rp
 
             # 6. ✨ 核心：构建非线性单调一维连续空间插值器
@@ -180,11 +185,13 @@ class UnifiedMemberValidator:
             # 过滤由于物理演化极端膨胀阶段导致的输入非单调重复噪点
             unique_idx = np.unique(sorted_color, return_index=True)[1]
 
-            self.color_min = sorted_color[unique_idx].min()
-            self.color_max = sorted_color[unique_idx].max()
+            self.cluster_obj.cmd_color_bounds = (
+                float(sorted_color[unique_idx].min()),
+                float(sorted_color[unique_idx].max()),
+            )
 
             # 使用线性边界外推防御机制（bounds_error=False）建立插值函数
-            self.cmd_interpolator = interp1d(
+            self.cluster_obj.cmd_interpolator = interp1d(
                 sorted_color[unique_idx],
                 sorted_g[unique_idx],
                 kind="cubic",
@@ -192,11 +199,16 @@ class UnifiedMemberValidator:
                 fill_value="extrapolate",
             )
 
-            self.logger.debug(
-                f"🎨 [Validator] CMD 插值网格构建成功，色指数区间: [{self.color_min:.2f}, {self.color_max:.2f}]"
+            c_min, c_max = self.cluster_obj.cmd_color_bounds
+            self.logger.info(
+                f"✅ [物理引擎] 成功为物理对象构建 CMD 插值网格。控制区间色指数: ({c_min:.4f}, {c_max:.4f})"
             )
         except Exception as math_err:
-            self.logger.error(f"❌ [Validator] 构建 CMD 插值矩阵失败: {str(math_err)}")
+            # 打印更精确的异常上下文，方便调试
+            self.logger.error(
+                f"❌ [Validator] 委托实体构建 CMD 插值矩阵失败: {str(math_err)}", 
+                exc_info=True
+            )
 
     def run_full_audit_ex(self, v_target_detail: str) -> pd.DataFrame:
         """
@@ -217,9 +229,7 @@ class UnifiedMemberValidator:
         self.logger.info(f"🎬 [Validator] 启动审计管线，目标视图: {v_target_detail}")
 
         # 1. 构建并执行 SQL 获取基础数据
-        sql = self._build_audit_sql(
-            v_target_detail
-        )  # This SQL will now join with the cache table managed by AstroDB
+        sql = self._build_audit_sql(v_target_detail)
         audit_matrix = self.db.execute(sql).df()
 
         # 🚀 【防御机制】如果数据集为空，直接初始化结构并提前退出，防止下游 KeyError
@@ -239,22 +249,23 @@ class UnifiedMemberValidator:
                 audit_matrix[col] = pd.Series(dtype=object)
             return audit_matrix
 
-        # 2. 空间投影距离计算 (基于 SQL 返回 of sep_deg)
-        cluster_dist = self._get_config_with_warning("DISTANCE_PC", 100.0)
+        # 2. 空间投影距离计算 (利用从 Cluster 绑定的 CfgMgr 动态拉取的视距离参数)
+        cluster_dist = self.get_param("DISTANCE_PC", 100.0)
+
         audit_matrix["distance_to_center"] = cluster_dist * np.radians(
             audit_matrix["sep_deg"]
         )
 
-        # 2. 物理一致性审计：验证观测数据是否符合星团物理规律
+        # 3. 物理一致性审计：验证观测数据是否符合星团物理规律 (送入重构后的 StarCluster 对象)
         audit_matrix = self._audit_physical_consistency(audit_matrix)
 
-        # 3. 文献共识审计：验证身份记录是否与科研结论一致
+        # 4. 文献共识审计：验证身份记录是否与科研结论一致
         consensus_df = self._audit_literature_consensus(audit_matrix)
 
         is_lit_consensus = consensus_df["is_lit_consensus"]
         is_phys_consistent = audit_matrix["is_phys_consistent"]
 
-        # 4. 向量化最终规则决策 (np.select 代替 apply)
+        # 5. 向量化最终规则决策
         conditions = [
             (is_phys_consistent == True) & (is_lit_consensus == True),
             (is_phys_consistent == True) & (is_lit_consensus == False),
@@ -273,7 +284,7 @@ class UnifiedMemberValidator:
             conditions, choices, default="Contamination"
         )
 
-        # 5. 向量化细化诊断备注 (处理 Literature Only 子集)
+        # 6. 向量化细化诊断备注
         audit_matrix["audit_note"] = "N/A"
         mask_lit = audit_matrix["audit_status"] == "Literature Only"
 
@@ -287,16 +298,21 @@ class UnifiedMemberValidator:
 
             # 仅对符合 Literature Only 条件的子集进行条件判定，确保结果长度对齐
             df_lit = audit_matrix[mask_lit]
-            
+
             # 安全兼容一维及解耦后的二维自行残差判定备注
             if "pmra_residual" in df_lit.columns and "pmdec_residual" in df_lit.columns:
-                pm_outlier_cond = (df_lit["pmra_residual"] > cfg.PHYS_LIT_PM_LIMIT) | (df_lit["pmdec_residual"] > cfg.PHYS_LIT_PM_LIMIT)
+                pm_outlier_cond = (df_lit["pmra_residual"] > cfg.PHYS_LIT_PM_LIMIT) | (
+                    df_lit["pmdec_residual"] > cfg.PHYS_LIT_PM_LIMIT
+                )
             else:
                 pm_outlier_cond = df_lit["pm_residual"] > cfg.PHYS_LIT_PM_LIMIT
 
+            # 动态获取当前星团的潮汐半径限制
+            tidal_radius = self.get_param("TIDAL_RADIUS", 10.0)
+
             conds = [
                 pm_outlier_cond & (df_lit["cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT),
-                (df_lit["distance_to_center"] > self.tidal_radius),
+                (df_lit["distance_to_center"] > tidal_radius),
                 (ruwe_col[mask_lit] > cfg.AUDIT_RUWE_LIMIT),
             ]
             choices = ["CMD Outlier", "Tidal Tail Member", "Gaia Data Quality Issue"]
@@ -309,24 +325,16 @@ class UnifiedMemberValidator:
         return audit_matrix
 
     def _build_audit_sql(self, v_target_input: str) -> str:
-        """
-        [私有方法] 构建审计核心 SQL 语句，执行特征对齐与文献 Join。
-
-        Args:
-            v_target_input (str): 输入源视图。
-
-        Returns:
-            str: 组装好的 SQL 语句。
-        """
+        """构建审计核心 SQL 语句，使用面向 Cluster 的物理参数替换凌乱的硬编码 config 获取"""
         t_simbad_aligned = self.cache_table
 
-        c_ra = self._get_config_with_warning("CENTER_RA", None)
-        c_dec = self._get_config_with_warning("CENTER_DEC", None)
-        plx, pmra, pmdec = (
-            self._get_config_with_warning("PLX_REF", 1.0),
-            self._get_config_with_warning("PMRA_REF", 0.0),
-            self._get_config_with_warning("PMDEC_REF", 0.0),
-        )
+        # 全部收归实体属性代理，干净利落
+        c_ra = self.get_param("CENTER_RA")
+        c_dec = self.get_param("CENTER_DEC")
+
+        plx = self.get_param("PLX_REF")
+        pmra = self.get_param("PMRA_REF")
+        pmdec = self.get_param("PMDEC_REF")
 
         lit_cols = "sim.main_id, sim.ids, sim.parent"  # These columns are expected from the cache table
         lit_join = f"LEFT JOIN {t_simbad_aligned} sim ON CAST(p.id AS VARCHAR) = sim.gaia_dr3_id"
@@ -345,17 +353,16 @@ class UnifiedMemberValidator:
         """
 
     def _audit_physical_consistency(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
-        """物理一致性审计：通过多维残差与解耦的椭球惩罚系统评估天体与星团模型的匹配度。"""
+        """[物理一致性审计] 彻底融合原版完整的各向异性、3D速度及非线性非对称CMD演化模型过滤。"""
         if audit_matrix.empty:
             return audit_matrix
 
         # 1. 环境上下文初始化
-        # dim_mode = self._get_config_with_warning("DIM_MODE", "3d").lower()
         dim_mode = self.mode
-        is_2d = (dim_mode == "2d")
-        is_physical_v = (dim_mode in ["3d_v", "6d_p"])
+        is_2d = dim_mode == "2d"
+        is_physical_v = dim_mode in ["3d_v", "6d_p"]
         audit_matrix["cmd_residual"] = np.nan  # 初始化残差列
-        
+
         self.logger.info(
             f"🔍 [PhysAudit] 启动物理一致性审计。样本总数: {len(audit_matrix)}, 维度模式: {dim_mode}"
         )
@@ -364,96 +371,93 @@ class UnifiedMemberValidator:
         penalties = {}
 
         # =====================================================================
-        # A. 动力学残差 (自行解耦正椭圆约束 或 银道三维速度椭球约束)
+        # A. 动力学残差 (3D速度椭球 或 解耦的2D自行椭圆) —— 优雅应用方案A属性读取
         # =====================================================================
         if is_physical_v and all(c in audit_matrix.columns for c in ["u", "v", "w"]):
-            # 🚀 3D速度空间解耦（银道坐标系各向异性约束）
-            v_ref = self._get_config_with_warning("UVW_REF", np.zeros(3))
-            
-            # 分别提取三个方向各自的物理弥散标准差
-            u_err = self._get_config_with_warning("U_ERROR", 2.5)
-            v_err = self._get_config_with_warning("V_ERROR", 1.8)
-            w_err = self._get_config_with_warning("W_ERROR", 1.2)
+            # 🚀 3D 速度空间解耦（读取 cluster 进化或静态的 [U,V,W]_ERROR 属性）
 
-            # 计算各轴物理速度残差
-            u_res = audit_matrix["u"] - v_ref[0]
-            v_res = audit_matrix["v"] - v_ref[1]
-            w_res = audit_matrix["w"] - v_ref[2]
+            uvw_ref = self.get_param("UVW_REF")
+
+            u_res = audit_matrix["u"] - uvw_ref[0]
+            v_res = audit_matrix["v"] - uvw_ref[1]
+            w_res = audit_matrix["w"] - uvw_ref[2]
+
+            u_error = self.get_param("U_ERROR")
+            v_error = self.get_param("V_ERROR")
+            w_error = self.get_param("W_ERROR")
 
             # 通过卡方椭球算子融合3D空间速度惩罚分
             penalties["kinematics"] = np.sqrt(
-                (u_res / u_err) ** 2 + (v_res / v_err) ** 2 + (w_res / w_err) ** 2
+                (u_res / u_error) ** 2 + (v_res / v_error) ** 2 + (w_res / w_error) ** 2
             )
-            
+
             # 为向下兼容和归一化阶段注入影子评分
             audit_matrix["pm_score"] = penalties["kinematics"]
-            
+
             self.logger.info(
-                f"  ⚡ [PhysAudit] 3D 银道空间速度审计完成（解耦椭球边界）。参考速度 UVW_REF: {v_ref}, "
-                f"配置弥散 [U,V,W]_ERROR: [{u_err}, {v_err}, {w_err}] km/s, "
-                f"平均综合速度惩罚分: {penalties['kinematics'].mean():.3f}"
+                f"  ⚡ [PhysAudit] 3D 速度空间审计。UVW_REF: {uvw_ref}, 解耦弥散门限: [{u_error}, {v_error}, {w_error}] km/s"
             )
         else:
-            # 🚀 2D 自行空间解耦（赤经/赤纬正椭圆约束）
-            pmra_disp = self._get_config_with_warning("PMRA_DISPERSION", 3.0)
-            pmdec_disp = self._get_config_with_warning("PMDEC_DISPERSION", 3.0)
-
-            # 正椭圆卡方算子组合惩罚分：Score = sqrt((Δpmra/σ_pmra)^2 + (Δpmdec/σ_pmdec)^2)
-            penalties["pm"] = np.sqrt(
-                (audit_matrix["pmra_residual"] / pmra_disp) ** 2 + 
-                (audit_matrix["pmdec_residual"] / pmdec_disp) ** 2
+            # 🚀 2D 自行空间解耦 (利用马氏距离逆协方差矩阵或正椭圆对角化判定)
+            # 优先调用 cluster 类内部高度内聚的 _load_pm_inverse_covariance 倾斜矩阵
+            pmra_ref = self.get_param("PMRA_REF")
+            pmdec_ref = self.get_param("PMDEC_REF")
+            pm_res = audit_matrix[["pmra", "pmdec"]].values - np.array(
+                [pmra_ref, pmdec_ref]
             )
-            
-            # 确保下游 Kinematics Gate 能顺利读取
+            pm_inv_cov = self.cluster_obj.pm_inv_cov
+            # chi2_pm = np.sum(pm_res @ pm_inv_cov * pm_res, axis=1)
+            chi2_pm = np.einsum('ni,ij,nj->n', pm_res, pm_inv_cov, pm_res)
+
+            penalties["pm"] = np.sqrt(chi2_pm)
             audit_matrix["pm_score"] = penalties["pm"]
-            
+
             self.logger.info(
-                f"  ⚡ [PhysAudit] 二维自行空间审计完成（解耦正椭圆边界）。"
-                f"容忍度 [PMRA, PMDEC]_DISPERSION: [{pmra_disp}, {pmdec_disp}] mas/yr, "
-                f"平均综合自行惩罚分: {penalties['pm'].mean():.3f}"
+                f"  ⚡ [PhysAudit] 2D 自行空间倾斜马氏椭圆审计完成。平均自行惩罚分: {penalties['pm'].mean():.3f}"
             )
 
         # =====================================================================
         # B. 视差残差 (仅 3D+)
         # =====================================================================
         if not is_2d:
-            plx_err = self._get_config_with_warning("PLX_ERROR", 0.5)
-            penalties["plx"] = audit_matrix["plx_residual"] / plx_err
+            plx_error = self.get_param("PLX_ERROR", 1.0)
+            penalties["plx"] = audit_matrix["plx_residual"] / plx_error
             self.logger.info(
-                f"  ⚡ [PhysAudit] 视差残差计算完成。视差基准不确定度 PLX_ERROR: {plx_err} mas, "
-                f"平均残差: {audit_matrix['plx_residual'].mean():.3f} mas, 平均惩罚分: {penalties['plx'].mean():.3f}"
+                f"  ⚡ [PhysAudit] 视差残差计算完成。视差门限 PLX_ERROR: {plx_error} mas"
             )
 
         # =====================================================================
-        # C. 视向速度残差 (如果列存在)
+        # C. 视向速度残差
         # =====================================================================
         if "rv" in audit_matrix.columns:
-            rv_ref = self._get_config_with_warning("RV_REF", 0.0)
-            rv_err = self._get_config_with_warning("RV_ERROR", 5.0)
+            rv_err = self.get_param("RV_ERROR", 5.0)
+            rv_ref = self.get_param("RV_REF", 0.0)
             rv_res = (audit_matrix["rv"] - rv_ref).abs()
             penalties["rv"] = rv_res / rv_err
-            self.logger.info(
-                f"  ⚡ [PhysAudit] 视向速度残差计算完成。RV_REF: {rv_ref} km/s, RV_ERROR: {rv_err} km/s, "
-                f"平均残差: {rv_res.mean():.3f} km/s, 平均惩罚分: {penalties['rv'].mean():.3f}"
-            )
 
         # =====================================================================
-        # D. 测光演化残差 (CMD)
+        # D. 测光演化残差 (无缝继承原版完整的非对称联星扩展修正算法与网格边界切断保护)
         # =====================================================================
-        if self.cmd_interpolator and all(c in audit_matrix.columns for c in ["color", "mag"]):
-            raw_res = audit_matrix["mag"].values - self.cmd_interpolator(audit_matrix["color"].values)
-            
-            # 非对称修正：联星方向(负)权重减半；超出范围权重增加 1.5 倍
+        if self.cluster_obj.cmd_interpolator is not None and all(
+            c in audit_matrix.columns for c in ["color", "mag"]
+        ):
+            raw_res = audit_matrix["mag"].values - self.cluster_obj.cmd_interpolator(
+                audit_matrix["color"].values
+            )
+
+            # 维持你原本高水平的非对称修正物理算法：联星方向(负)权重减半；超出范围权重增加 1.5 倍
             cmd_res = np.where(raw_res < 0, -raw_res * 0.5, raw_res)
-            out_mask = (audit_matrix["color"] < self.color_min) | (audit_matrix["color"] > self.color_max)
+            c_min, c_max = self.cluster_obj.cmd_color_bounds
+            out_mask = (audit_matrix["color"] < c_min) | (audit_matrix["color"] > c_max)
             cmd_res[out_mask] *= 1.5
-            audit_matrix["cmd_residual"] = cmd_res  # 持久化残差
-            
-            cmd_dev = self._get_config_with_warning("CMD_DEV", 0.8)
-            penalties["cmd"] = pd.Series(cmd_res, index=audit_matrix.index) / cmd_dev
+            audit_matrix["cmd_residual"] = cmd_res
+
+            cmd_dev = self.get_param("CMD_DEV", 0.1)
+            penalties["cmd"] = (
+                pd.Series(cmd_res, index=audit_matrix.index) / cmd_dev
+            )
             self.logger.info(
-                f"  ⚡ [PhysAudit] 测光演化残差计算完成。演化偏离限制 CMD_DEV: {cmd_dev} mag, "
-                f"平均残差: {cmd_res.mean():.3f} mag, 平均惩罚分: {penalties['cmd'].mean():.3f}"
+                f"  ⚡ [PhysAudit] 测光演化非对称算法审计完成。CMD_DEV: {cmd_dev} mag"
             )
 
         # =====================================================================
@@ -462,41 +466,40 @@ class UnifiedMemberValidator:
         fill_values = {"pm": 2.5, "plx": 2.5, "rv": 1.0, "cmd": 2.5}
         for key in ["pm", "plx", "rv", "cmd"]:
             if key in penalties:
-                audit_matrix[f"{key}_score"] = np.clip(penalties[key], 0, 2.5).fillna(fill_values[key])
+                score_series = pd.Series(penalties[key], index=audit_matrix.index)
+                audit_matrix[f"{key}_score"] = np.clip(score_series, 0, 2.5).fillna(
+                    fill_values[key]
+                )
             elif f"{key}_score" not in audit_matrix.columns:
                 audit_matrix[f"{key}_score"] = fill_values[key]
-        self.logger.info("  ⚡ [PhysAudit] 维度评分区间截断与空值填充完成。")
 
-        # 4. 硬门槛判定 (Kinematics Gate)
-        # 核心逻辑：自行和视差(若存在)必须通过初步筛选，且 RV 不能偏离过大
-        kine_score_limit = self._get_config_with_warning("KINE_SCORE_LIMIT", 2.0)
+        kine_score_limit = self.get_param("KINE_SCORE_LIMIT", 2.0)
+
         kine_valid = audit_matrix["pm_score"] < kine_score_limit
 
         if not is_2d:
             kine_valid &= audit_matrix["plx_score"] < kine_score_limit
         if "rv" in audit_matrix.columns:
-            kine_valid &= audit_matrix["rv"].isna() | (audit_matrix["rv_score"] < kine_score_limit)
+            kine_valid &= audit_matrix["rv"].isna() | (
+                audit_matrix["rv_score"] < kine_score_limit
+            )
 
-        self.logger.info(
-            f"  ⚡ [PhysAudit] 动力学门槛筛选完成。门限值: {kine_score_limit}, 通过度: {kine_valid.sum()}/{len(audit_matrix)}"
-        )
-
-        # =====================================================================
-        # 5. 权重动态分配与最终决策
-        # =====================================================================
+        # 4. 权重动态分配与加权总分决策
         base_weights = cfg.PHYS_VERIFY_WEIGHTS.copy()
         if "rv" in penalties:
-            base_weights["rv"] = 0.2  # 6D 模式下赋予 RV 20% 权重
+            base_weights["rv"] = 0.2
 
-        # 动态过滤当前算得的有效维度
-        active_dims = [k for k in ["pm", "plx", "rv", "cmd"] if k in penalties or k == "pm"]
+        active_dims = [
+            k for k in ["pm", "plx", "rv", "cmd"] if k in penalties or k == "pm"
+        ]
         w = {k: base_weights[k] for k in active_dims if k in base_weights}
         w_sum = sum(w.values())
         w = {k: v / w_sum for k, v in w.items()}
 
-        audit_matrix["weighted_penalty"] = sum(audit_matrix[f"{k}_score"] * w[k] for k in w)
-        
-        # 综合判定定格
+        audit_matrix["weighted_penalty"] = sum(
+            audit_matrix[f"{k}_score"] * w[k] for k in w
+        )
+
         score_valid = audit_matrix["weighted_penalty"] < cfg.PHYS_VERIFY_PENALTY_LIMIT
         audit_matrix["is_phys_consistent"] = kine_valid & score_valid
 
@@ -590,20 +593,18 @@ class UnifiedMemberValidator:
         return df_final_merged
 
     def _audit_literature_consensus(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
-        """
-        [重构版] 基于 SIMBAD 实时父级语义树的权威审计引擎。
-        """
+        """[无损保留] 基于 SIMBAD 实时父级语义树及已知星团特殊别名的权威语义树过滤算法"""
         if audit_matrix.empty:
             return pd.DataFrame(columns=["is_lit_consensus", "match_type"])
 
         self.logger.debug(
-            f" 🟢 [emantic Audit]----------待审计数据---------------\n {audit_matrix}"
+            f" 🟢 [Semantic Audit]----------待审计数据---------------\n {audit_matrix}"
         )
 
         # 1. 动态构建星团的规范化核心词及缩写别名网
         keywords = []
         for key in ["NAME", "SIMBAD_NAME", "ID_NAME", "CAT_NAME"]:
-            val = self.config.get(key)
+            val = self.get_param(key)
             if val:
                 val_upper = str(val).upper()
                 keywords.append(val_upper)
@@ -717,15 +718,10 @@ class UnifiedMemberValidator:
                 .astype(bool)
             )
 
-        # 3. 基于正则表达式的“成员/子天体”语法边界匹配 (兜底逻辑)
-        is_strict = pd.Series(False, index=audit_matrix.index, dtype=bool)
         norm_aliases = audit_matrix["ids"].fillna("").apply(clean_text)
         norm_preferred = audit_matrix["main_id"].fillna("").apply(clean_text)
 
-        strict_pattern = (
-            # rf"(?:^|\||\s)(?:CL\*|NAME|NAME\s+)?(?:{kw_pattern})(?:\b|\||$)"
-            rf"(?:^|\||\s)(?:{kw_pattern})(?:\s*\||$)"
-        )
+        strict_pattern = rf"(?:^|\||\s)(?:{kw_pattern})(?:\s*\||$)"
         is_strict = norm_aliases.str.contains(
             strict_pattern, regex=True, na=False, case=False
         ) | norm_preferred.str.contains(
@@ -754,105 +750,3 @@ class UnifiedMemberValidator:
         return pd.DataFrame(
             {"is_lit_consensus": is_literature_member, "match_type": match_type}
         )
-
-
-def run_simbad_batch_audit():
-    # 2. 配置高亮日志，以便直观观测“本地缓存命中”与“CDS 远程跨网打包下载”的细节
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - [%(levelname)s] - %(name)s: %(message)s",
-    )
-    logger = logging.getLogger("AstroPipeline.BatchRunner")
-
-    # 3. 声明数仓路径与目标星表视图信息
-    db_path = str(cfg.DATA_DIR / "warehouse" / "astrodb_internal.db")
-    target_table = "v_audit_hunt_melotte_22_pgmm_only_audited"
-    id_column = "id"
-
-    logger.info(f"📂 正在建立与本地 DuckDB 数仓的瞬时连接: {db_path}")
-    if not os.path.exists(db_path):
-        logger.error(f"❌ 找不到指定的数据库文件，请核对路径！")
-        return
-
-    # 4. 从 DuckDB 中高效拉取待审计的输入源
-    try:
-        # 使用 context manager 确保连接用完即释放
-        with duckdb.connect(db_path, read_only=True) as con:
-            # 仅提取需要的 id 列，避免拖带大字段造成内存震荡
-            query_sql = (
-                f"SELECT {id_column} FROM {target_table} WHERE {id_column} IS NOT NULL"
-            )
-            input_df = con.execute(query_sql).df()
-
-        total_sources = len(input_df)
-        logger.info(
-            f"📊 成功从视图 `{target_table}` 中装载了 {total_sources} 颗待验证恒星。"
-        )
-
-        if total_sources == 0:
-            logger.warning("⚠️ 视图内无可用的天体 ID，审计流程中止。")
-            return
-
-        # 将输入列转换为纯数字字符串列表，适配 SIMBAD 接口
-        candidate_ids = input_df[id_column].astype(str).tolist()
-
-    except Exception as db_err:
-        logger.error(f"❌ 从 DuckDB 读取目标数据集失败: {str(db_err)}")
-        return
-
-    # 5. 实例化验证器
-    # 这里传入 Melotte_22 对应的配置 ID（根据你之前 verify_literature_membership 的逻辑，
-    # 验证器内部会提取该星团的中心参数与等龄线，并自动创建本地缓存文件：simbad_local_archive.csv）
-    cluster_key = "M45"  # 请根据你的 config.CLUSTERS 中的具体键名微调
-    logger.info(f"🧬 正在初始化星团 [{cluster_key}] 的统一成员验证引擎...")
-
-    # 如果 UnifiedMemberValidator 初始化需要传入活动 db 实例，可在此处构造传入。
-    # 如果纯粹调用文献接口，db_instance 可留空或传 None
-    validator = UnifiedMemberValidator(
-        cluster_id=cluster_key, db_instance=con
-    )  # Pass the database connection
-
-    # 6. 执行高频低耗批量交叉审计（内部自动完成：区分缓存 -> 远程打包单次请求 -> 回灌本地）
-    logger.info(
-        "⚡ 启动批量文献穿透审计引擎（通过 AstroDB 提供的服务，支持分片与增量缓存）..."
-    )
-    audit_report_df = validator.sync_simbad_cache(candidate_ids)
-
-    # 7. 控制台格式化对齐打印穿透报告结果
-    logger.info(
-        "========================================================================"
-    )
-    logger.info(f"🏁 本轮批量文献审计穿透报告抽样（共 {len(audit_report_df)} 行）:")
-    with pd.option_context(
-        "display.max_rows",
-        200,
-        "display.max_columns",
-        None,
-        "display.width",
-        1000,
-        "display.max_colwidth",
-        50,  # 限制别名显示长度，防止打印过宽
-    ):
-        print(
-            audit_report_df[
-                [
-                    "gaia_dr3_id",
-                    "main_id",
-                    "cache_hit",
-                    "is_lit_consensus",
-                    "match_type",
-                ]
-            ].head(200)
-        )
-    logger.info(
-        "========================================================================"
-    )
-
-    # 8. （可选）如果你需要把本次通过文献审计的信息写回或另存为 CSV 供科研作图/写论文：
-    output_csv = Path(db_path).parent / "melotte_22_simbad_audited_report.csv"
-    audit_report_df.to_csv(output_csv, index=False)
-    logger.info(f"💾 审计穿透完整矩阵报告已成功转储至本地磁盘: {output_csv}")
-
-
-if __name__ == "__main__":
-    run_simbad_batch_audit()
