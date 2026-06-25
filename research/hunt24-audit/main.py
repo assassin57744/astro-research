@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--cfg-from",
+        "--reconstruct",
         type=str,
         default="file",
         choices=["file", "db"],
@@ -403,7 +403,7 @@ def run_pipeline(
     algo: str = "dbscan",
     db: AstroDB = None,
     result_mode: str = "brief",
-    cfg_from: str = "file",
+    reconstruct: str = "file",
 ) -> dict | None:
     """驱动端到端的天文数据分析与审计管线。
 
@@ -431,7 +431,7 @@ def run_pipeline(
         logger.info("✅ 数据准备阶段完成。")
 
         # [2.5/5] 可选：从历史数据重建物理参数
-        if cfg_from == "db":
+        if reconstruct == "db":
             logger.info("🧬 [2.5/5] 尝试从历史数据中重建星团物理先验参数...")
             from modules.config_manager import ClusterConfigManager
             tmp_mgr = ClusterConfigManager(db)
@@ -464,7 +464,7 @@ def _run_all_modes(
     target_category: str,
     algo: str,
     result_mode: str,
-    cfg_from: str = "file",
+    reconstruct: str = "file",
 ) -> None:
     """循环所有特征空间模式，产出汇总对比报告。"""
     db = AstroDB(manifest=cfg.MANIFEST)
@@ -484,7 +484,7 @@ def _run_all_modes(
         logger.info("✅ 数据准备阶段完成（全模式共享）。")
 
         # 可选：从历史数据重建物理参数（所有模式共享）
-        if cfg_from == "db":
+        if reconstruct == "db":
             logger.info("🧬 尝试从历史数据中重建星团物理先验参数...")
             from modules.config_manager import ClusterConfigManager
             tmp_mgr = ClusterConfigManager(db)
@@ -537,11 +537,11 @@ def main() -> None:
     )
 
     if args.mode == "all":
-        _run_all_modes(target_cluster_id, args.category, args.algo, args.result, cfg_from=args.cfg_from)
+        _run_all_modes(target_cluster_id, args.category, args.algo, args.result, reconstruct=args.reconstruct)
     else:
         run_pipeline(
             target_cluster_id, args.category, args.mode, args.algo,
-            result_mode=args.result, cfg_from=args.cfg_from,
+            result_mode=args.result, reconstruct=args.reconstruct,
         )
 
 
