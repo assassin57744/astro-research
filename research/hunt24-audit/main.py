@@ -12,6 +12,7 @@ from pathlib import Path
 from modules.astro_db import AstroDB, AssetManager
 from modules.astro_workflow import AstroWorkflow
 from modules.reporter import render_final_report, render_all_modes_comparison
+from modules.cluster import StarCluster
 
 import config as cfg
 
@@ -200,9 +201,7 @@ def _prepare_context(cluster_id: str, category: str) -> tuple[dict, dict, list[s
         if cfg.GMM_CONFIG.get("use_experimental")
         else "PriorGMM (Standard)"
     )
-    logger.info(
-        f"🚀 初始化管道组件完成。PGMM内核: {kernel_type}"
-    )
+    logger.info(f"🚀 初始化管道组件完成。PGMM内核: {kernel_type}")
 
     return ctx_cluster, data_manifest, ref_tables
 
@@ -379,15 +378,30 @@ def _run_single_mode(
 
     # 导出
     _export_pipeline_results(
-        db, wf, audit_res, v_final_pg, v_final_ref,
-        target_cluster_id, target_category, mode, algo,
+        db,
+        wf,
+        audit_res,
+        v_final_pg,
+        v_final_ref,
+        target_cluster_id,
+        target_category,
+        mode,
+        algo,
         do_export=(result_mode == "detailed"),
     )
 
     # 报告
     return render_final_report(
-        target_cluster_id, target_category, mode, algo, ctx_cluster,
-        v_all, audit_res, deep_stats_pg, deep_stats_ref, logger,
+        target_cluster_id,
+        target_category,
+        mode,
+        algo,
+        ctx_cluster,
+        v_all,
+        audit_res,
+        deep_stats_pg,
+        deep_stats_ref,
+        logger,
     )
 
 
@@ -431,24 +445,47 @@ def run_pipeline(
         logger.info("✅ 数据准备阶段完成。")
 
         # [2.5/5] 可选：从历史数据重建物理参数
-        if reconstruct == "db":
-            logger.info("🧬 [2.5/5] 尝试从历史数据中重建星团物理先验参数...")
-            from modules.config_manager import ClusterConfigManager
-            tmp_mgr = ClusterConfigManager(db)
-            recon = tmp_mgr.reconstruct_cl_params_from_db(target_cluster_id)
-            logger.debug(f"target_cluster_id: {target_cluster_id}")
-            if not recon:
-                logger.warning(
-                    "⚠️ 历史数据重建返回空结果，将降级使用静态 config.py 参数。"
-                )
-            else:
-                logger.info(
-                    f"✅ 成功从历史数据重建 {len(recon)} 个物理参数，已持久化至 DuckDB 配置底座。"
-                )
+        # if reconstruct == "db":
+        #   logger.info("🧬 [2.5/5] 尝试从历史数据中重建星团物理先验参数...")
+        #   from modules.config_manager import ClusterConfigManager
+        #   tmp_mgr = ClusterConfigManager(db)
+        #   recon = tmp_mgr.reconstruct_cl_params_from_db(target_cluster_id)
+        #   logger.debug(f"target_cluster_id: {target_cluster_id}")
+        #   if not recon:
+        #       logger.warning(
+        #             "⚠️ 历史数据重建返回空结果，将降级使用静态 config.py 参数。"
+        #       )
+        #   else:
+        #       logger.info(
+        #           f"✅ 成功从历史数据重建 {len(recon)} 个物理参数，已持久化至 DuckDB 配置底座。"
+        #       )
+        logger.info(f"🌌 [2.5/5] 载入目标星团领域实体模型: {target_cluster_id}")
+        # 1. 声明并构造真正的物理核心实体
+        cl = StarCluster(target_cluster_id, db_instance=db)
 
+        # 2. 一行行为驱动：直接让星团自己去加载或重构物理基底
+        success = cl.load_or_reconstruct_parameters(mode=reconstruct)
+
+        # 3. 此时，cluster 对象内部的 plx_ref, uvw_ref, 以及 CMD 插值器已经全部处于最新、最正确的位置
+        logger.info(
+            f"✅ 星团领域模型物理状态就绪。当前反演距离: {1000.0/cl.plx_ref:.1f} pc"
+        )
+
+        if not success:
+            logger.error(
+                f"❌ 无法初始化星团 {target_cluster_id} 的物理资产，管线终止。"
+            )
+            return
         return _run_single_mode(
-            db, wf, ctx_cluster, data_manifest,
-            target_cluster_id, target_category, mode, algo, result_mode,
+            db,
+            wf,
+            ctx_cluster,
+            data_manifest,
+            target_cluster_id,
+            target_category,
+            mode,
+            algo,
+            result_mode,
         )
     except Exception as e:
         logger.error(f"❌ 流水线在运行期间发生严重崩溃: {str(e)}", exc_info=True)
@@ -479,7 +516,9 @@ def _run_all_modes(
         logger.info("📦 正在同步物理数据源...")
         db.import_raw(target_cluster_id=target_cluster_id, force=False)
 
-        wf_setup = AstroWorkflow(db, target_cluster_id, target_category, valid_modes[0], algo)
+        wf_setup = AstroWorkflow(
+            db, target_cluster_id, target_category, valid_modes[0], algo
+        )
         wf_setup.data_standardize_all(ref_tables, ctx_cluster)
         logger.info("✅ 数据准备阶段完成（全模式共享）。")
 
@@ -487,6 +526,7 @@ def _run_all_modes(
         if reconstruct == "db":
             logger.info("🧬 尝试从历史数据中重建星团物理先验参数...")
             from modules.config_manager import ClusterConfigManager
+
             tmp_mgr = ClusterConfigManager(db)
             recon = tmp_mgr.reconstruct_cl_params_from_db(target_cluster_id)
             if not recon:
@@ -503,8 +543,15 @@ def _run_all_modes(
         for mode in valid_modes:
             wf = AstroWorkflow(db, target_cluster_id, target_category, mode, algo)
             summary = _run_single_mode(
-                db, wf, ctx_cluster, data_manifest,
-                target_cluster_id, target_category, mode, algo, result_mode,
+                db,
+                wf,
+                ctx_cluster,
+                data_manifest,
+                target_cluster_id,
+                target_category,
+                mode,
+                algo,
+                result_mode,
             )
             if summary:
                 all_results.append(summary)
@@ -525,7 +572,9 @@ def main() -> None:
     args = parse_args()
 
     numeric_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    setup_logging(level=numeric_level if isinstance(numeric_level, int) else logging.INFO)
+    setup_logging(
+        level=numeric_level if isinstance(numeric_level, int) else logging.INFO
+    )
 
     if handle_maintenance(args):
         return
@@ -537,11 +586,21 @@ def main() -> None:
     )
 
     if args.mode == "all":
-        _run_all_modes(target_cluster_id, args.category, args.algo, args.result, reconstruct=args.reconstruct)
+        _run_all_modes(
+            target_cluster_id,
+            args.category,
+            args.algo,
+            args.result,
+            reconstruct=args.reconstruct,
+        )
     else:
         run_pipeline(
-            target_cluster_id, args.category, args.mode, args.algo,
-            result_mode=args.result, reconstruct=args.reconstruct,
+            target_cluster_id,
+            args.category,
+            args.mode,
+            args.algo,
+            result_mode=args.result,
+            reconstruct=args.reconstruct,
         )
 
 
