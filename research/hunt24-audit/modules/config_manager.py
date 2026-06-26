@@ -125,7 +125,7 @@ class ClusterConfigManager:
             cluster_id: str, 
             input_data: pd.DataFrame = None, 
             metric: str = "median", 
-            use_gaia_raw: bool = False
+            use_gaia_raw: bool = True
         ) -> dict:
         """
         🚀 【物理资产动态重建与多指标/多数据源质量校验引擎】
@@ -173,9 +173,9 @@ class ClusterConfigManager:
                     # 假设统一关联的原始表为 gaia_dr3，利用 hunt 表作为成员星样本过滤器
                     sql = f"""
                         SELECT 
-                            g.ra, g.dec, g.parallax as plx, g.pmra, g.pmdec, g.radial_velocity as rv 
+                            g.ra, g.dec, g.plx, g.pmra, g.pmdec, g.rv 
                         FROM {hunt_table} h
-                        INNER JOIN gaia_dr3 g ON h.source_id = g.source_id
+                        INNER JOIN aln_m45_field g ON h.id = g.id
                         WHERE h.cluster = '{cluster_key}'
                     """
                 else:
@@ -307,7 +307,7 @@ class ClusterConfigManager:
         )
 
         # 7. 持久化路由决策：只有在使用原始清洗库生成的标准生产流模式下，才允许写回底座，防沙箱污染
-        if input_data is None and not use_gaia_raw:
+        if input_data is None:
             self.save_refined_params(cluster_key, reconstructed_params)
         else:
             self.logger.info("🚫 [沙箱保护] 当前运行于测试数据源或外部注入模式，反演资产仅在内存中返回。")
@@ -319,13 +319,14 @@ class ClusterConfigManager:
         cluster_id: str, 
         input_data: pd.DataFrame = None, 
         metric: str = "median", 
-        use_gaia_raw: bool = False
+        use_gaia_raw: bool = True
     ) -> tuple:
         """
         🚀 【3D 运动学资产重建引擎 - 多源自适应多源数据校验版】
         """
         cluster_key = cluster_id.upper()
         metric_mode = metric.lower()
+
         
         if input_data is not None:
             stars_df = input_data.copy()
@@ -336,13 +337,14 @@ class ClusterConfigManager:
             
             # 🎯 【核心修改】：依据数据源开关，动态组装 6D 动力学 SQL 查询
             if use_gaia_raw:
+                self.logger.info("📡 [数据源：Gaia 原始仓] 启动 source_id 拓扑联查ex，正在提取 Gaia 核心流原始运动学向量...")
                 sql = f"""
                     SELECT 
-                        g.ra, g.dec, g.parallax as plx, g.pmra, g.pmdec, g.radial_velocity as rv 
+                        g.ra, g.dec, g.plx, g.pmra, g.pmdec, g.rv 
                     FROM {hunt_table} h
-                    INNER JOIN gaia_dr3 g ON h.source_id = g.source_id
+                    INNER JOIN aln_m45_field g ON h.id = g.id
                     WHERE h.cluster = '{self.get_param(cluster_id, "CAT_NAME")}' 
-                      AND g.parallax > 0 AND g.radial_velocity IS NOT NULL AND NOT isnan(g.radial_velocity)
+                      AND g.plx > 0 AND g.rv IS NOT NULL AND NOT isnan(g.rv)
                 """
             else:
                 sql = f"""
