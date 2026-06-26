@@ -128,17 +128,17 @@ class ClusterConfigManager:
             use_gaia_raw: bool = True
         ) -> dict:
         """
-        🚀 【物理资产动态重建与多指标/多数据源质量校验引擎】
+        🚀 【高精度自我一致性物理资产反演引擎】
 
         功能：
-        1. [生产流]：若 input_data 为 None，自动从 DuckDB 数仓中提取指定星团的历史参考星表进行反演。
-        2. [校验流]：若传入 input_data (DataFrame)，则直接对该数据集进行动力学鲁棒重建，用于校验和评估外部算法的输出质量。
+        1. [精确筛选模式]：若 input_data 为 None，自动通过动态几何质心定位半光半径，抽取出 hunt24 表中 Top 400 最高概率核心源进行反演。
+        2. [沙箱校验模式]：若传入 input_data (DataFrame)，则直接对注入数据集进行动力学和光度学参数的解算。
 
         参数：
         - cluster_id: 星团唯一标识符。
-        - input_data: 可选。外部算法注入的 DataFrame，用于沙箱校验。如果传入，则直接基于传入数据计算。
+        - input_data: 可选。外部算法注入的 DataFrame。如果传入，则直接基于传入数据计算。
         - metric: 统计算子选择，"median" (缺省) 或 "mean"。
-        - use_gaia_raw: 开关。False (缺省) 使用 hunt 视图数据；True 使用 hunt 的样本束缚联查 Gaia 原始物理量。
+        - use_gaia_raw: 开关。False 使用 hunt24 视图数据；True 提取 hunt24 骨干样本拓扑内联 Gaia 原始天体测量物理量。
         """
         cluster_id = cluster_id.upper()
         cluster_key = (
@@ -147,50 +147,79 @@ class ClusterConfigManager:
         metric_mode = metric.lower()
         
         self.logger.info(
-            f"🧬 [资产校验引擎] 启动重建管线 | 目标: {cluster_key} | "
-            f"算子: {metric_mode.upper()} | 原始数据开关: {use_gaia_raw}"
+            f"🧬 [资产精确重建] 启动重建管线 | 目标: {cluster_key} | "
+            f"算子: {metric_mode.upper()} | 物理源: {'Gaia原始仓' if use_gaia_raw else 'Hunt清洗仓'}"
         )
 
         # 1. 动态输入分支路由
         if input_data is not None:
-            self.logger.info("📥 [沙箱校验模式] 检测到外部算法注入数据，跳过数仓检索...")
+            self.logger.info("📥 [沙箱校验模式] 检测到外部算法注入数据，跳过数仓自适应筛选...")
             stars_df = input_data.copy()
         else:
-            self.logger.info("🗄️ [数仓生产模式] 开始动态构建多源自适应 SQL 检索...")
+            self.logger.info("🗄️ [精确筛选模式] 开始利用自收敛几何质心裁切半光半径内 Top 400 骨干星...")
+            
+            # 获取该星团的半光半径先验（单位：度），若找不到则默认以 0.5 度兜底
+            try:
+                r_half_deg = float(self.get_param(cluster_id, "R_HALF_LIGHT"))
+            except Exception:
+                r_half_deg = 0.5
+                self.logger.warning(f"⚠️ 未找到 {cluster_id} 的 R_HALF_LIGHT 先验，临时使用 {r_half_deg} 度。")
+
             hunt_table = cfg.MANIFEST[cfg.IDX_HUNT]["aln_view"].format(cluster=cluster_id.lower())
             
             try:
-                table_check = self.db.execute(
-                    f"SELECT * FROM information_schema.tables WHERE table_name = '{hunt_table}'"
-                ).df()
-                if table_check.empty:
-                    self.logger.warning(f"⚠️ 未在数仓中找到历史星表 '{hunt_table}'，无法执行反演重建。")
-                    return {}
-                
-                # 🎯 【核心修改】：依据开关，动态组装 SQL 查询
+                # 🎯 【核心 SQL 修改】：利用 CTE 自收敛计算临时几何质心，空间过滤 + 概率切片 Top 400
                 if use_gaia_raw:
-                    self.logger.info("📡 [数据源：Gaia 原始仓] 启动 source_id 拓扑联查，正在提取 Gaia 核心流原始运动学向量...")
-                    # 假设统一关联的原始表为 gaia_dr3，利用 hunt 表作为成员星样本过滤器
+                    self.logger.info("📡 [数据源：Gaia 原始仓] 关联 aln_m45_field 提取核心骨干星原始相空间数据...")
                     sql = f"""
+                        WITH dynamic_center AS (
+                            SELECT median(ra) AS c_ra, median(dec) AS c_dec 
+                            FROM {hunt_table} WHERE cluster = '{cluster_key}'
+                        ),
+                        core_members AS (
+                            SELECT h.id, h.prob
+                            FROM {hunt_table} h
+                            CROSS JOIN dynamic_center c
+                            WHERE h.cluster = '{cluster_key}'
+                              AND SQRT(POWER((h.ra - c.c_ra) * COS(RADIANS(c.c_dec)), 2) + POWER(h.dec - c.c_dec, 2)) <= {r_half_deg}
+                            ORDER BY h.prob DESC
+                            LIMIT 400
+                        )
                         SELECT 
-                            g.ra, g.dec, g.plx, g.pmra, g.pmdec, g.rv 
-                        FROM {hunt_table} h
-                        INNER JOIN aln_m45_field g ON h.id = g.id
-                        WHERE h.cluster = '{cluster_key}'
+                            g.ra, g.dec, g.plx, g.pmra, g.pmdec, g.rv,
+                            g.mag as g_mag, g.color as bp_rp, 
+                            0.0 as extinction_g   -- Gaia 原始表无消光改正
+                        FROM core_members cm
+                        INNER JOIN aln_m45_field g ON cm.id = g.id
                     """
                 else:
-                    self.logger.info("🧹 [数据源：Hunt 清洗仓] 正在直接提取清洗/改正后的流水线视图数据...")
-                    sql = f"SELECT ra, dec, plx, pmra, pmdec, rv FROM {hunt_table} WHERE cluster = '{cluster_key}'"
+                    self.logger.info("🧹 [数据源：Hunt 清洗仓] 提取核心骨干星 Hunt 视差消光改正参数...")
+                    sql = f"""
+                        WITH dynamic_center AS (
+                            SELECT median(ra) AS c_ra, median(dec) AS c_dec 
+                            FROM {hunt_table} WHERE cluster = '{cluster_key}'
+                        )
+                        SELECT 
+                            h.ra, h.dec, h.plx, h.pmra, h.pmdec, h.rv,
+                            h.g_mag_corr as g_mag, h.bp_rp_corr as bp_rp, h.a_g as extinction_g
+                        FROM {hunt_table} h
+                        CROSS JOIN dynamic_center c
+                        WHERE h.cluster = '{cluster_key}'
+                          AND SQRT(POWER((h.ra - c.c_ra) * COS(RADIANS(c.c_dec)), 2) + POWER(h.dec - c.c_dec, 2)) <= {r_half_deg}
+                        ORDER BY h.prob DESC
+                        LIMIT 400
+                    """
                 
                 stars_df = self.db.execute(sql).df()
             except Exception as e:
-                self.logger.error(f"❌ 探测或动态多源读取数仓基础表失败: {str(e)}")
+                self.logger.error(f"❌ 执行高精度自适应 SQL 筛选或多源数仓读取失败: {str(e)}")
                 return {}
 
         # 2. 核心样本基底完整性校验
         member_count = len(stars_df)
+        self.logger.info(f"📊 锁定有效计算样本数: {member_count} 颗星")
         if stars_df.empty or member_count < 3:
-            self.logger.warning(f"⚠️ 有效测试样本过少 ({member_count} 颗)，无法构建统计学反演。")
+            self.logger.warning("⚠️ 有效计算样本过少，无法构建统计学反演。")
             return {}
         
         # 统一列名规范化
@@ -265,7 +294,14 @@ class ClusterConfigManager:
         else:
             distance_pc = 100.0  # 兜底边界
 
-        # 4. 组装重构后的标准先验字典
+        # --- 🎯 追加光度学与消光资产解析 ---
+        ext_vals = stars_df["extinction_g"].dropna().values if "extinction_g" in stars_df.columns else []
+        if len(ext_vals) > 0:
+            avg_extinction = float(np.mean(ext_vals)) if metric_mode == "mean" else float(np.median(ext_vals))
+        else:
+            avg_extinction = 0.0
+
+        # 4. 组装重构后的标准先验字典（包含了新提炼的光度资产）
         reconstructed_params = {
             "ID_NAME": cluster_key,
             "CENTER_RA": center_ra,
@@ -278,19 +314,19 @@ class ClusterConfigManager:
             "PM_CORR": pm_corr,
             "DISTANCE_PC": distance_pc,
             "PLX_ERROR": 0.2,
-            "CMD_DEV": 0.8,
+            "CMD_DEV": 0.8 if use_gaia_raw else 0.3, # Hunt 改正消光后 CMD 色散散布会显著降低
+            "PHOT_EXTINCTION_AG": avg_extinction,     # 🚀 新增消光资产项
+            "MAG_CORRECTED": not use_gaia_raw,        # 🚀 新增星等改正状态标记
             "RECONSTRUCTED": True,
         }
 
-        # --- 🎯 6. 动态追加：调用 3D UVW 速度反演引擎 (同步向下传递开关与 metric) ---
+        # --- 🎯 6. 动态追加：调用 3D UVW 速度反演引擎 (向下透传高纯度核心骨干星数据集) ---
         uvw_data = self.reconstruct_cl_params_ex_from_db(
             cluster_id, input_data=stars_df, metric=metric_mode, use_gaia_raw=use_gaia_raw
         )
         if uvw_data:
             reconstructed_params.update(uvw_data)
-            self.logger.info(
-                f"🧬 [高维动力学] 3D UVW/RV 资产向量矩阵基于 [{metric_mode.upper()}] 重建成功"
-            )
+            self.logger.info(f"🧬 [高维动力学] 3D UVW/RV 骨干样本矩阵基于 [{metric_mode.upper()}] 重建成功")
         else:
             # 缺乏 6D 数据时的平滑动力学降级
             reconstructed_params["UVW_REF"] = [-6.05, -28.02, -14.34]
@@ -301,9 +337,7 @@ class ClusterConfigManager:
             reconstructed_params["RV_ERROR"] = 5.0
 
         self.logger.info(
-            f"✅ [重建/审计流执行完毕] 算子={metric_mode.upper()} | 距离={distance_pc:.1f}pc, "
-            f"自行椭圆弥散=({pmra_disp:.3f}, {pmdec_disp:.3f}) mas/yr, "
-            f"倾斜相关角={pm_corr:.3f}"
+            f"✅ [高精度重构完成] 算子={metric_mode.upper()} | 样本数={member_count} | 距离={distance_pc:.1f}pc, 消光AG={avg_extinction:.3f}"
         )
 
         # 7. 持久化路由决策：只有在使用原始清洗库生成的标准生产流模式下，才允许写回底座，防沙箱污染
@@ -333,24 +367,50 @@ class ClusterConfigManager:
             if "rv" in stars_df.columns:
                 stars_df = stars_df[stars_df["rv"].notna() & ~np.isnan(stars_df["rv"]) & (stars_df["plx"] > 0)]
         else:
+            # 💡 说明：若上游没有传递核心数据流，本函数也会自适应采用相同的“几何收敛+Top 400”过滤逻辑
+            try:
+                r_half_deg = float(self.get_param(cluster_id, "R_HALF_LIGHT"))
+            except Exception:
+                r_half_deg = 0.5
+            
             hunt_table = cfg.MANIFEST[cfg.IDX_HUNT]["aln_view"].format(cluster=cluster_id.lower())
             
-            # 🎯 【核心修改】：依据数据源开关，动态组装 6D 动力学 SQL 查询
             if use_gaia_raw:
-                self.logger.info("📡 [数据源：Gaia 原始仓] 启动 source_id 拓扑联查ex，正在提取 Gaia 核心流原始运动学向量...")
+                self.logger.info("📡 [数据源：Gaia 原始仓] 启动 6D 空间高精度自适应拓扑联查...")
                 sql = f"""
+                    WITH dynamic_center AS (
+                        SELECT median(ra) AS c_ra, median(dec) AS c_dec 
+                        FROM {hunt_table} WHERE cluster = '{self.get_param(cluster_id, "CAT_NAME")}'
+                    ),
+                    core_members AS (
+                        SELECT h.id
+                        FROM {hunt_table} h
+                        CROSS JOIN dynamic_center c
+                        WHERE h.cluster = '{self.get_param(cluster_id, "CAT_NAME")}'
+                          AND SQRT(POWER((h.ra - c.c_ra) * COS(RADIANS(c.c_dec)), 2) + POWER(h.dec - c.c_dec, 2)) <= {r_half_deg}
+                        ORDER BY h.prob DESC
+                        LIMIT 400
+                    )
                     SELECT 
                         g.ra, g.dec, g.plx, g.pmra, g.pmdec, g.rv 
-                    FROM {hunt_table} h
-                    INNER JOIN aln_m45_field g ON h.id = g.id
-                    WHERE h.cluster = '{self.get_param(cluster_id, "CAT_NAME")}' 
-                      AND g.plx > 0 AND g.rv IS NOT NULL AND NOT isnan(g.rv)
+                    FROM core_members cm
+                    INNER JOIN aln_m45_field g ON cm.id = g.id
+                    WHERE g.plx > 0 AND g.rv IS NOT NULL AND NOT isnan(g.rv)
                 """
             else:
                 sql = f"""
-                    SELECT ra, dec, plx, pmra, pmdec, rv FROM {hunt_table}
-                    WHERE cluster = '{self.get_param(cluster_id, "CAT_NAME")}' 
-                      AND plx > 0 AND rv IS NOT NULL AND NOT isnan(rv)
+                    WITH dynamic_center AS (
+                        SELECT median(ra) AS c_ra, median(dec) AS c_dec 
+                        FROM {hunt_table} WHERE cluster = '{self.get_param(cluster_id, "CAT_NAME")}'
+                    )
+                    SELECT h.ra, h.dec, h.plx, h.pmra, h.pmdec, h.rv 
+                    FROM {hunt_table} h
+                    CROSS JOIN dynamic_center c
+                    WHERE h.cluster = '{self.get_param(cluster_id, "CAT_NAME")}' 
+                      AND SQRT(POWER((h.ra - c.c_ra) * COS(RADIANS(c.c_dec)), 2) + POWER(h.dec - c.c_dec, 2)) <= {r_half_deg}
+                      AND h.plx > 0 AND h.rv IS NOT NULL AND NOT isnan(h.rv)
+                    ORDER BY h.prob DESC
+                    LIMIT 400
                 """
                 
             try:
@@ -361,7 +421,7 @@ class ClusterConfigManager:
         
         if len(stars_df) < 3:
             self.logger.warning(
-                f"⚠️ 星团 {cluster_key} 包含视向速度的有效 6D 样本过少 ({len(stars_df)}颗)，放弃 3D 速度反演。"
+                f"⚠️ 星团 {cluster_key} 有效 6D 速度样本过少 ({len(stars_df)}颗)，放弃 3D 速度反演。"
             )
             return None
 

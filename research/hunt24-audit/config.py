@@ -168,7 +168,7 @@ CLUSTERS = {
         "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.3,  # 单位：pc
         "HALF_MASS_RADIUS": 3.5,  # 单位：pc
-        "half_light_radius": 3.0,  # 单位：pc (保持原有小写变量名对齐)
+        "R_HALF_LIGHT": 3.0,  # 单位：pc (保持原有小写变量名对齐)
         "TIDAL_RADIUS": 10.0,  # 单位：pc
         "DISTANCE_PC": 136.2,
         "DISTANCE_MODULUS": 5.66,
