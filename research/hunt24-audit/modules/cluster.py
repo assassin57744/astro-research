@@ -84,10 +84,10 @@ class StarCluster:
         🚀 [富领域行为] 统一负责星团物理属性的装载或自适应重建。
         
         参数:
-        - mode: "db" 代表启动高精度自我一致性物理资产反演引擎进行重建；
+        - mode: "dynamic" 代表启动高精度自我一致性物理资产反演引擎进行重建；
                 "static" 代表常规级联检索（内存/DuckDB/config.py）。
         """
-        if mode == "db":
+        if mode == "dynamic":
             self.logger.info(f"🧬 [Domain] 触发星团相空间物理参数的自适应反演与自我重建...")
             # 1. 核心行为内聚：让实体对象自己调用底座去重建自己
             recon_res = self.cfg_mgr.reconstruct_cl_params_from_db(self.id)

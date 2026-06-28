@@ -84,10 +84,10 @@ class VizierDataFetcher:
             return
 
         cluster_meta = cfg.CLUSTERS[cluster_id]
-        manifest_key = cluster_meta["FIELD_IDX"]
+        manifest_key = cluster_meta.FIELD_IDX
         manifest_entry = cfg.MANIFEST[manifest_key]
-        
-        filename = manifest_entry["params"]["file_pattern"]
+
+        filename = manifest_entry.params["file_pattern"]
         dest_path = self.output_dir / filename
 
         # 如果文件已存在则跳过
@@ -103,21 +103,21 @@ class VizierDataFetcher:
         self._save_state()
 
         logger.info(f"📡 [VizieR] 启动查询: {cluster_id}")
-        logger.info(f"   ∟ 中心坐标: RA={cluster_meta['CENTER_RA']}, Dec={cluster_meta['CENTER_DEC']}")
-        logger.info(f"   ∟ 检索半径: {cluster_meta['RADIUS']} deg | 最大视星等: {cluster_meta['MAX_MAG']}")
-        
+        logger.info(f"   ∟ 中心坐标: RA={cluster_meta.CENTER_RA}, Dec={cluster_meta.CENTER_DEC}")
+        logger.info(f"   ∟ 检索半径: {cluster_meta.RADIUS} deg | 最大视星等: {cluster_meta.MAX_MAG}")
+
         # 准备查询参数
         coord = SkyCoord(
-            ra=cluster_meta['CENTER_RA'], 
-            dec=cluster_meta['CENTER_DEC'], 
-            unit=(u.deg, u.deg), 
+            ra=cluster_meta.CENTER_RA,
+            dec=cluster_meta.CENTER_DEC,
+            unit=(u.deg, u.deg),
             frame='icrs'
         )
-        radius = cluster_meta['RADIUS'] * u.deg
-        
+        radius = cluster_meta.RADIUS * u.deg
+
         # 设置动态过滤器：VizieR 侧 Gaia DR3 的星等列名通常为 Gmag
         mag_col = cfg.FIELDS_VIZIER.get("mag", "Gmag")
-        self.v.column_filters = {mag_col: f"<{cluster_meta['MAX_MAG']}"}
+        self.v.column_filters = {mag_col: f"<{cluster_meta.MAX_MAG}"}
         logger.debug(f"🔍 应用列过滤器: {self.v.column_filters}")
 
         try:
@@ -178,7 +178,7 @@ class VizierDataFetcher:
         """批量处理配置中的所有目标"""
         all_targets = list(cfg.CLUSTERS.keys())
         # 过滤掉已存在的文件，确保进度预测是针对实际需要执行的任务
-        targets = [cid for cid in all_targets if not (self.output_dir / cfg.MANIFEST[cfg.CLUSTERS[cid]["FIELD_IDX"]]["params"]["file_pattern"]).exists()]
+        targets = [cid for cid in all_targets if not (self.output_dir / cfg.MANIFEST[cfg.CLUSTERS[cid].FIELD_IDX].params["file_pattern"]).exists()]
         
         total = len(targets)
         if total == 0:

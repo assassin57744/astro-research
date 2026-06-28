@@ -77,10 +77,10 @@ class GaiaDataFetcher:
             return
 
         cluster_meta = cfg.CLUSTERS[cluster_id]
-        manifest_key = cluster_meta["FIELD_IDX"]
+        manifest_key = cluster_meta.FIELD_IDX
         manifest_entry = cfg.MANIFEST[manifest_key]
-        
-        filename = manifest_entry["params"]["file_pattern"]
+
+        filename = manifest_entry.params["file_pattern"]
         dest_path = self.output_dir / filename
 
         if dest_path.exists():
@@ -100,16 +100,16 @@ class GaiaDataFetcher:
                     job_id = None
 
             if not job_id:
-                logger.info(f"📡 正在提交新异步查询: {cluster_id} (半径: {cluster_meta['RADIUS']} deg)")
+                logger.info(f"📡 正在提交新异步查询: {cluster_id} (半径: {cluster_meta.RADIUS} deg)")
                 cols = ", ".join(cfg.FIELDS_GAIA_ARCHIVE.values())
                 adql = f"""
                 SELECT {cols}
                 FROM gaiadr3.gaia_source
                 WHERE 1=CONTAINS(
                     POINT('ICRS', ra, dec),
-                    CIRCLE('ICRS', {cluster_meta['CENTER_RA']}, {cluster_meta['CENTER_DEC']}, {cluster_meta['RADIUS']})
+                    CIRCLE('ICRS', {cluster_meta.CENTER_RA}, {cluster_meta.CENTER_DEC}, {cluster_meta.RADIUS})
                 )
-                AND phot_g_mean_mag < {cluster_meta['MAX_MAG']}
+                AND phot_g_mean_mag < {cluster_meta.MAX_MAG}
                 """
                 job = Gaia.launch_job_async(adql, name=f"fetch_{cluster_id}")
                 self.state[cluster_id] = job.jobid
@@ -177,7 +177,7 @@ class GaiaDataFetcher:
         """
         all_clusters = list(cfg.CLUSTERS.keys())
         # 过滤已存在文件
-        target_clusters = [cid for cid in all_clusters if not (self.output_dir / cfg.MANIFEST[cfg.CLUSTERS[cid]["FIELD_IDX"]]["params"]["file_pattern"]).exists()]
+        target_clusters = [cid for cid in all_clusters if not (self.output_dir / cfg.MANIFEST[cfg.CLUSTERS[cid].FIELD_IDX].params["file_pattern"]).exists()]
         
         total = len(target_clusters)
         if total == 0:

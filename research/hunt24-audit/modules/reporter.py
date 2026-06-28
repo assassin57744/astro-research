@@ -49,19 +49,19 @@ def _format_algo_params(algo: str) -> list[str]:
     return lines
 
 
-def _format_pipeline_params(ctx_cluster: dict) -> list[str]:
+def _format_pipeline_params(ctx_cluster) -> list[str]:
     """格式化管线筛选参数块。"""
     return [
         "  [Pipeline 筛选参数]",
-        f"      - PM_RADIUS: {ctx_cluster.get('PM_RADIUS', 'N/A')} mas/yr",
-        f"      - PLX_ERROR: {ctx_cluster.get('PLX_ERROR', 'N/A')} mas",
-        f"      - RV_ERROR: {ctx_cluster.get('RV_ERROR', 'N/A')} km/s",
-        f"      - CMD_DEV: {ctx_cluster.get('CMD_DEV', 'N/A')} mag",
-        f"      - KINE_SCORE_LIMIT: {ctx_cluster.get('KINE_SCORE_LIMIT', 'N/A')}",
-        f"      - SEED_RADIUS: {ctx_cluster.get('SEED_RADIUS', 'N/A')} pc",
-        f"      - SEED_PLX_LIM: {ctx_cluster.get('SEED_PLX_LIM', 'N/A')} mas",
-        f"      - SEED_MAX_MAG: {ctx_cluster.get('SEED_MAX_MAG', 'N/A')}",
-        f"      - SEED_MAX_RUWE: {ctx_cluster.get('SEED_MAX_RUWE', 'N/A')}",
+        f"      - PM_RADIUS: {getattr(ctx_cluster, 'PM_RADIUS', 'N/A')} mas/yr",
+        f"      - PLX_ERROR: {getattr(ctx_cluster, 'PLX_ERROR', 'N/A')} mas",
+        f"      - RV_ERROR: {getattr(ctx_cluster, 'RV_ERROR', 'N/A')} km/s",
+        f"      - CMD_DEV: {getattr(ctx_cluster, 'CMD_DEV', 'N/A')} mag",
+        f"      - KINE_SCORE_LIMIT: {getattr(ctx_cluster, 'KINE_SCORE_LIMIT', 'N/A')}",
+        f"      - SEED_RADIUS: {getattr(ctx_cluster, 'SEED_RADIUS', 'N/A')} pc",
+        f"      - SEED_PLX_LIM: {getattr(ctx_cluster, 'SEED_PLX_LIM', 'N/A')} mas",
+        f"      - SEED_MAX_MAG: {getattr(ctx_cluster, 'SEED_MAX_MAG', 'N/A')}",
+        f"      - SEED_MAX_RUWE: {getattr(ctx_cluster, 'SEED_MAX_RUWE', 'N/A')}",
     ]
 
 
@@ -214,7 +214,7 @@ def render_final_report(
     target_category: str,
     mode: str,
     algo: str,
-    ctx_cluster: dict,
+    ctx_cluster,
     v_all_audit_data: dict,
     audit_res: dict,
     deep_stats_pg: dict,
@@ -231,7 +231,7 @@ def render_final_report(
     report_lines = [
         "=" * 65,
         f"🏁 [管线执行最终报告 - {target_cluster_id}]",
-        f"  🔹 目标星团: {target_cluster_id} ({ctx_cluster['NAME']})",
+        f"  🔹 目标星团: {target_cluster_id} ({ctx_cluster.NAME})",
         f"  🔹 执行模式: {mode.upper()} -> 物理特征空间: {used_features}",
         f"  🔹 聚类算法: {algo.upper()}",
         f"  🔹 审计参考: {target_category}",

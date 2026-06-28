@@ -50,11 +50,11 @@ class UnifiedMemberValidator:
         )
 
         # 为了兼容你原本的类属性命名习惯，保留以下别名映射
-        self.cluster_name = CLUSTERS[cluster_id]["ID_NAME"]
+        self.cluster_name = CLUSTERS[cluster_id].ID_NAME
         self.config = CLUSTERS[cluster_id]
 
         # 数据库持久化缓存配置
-        self.cache_table = MANIFEST[IDX_IDS_SIMBAD]["raw_table"]
+        self.cache_table = MANIFEST[IDX_IDS_SIMBAD].raw_table
 
         # 🎯 必须显式启动自适应测光演化模型，构建 CMD 插值网格
         self._setup_physical_constraints()
@@ -68,7 +68,7 @@ class UnifiedMemberValidator:
         """
         if not self.cluster_obj or not hasattr(self.cluster_obj, "cfg_mgr"):
             # 降级采用静态配置
-            return self.config.get(param_name, default)
+            return getattr(self.config, param_name, default)
 
         # 直接从底层容器获取，防止与实例属性读取形成死循环
         val = self.cluster_obj.cfg_mgr.get_param(self.cluster_id, param_name)
@@ -76,7 +76,7 @@ class UnifiedMemberValidator:
             return val
 
         # 降级采用静态配置
-        val = self.config.get(param_name, default)
+        val = getattr(self.config, param_name, default)
         if val is None:
             self.logger.warn(
                 f"⚠️ 星团 {self.cluster_name} 在动态配置和静态配置中均未找到参数 {param_name}。"

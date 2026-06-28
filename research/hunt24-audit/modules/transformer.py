@@ -18,7 +18,8 @@ class AstroTransformer:
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
 
         self.cluster_rv = cluster_rv
-        if cluster_center_icrs is not None:
+        # 确保传入有效的元组，防止解包失败
+        if cluster_center_icrs and len(cluster_center_icrs) == 2:
             self.cluster_center_ra = cluster_center_icrs[0]
             self.cluster_center_dec = cluster_center_icrs[1]
         else:
@@ -29,6 +30,52 @@ class AstroTransformer:
             f"🚌 [AstroTransformer] 引擎初始化完成 | 模式: 动力学自适应 | "
             f"先验 RV: {self.cluster_rv} km/s | 锚点: ({self.cluster_center_ra}, {self.cluster_center_dec})"
         )
+
+    # 2. 🚀 新增 workflow 期待的强类型 fit_transform_df 桥接方法
+    def fit_transform_df(self, df: pd.DataFrame, mode: str) -> pd.DataFrame:
+        """
+        高性能特征转换网关（DataFrame 契约版）。
+        
+        调用底层物理转换算子，并将生成的相空间/动力学特征矩阵重新包装为 
+        带有强类型列名且保留原始索引(id)的 DataFrame。
+        """
+        if df.empty:
+            return df.copy()
+
+        # 驱动底层的矩阵变换引擎
+        feature_matrix = self.fit_transform(df, mode=mode)
+        mode = mode.lower()
+
+        # 根据不同的空间投影模式，动态匹配标准物理列名
+        if mode == "2d":
+            columns = ["pmra", "pmdec"]
+        elif mode == "3d":
+            columns = ["pmra", "pmdec", "plx"]
+        elif mode == "5d":
+            columns = ["ra", "dec", "pmra", "pmdec", "plx"]
+        elif mode == "6d_o":
+            columns = ["ra", "dec", "pmra", "pmdec", "plx", "rv_fitted"]
+        elif mode == "5d_h":
+            columns = ["l", "b", "pm_l_cosb", "pm_b", "plx"]
+        elif mode == "3d_v":
+            columns = ["u_vel", "v_vel", "w_vel"]
+        elif mode == "6d_p":
+            columns = ["x_pos", "y_pos", "z_pos", "u_vel", "v_vel", "w_vel"]
+        else:
+            raise ValueError(f"❌ 无法为未知的 dim_mode '{mode}' 分配 DataFrame 列名。")
+
+        # 将 NumPy 特征阵转换为规范的 DataFrame
+        df_features = pd.DataFrame(feature_matrix, columns=columns, index=df.index)
+
+        # 🛡️ 血缘维系：如果原始 DataFrame 中包含高价值的业务键（如 'id' 或 'source_id'），予以合并或保留
+        id_col = next((col for col in ["id", "source_id"] if col in df.columns), None)
+        if id_col and id_col not in df_features.columns:
+            # 在最前列插入业务主键，确保下游模型（如 GMM / Random Forest）能够精准溯源
+            df_features.insert(0, id_col, df[id_col].values)
+
+        self.logger.info(f"✅ [DataFrame 映射完成] 新特征空间列结构: {list(df_features.columns)}")
+        return df_features
+
 
     def ingest_external_rv_data(
         self, df: pd.DataFrame, source_path: str, source_type: str = "hunt"

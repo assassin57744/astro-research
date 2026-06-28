@@ -481,43 +481,51 @@ class AstroDB:
         # 核心优化：提取当前任务相关的索引，过滤无关星团的加载
         target_indices = set()
         other_clusters_indices = set()
+        
         if target_cluster_id and target_cluster_id in cfg.CLUSTERS:
-            target_indices.add(cfg.CLUSTERS[target_cluster_id].get("FIELD_IDX"))
-            target_indices.add(cfg.CLUSTERS[target_cluster_id].get("SEED_IDX"))
+            target_indices.add(cfg.CLUSTERS[target_cluster_id].FIELD_IDX)
+            target_indices.add(cfg.CLUSTERS[target_cluster_id].SEED_IDX)
 
             for cid, cinfo in cfg.CLUSTERS.items():
                 if cid != target_cluster_id:
-                    other_clusters_indices.add(cinfo.get("FIELD_IDX"))
-                    other_clusters_indices.add(cinfo.get("SEED_IDX"))
+                    other_clusters_indices.add(cinfo.FIELD_IDX)
+                    other_clusters_indices.add(cinfo.SEED_IDX)
 
         for k, config in self.data_manifest.items():
             # 如果该项属于其他星团的数据源（且不是当前目标的必要项），则跳过
             if k in other_clusters_indices and k not in target_indices:
+                self.logger.debug(f"[debug] 跳过非被检验星团数据. 当前星团: {target_cluster_id} , 跳过表格: {k} ")
                 continue
 
-            mode = config.get("sync_mode", "HYBRID")
+            self.logger.debug(f"[debug] other_clusters_indices: {len(other_clusters_indices)}|target_indices:{len(target_indices)}")
+            # self.logger.info(f"[debug] cfg.CLUSTERS.items():{cfg.CLUSTERS.items()}")
+
+            sync_mode = config.get("sync_mode", "HYBRID")
+            self.logger.debug(f"[debug] 当前星表同步模式: {config.sync_mode}/{sync_mode}")
 
             # [核心重构]：如果模式是 VIRTUAL，说明该项是一个逻辑视图（如种子集），
             # 它直接引用 base_idx 对应的 raw 表，不需要物理文件同步。
-            if mode == "VIRTUAL":
+            if sync_mode == "VIRTUAL":
                 self.logger.info(f"🌌 跳过虚拟同步项: {k} (将作为逻辑视图处理)")
                 continue
 
             t_raw = config.get("raw_table")  # 从 manifest 获取表名
-            params = config.get("params", {})
-            storage_path = params.get("storage_path", "snapshots")
-
+            # params = config.get("params", {})
+            # storage_path = params.get("storage_path", "snapshots")
+            storage_path = config.storage_path
+            
             result_path = self.dirs["warehouse"] / storage_path / f"{k}.parquet"
+            
             result_path.parent.mkdir(parents=True, exist_ok=True)
             file_exists = result_path.exists()
             table_exists = self.table_exists(t_raw)
 
             should_sync = False
-            if mode == "FORCE_REMOTE":
+            if sync_mode == "FORCE_REMOTE":
                 should_sync = True
-            elif mode == "HYBRID" and not file_exists:
+            elif sync_mode == "HYBRID" and not file_exists:
                 should_sync = True
-            elif mode == "OFFLINE" and not file_exists:
+            elif sync_mode == "OFFLINE" and not file_exists:
                 self.logger.error(f"❌ 离线任务缺失物理文件: {k} (路径: {result_path})")
                 continue
 

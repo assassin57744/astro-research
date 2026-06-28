@@ -54,8 +54,8 @@ class ClusterConfigManager:
         # 层级 3：平滑降级到项目根目录下的静态 config.py
         if hasattr(cfg, "CLUSTERS") and cluster_id in cfg.CLUSTERS:
             static_cluster_cfg = cfg.CLUSTERS[cluster_id]
-            if param_name in static_cluster_cfg:
-                val = static_cluster_cfg[param_name]
+            if hasattr(static_cluster_cfg, param_name):
+                val = getattr(static_cluster_cfg, param_name)
                 self._set_memory_cache(cluster_id, param_name, val)
                 return val
 
@@ -165,8 +165,8 @@ class ClusterConfigManager:
                 r_half_deg = 0.5
                 self.logger.warning(f"⚠️ 未找到 {cluster_id} 的 R_HALF_LIGHT 先验，临时使用 {r_half_deg} 度。")
 
-            hunt_table = cfg.MANIFEST[cfg.IDX_HUNT]["aln_view"].format(cluster=cluster_id.lower())
-            
+            hunt_table = cfg.MANIFEST[cfg.IDX_HUNT].aln_view.format(cluster=cluster_id.lower())
+
             try:
                 # 🎯 【核心 SQL 修改】：利用 CTE 自收敛计算临时几何质心，空间过滤 + 概率切片 Top 400
                 if use_gaia_raw:
