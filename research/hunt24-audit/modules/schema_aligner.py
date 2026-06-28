@@ -12,7 +12,7 @@
 
 import logging
 import config as cfg
-from modules.db import AstroDB
+from modules.db import AstroDBFacade
 import copy
 from config import ClusterConfig, CatalogConfig
 

@@ -16,8 +16,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from modules.db import AstroDB
-from modules.workflow import AstroWorkflow
+from modules.workflow import Workflow
+from modules.db import AstroDBFacade
 import config as cfg
 
 logger = logging.getLogger("AstroPipeline")
@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
         choices=["cg20", "heyl", "zerj", "risb", "hunt"],
         help="审计对比的参考星表类别",
     )
-    valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
+    valid_modes =["2d", "3d", "5d", "6d_o", "5d_h", "3d_v", "6d_p"] #list(cfg.GMM_CONFIG["feature_map"].keys())
     parser.add_argument(
         "-m", "--mode", 
         default="5d", 
@@ -128,7 +128,7 @@ def handle_maintenance(args: argparse.Namespace) -> bool:
     if not args.maintenance:
         return False
 
-    db = AstroDB(manifest=cfg.MANIFEST)
+    db = AstroDBFacade(manifest=cfg.MANIFEST)
     try:
         from modules.backup_manager import AstroBackupManager
         backup_mgr = AstroBackupManager(db)
@@ -158,7 +158,7 @@ def main() -> None:
     args = parse_args()
 
     # 1. 日志系统级联初始化
-    numeric_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    numeric_level = getattr(logging, args.log.upper(), logging.INFO)
     setup_logging(level=numeric_level if isinstance(numeric_level, int) else logging.INFO)
 
     # 2. 维护模式安全拦截
@@ -172,19 +172,13 @@ def main() -> None:
         f"🌌 [Pipeline Control] 成功锁定目标天体: '{target_cluster_id}' | "
         f"初筛算法 (-a): '{args.algo}' | 精筛维度模式 (-m): '{args.mode}'"
     )
-
+    
     # 4. 实例化数仓中介并移交控制权
-    db = AstroDB(manifest=cfg.MANIFEST)
+    # db = AstroDBFacade(manifest=cfg.MANIFEST)
+    db = AstroDBFacade(cluster_id=target_cluster_id)
     try:
-        workflow = AstroWorkflow(db=db)
-        workflow.execute(
-            cluster_id=target_cluster_id,
-            category=args.category,
-            mode=args.mode,       # 传递精筛维度模式字面量
-            algo=args.algo,       # 传递初筛算法字面量 (如 'dbscan', 'hdbscan')
-            result_mode=args.result,
-            reconstruct=args.reconstruct
-        )
+        wf = Workflow(cluster_id=target_cluster_id)
+        wf.execute()
     except Exception as e:
         logger.error(f"❌ 管线在执行期间遭遇核心故障阻断: {e}", exc_info=True)
     finally:
