@@ -1,22 +1,19 @@
 # config.py
 """
-hunt24-audit 科学管线全局配置蓝图中枢 v2.1 (重构优化版)
+hunt24-audit 科学管线全局配置蓝图中枢 v3.0 (现代化标准字典重构版)
 
 [架构组织分水岭]
 ========================= 外部开放配置区 =========================
 1. 系统路径与环境配置 (Paths & Environment)
 2. 科学计算门限与物理常数 (Thresholds & Physics)
 3. 星团物理先验配置数据库 (Pure Cluster Physical Database)
-4. 文献及标准字段映射中枢 (Schemas, Fields & Naming Adapters)
+4. 文献架构图谱与标准字段映射中枢 (Schemas, Fields & Naming Adapters)
 5. 算法流水线配置与盲搜空间元数据大盘 (Pipeline & GMM Config)
 
 ========================= 内部流转架构区 =========================
-6. 管线统一多态资产注册架构 (Unified Asset Core Models)
-7. 数据资产静态大盘模型定义 (_StaticManifestHolder)
-8. 全局单例多态清单容器 (Manifest Container Engine)
-
-========================= 外部调用标准接口 =======================
-9. 全局单例标准对外入口网关 (Global Standard API Entry)
+6. 管线统一多态资产注册架构模型 (Unified Asset Core Models)
+7. 全局资产标准容器大盘网关 (Global Asset Manifest Gateway)
+8. 外部调用辅助兼容层网关 (Helper Interface)
 """
 
 import os
@@ -244,6 +241,7 @@ IDX_DR2IDX, IDX_IDS_SIMBAD, IDX_GMM = "dr2idx", "ids_simbad", "pgmm"
 
 @dataclass(frozen=True)
 class ClusterIdentity:
+    """星团身份契约类"""
     NAME: str
     SIMBAD_NAME: str
     ID_NAME: str
@@ -262,7 +260,7 @@ CLUSTER_REGISTRY: Dict[str, ClusterIdentity] = {
 }
 
 @dataclass(frozen=True)
-class LiteratureSchema:
+class AssetSchema:
     """外部异构文献数据表头结构定义模型 (Schema)"""
     id: Optional[str] = None; id_dr2: Optional[str] = None; ra: Optional[str] = None; dec: Optional[str] = None
     pmra: Optional[str] = None; pmdec: Optional[str] = None; plx: Optional[str] = None; plx_err: Optional[str] = None
@@ -277,23 +275,23 @@ class LiteratureSchema:
     def items(self): return [(k, v) for k, v in self.__dict__.items() if v is not None]
 
 
-LITERATURE_SCHEMAS: Dict[str, LiteratureSchema] = {
-    "gaiadr3": LiteratureSchema(id="source_id", ra="ra", dec="dec", pmra="pmra", pmdec="pmdec", plx="parallax", plx_err="parallax_error", mag="phot_g_mean_mag", color="bp_rp", ruwe="ruwe", rv="radial_velocity"),
-    "dr2idx": LiteratureSchema(id="dr3_source_id", id_dr2="dr2_source_id"),
-    "ids_simbad": LiteratureSchema(id="gaia_dr3_id", main_id="main_id", ids="ids"),
-    "hunt": LiteratureSchema(id="GaiaDR3", prob="Prob", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="Plx", rv="RV", mag="Gmag", color="BP-RP", cluster="Name"),
-    "zerj": LiteratureSchema(id="GaiaDR3", ra="RA_ICRS", dec="DE_ICRS", mag="Gmag", cluster="Cluster"),
-    "risb": LiteratureSchema(id="GaiaDR3", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="plx", mag="Gmag", color="BP-RP", cluster="Cluster"),
-    "cg20": LiteratureSchema(id_dr2="Source", prob="Proba", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="Plx", mag="Gmag", color="BP-RP", cluster="Cluster"),
-    "heyl": LiteratureSchema(id="GaiaEDR3", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="Plx", mag="Gmag", color="Bp-Rp"),
+ASSET_SCHEMAS: Dict[str, AssetSchema] = {
+    "gaiadr3": AssetSchema(id="source_id", ra="ra", dec="dec", pmra="pmra", pmdec="pmdec", plx="parallax", plx_err="parallax_error", mag="phot_g_mean_mag", color="bp_rp", ruwe="ruwe", rv="radial_velocity"),
+    "dr2idx": AssetSchema(id="dr3_source_id", id_dr2="dr2_source_id"),
+    "ids_simbad": AssetSchema(id="gaia_dr3_id", main_id="main_id", ids="ids"),
+    "hunt": AssetSchema(id="GaiaDR3", prob="Prob", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="Plx", rv="RV", mag="Gmag", color="BP-RP", cluster="Name"),
+    "zerj": AssetSchema(id="GaiaDR3", ra="RA_ICRS", dec="DE_ICRS", mag="Gmag", cluster="Cluster"),
+    "risb": AssetSchema(id="GaiaDR3", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="plx", mag="Gmag", color="BP-RP", cluster="Cluster"),
+    "cg20": AssetSchema(id_dr2="Source", prob="Proba", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="Plx", mag="Gmag", color="BP-RP", cluster="Cluster"),
+    "heyl": AssetSchema(id="GaiaEDR3", ra="RA_ICRS", dec="DE_ICRS", pmra="pmRA", pmdec="pmDE", plx="Plx", mag="Gmag", color="Bp-Rp"),
 }
 
 # 外部物理星等列名称、文件导出的物理模板常量
 class TMPL:
     T_RAW = "raw_{idx}"
-    V_STD = "std_{idx}"
-    V_STX = "stx_{idx}"
-    T_ALN = "aln_{idx}"
+    V_STD = "std_view_{idx}"
+    V_STX = "stx_view_{idx}"
+    T_ALN = "aln_view_{idx}"
     T_ALN_EX = "aln_{idx}_{cluster}"
     T_TBL = "tbl_{idx}"
     T_RES_SG = "pgmm_{cluster}_{category}_{mode}_{algo}"
@@ -374,7 +372,7 @@ class PipelineAlgorithmConfig:
                     "5d_h": val.d5_h, "3d_v": val.d3_v, "6d_p": val.d6_p
                 }
             return val
-        raise KeyError(f"Configuration key '{key}' does not exist in GMM pipeline engine.")
+        raise KeyError(f"Configuration key '{key}' does not exist.")
 
     def get(self, key: str, default: Any = None) -> Any:
         try: return self[key]
@@ -400,6 +398,7 @@ class BaseAssetConfig:
     """所有数据资产的顶级抽象基类"""
     id: str
     asset_type: AssetType
+    # schemas_type: str
     base_idx: Optional[str] = None
     pre_filters: List[str] = field(default_factory=list)
 
@@ -439,18 +438,20 @@ class BaseAssetConfig:
         return TMPL.COL_PROB.format(idx=self.id) if self.asset_type == AssetType.LIT_CATALOG else None
 
     @property
-    def meta_type(self) -> str:
+    def schemas_type(self) -> str:
         """无损向下兼容旧管线对资产类型标签（seeds / field / catalog）的分类判定契约"""
         idx_lower = self.id.lower()
-        if "seeds" in idx_lower or self.sync_mode == "VIRTUAL": return "seeds"
-        if "field" in idx_lower or self.asset_type == AssetType.OBS_FIELD: return "field"
-        return "catalog"
+        # if "seeds" in idx_lower : return "gaiadr3"
+        # if "field" in idx_lower : return "gaiadr3" # 这两个表是同构的
+        if self.asset_type == AssetType.OBS_FIELD : return "gaiadr3"
+        return self.id
 
 
 @dataclass
 class ObsFieldAssetConfig(BaseAssetConfig):
     """观测数据资产配置模型 (如 Gaia DR3)"""
     asset_type: AssetType = AssetType.OBS_FIELD
+    meta_type: str = "obs"
     provider: str = "local_file"
     sync_mode: str = "OFFLINE"
     fields_key: str = "gaia_base"
@@ -461,8 +462,8 @@ class ObsFieldAssetConfig(BaseAssetConfig):
         return f"gaia_archive/gaiadr3_{cluster_short}_wide.parquet"
 
     @property
-    def fields(self) -> LiteratureSchema:
-        return LITERATURE_SCHEMAS.get(self.fields_key, LiteratureSchema())
+    def fields(self) -> AssetSchema:
+        return ASSET_SCHEMAS.get(self.fields_key, AssetSchema())
 
     @property
     def actions(self) -> Dict[str, Any]:
@@ -473,6 +474,7 @@ class ObsFieldAssetConfig(BaseAssetConfig):
 class LitCatalogAssetConfig(BaseAssetConfig):
     """VizieR 文献/历史审计目标星表资产配置模型"""
     asset_type: AssetType = AssetType.LIT_CATALOG
+    meta_type: str = "lit"
     provider: str = "vizier"
     sync_mode: str = "HYBRID"
     file_pattern: str = ""
@@ -486,14 +488,15 @@ class LitCatalogAssetConfig(BaseAssetConfig):
     extra_params: Optional[Dict[str, Any]] = None
 
     @property
-    def fields(self) -> LiteratureSchema:
-        return LITERATURE_SCHEMAS.get(self.fields_key, LiteratureSchema())
+    def fields(self) -> AssetSchema:
+        return ASSET_SCHEMAS.get(self.fields_key, AssetSchema())
 
 
 @dataclass
 class DynamicCacheAssetConfig(BaseAssetConfig):
     """网络快照缓存（Cache）资产配置模型"""
     asset_type: AssetType = AssetType.DYNAMIC_CACHE
+    meta_type: str = "csh"
     index_column: str = "source_id"
     cache_strategy: str = "APPEND_ONLY"
     provider: str = "local_file"
@@ -502,7 +505,7 @@ class DynamicCacheAssetConfig(BaseAssetConfig):
     @property
     def file_pattern(self) -> str: return f"internal/cache_{self.id}.parquet"
     @property
-    def fields(self) -> LiteratureSchema: return LITERATURE_SCHEMAS.get(self.id, LiteratureSchema())
+    def fields(self) -> AssetSchema: return ASSET_SCHEMAS.get(self.id, AssetSchema())
     @property
     def actions(self) -> Dict[str, Any]: return {"std": None, "stx": None, "aln": None}
 
@@ -519,7 +522,45 @@ AssetKey = Literal[
     "hunt", "zerj", "risb", "cg20", "heyl", "ids_simbad", "dr2idx"
 ]
 
-MANIFEST: Dict[AssetKey, BaseAssetConfig] = {
+class AssetManifestContainer(dict):
+    def get_assets_from_config(self, cluster_id: str) -> Dict[str, BaseAssetConfig]:
+        """
+        根据给定的星团（例如 'M45'），精准过滤出相关的资产：
+        - 属于观测或种子星表资产：其键名必须精准以当前星团开头（如 'm45_'）
+        - 属于通用文献星表或动态缓存资产：属于跨星团通用组件，无条件保留
+        - 杜绝混入其他星团（如 m44, mel25）的资产
+        """
+        cluster_prefix = f"{cluster_id.lower()}"
+        # print(f"cluster_prefix : {cluster_prefix}")
+        cluster_assets_dict = {}
+        global_assets_dict = {}
+        
+        
+        # 因为自身就是 dict，直接遍历标准的 self.items() 即可
+        for k, v in self.items():
+            if k.startswith("_"):
+                continue
+                
+            # 1. 动态读取资产的类名与类中定义的 asset_type 属性
+            class_name = v.__class__.__name__
+            asset_type = getattr(v, "asset_type", None)
+
+            # print(f"[debug]class_name : {class_name}")
+            
+            # 2. 核心动态类型判定：
+            #    所有的文献资产(LitCatalogAssetConfig)和Cache资产(DynamicCacheAssetConfig)无条件全量加载
+            if (class_name in ("LitCatalogAssetConfig", "DynamicCacheAssetConfig") or 
+                asset_type in (AssetType.LIT_CATALOG, AssetType.DYNAMIC_CACHE)):
+                global_assets_dict[k] = v
+                
+            # 3. 观测资产或种子资产：必须精准匹配当前星团前缀（例如 m45_）
+            elif k.startswith(f"{cluster_prefix}_field"):
+                cluster_assets_dict[k] = v
+                
+        return cluster_assets_dict, global_assets_dict
+
+# 初始化承载统一注册大盘的现代化容器实例
+MANIFEST = AssetManifestContainer({
     # --- 基础大范围观测星等资产 (Local Obs Fields) ---
     "m45_field": ObsFieldAssetConfig(id="m45_field"),
     "m44_field": ObsFieldAssetConfig(id="m44_field"),
@@ -547,22 +588,17 @@ MANIFEST: Dict[AssetKey, BaseAssetConfig] = {
 
     # --- 内部基础架构高速缓存及交叉比对资产 ---
     "ids_simbad": DynamicCacheAssetConfig(id="ids_simbad", index_column="gaia_dr3_id"),
-    "dr2idx": DynamicCacheAssetConfig(id="dr2idx", index_column="dr3_source_id"),
-}
+    # TODO: 这个表要改为 LitCatalogAssetConfig
+    # "dr2idx": DynamicCacheAssetConfig(id="dr2idx", index_column="dr3_source_id"),
+})
 
 
-# =================================================================
-# 8. 外部调用辅助兼容层网关 (Helper Interface)
-# =================================================================
+from dataclasses import dataclass, field
+from typing import List, Dict
 
-def get_assets_for_cluster(cluster_id: str) -> Dict[str, BaseAssetConfig]:
-    """无损获取与特定星团匹配的所有强类型配置实例，平滑适配旧代码的成员方法契约"""
-    cluster_upper = cluster_id.upper()
-    matched_assets_dict = {}
-    for k, v in MANIFEST.items():
-        if cluster_upper in k.upper() or k in ["hunt", "zerj", "risb", "cg20", "heyl", "ids_simbad", "dr2idx"]:
-            matched_assets_dict[k] = v
-    return matched_assets_dict
-
-# 将业务过滤接口动态挂载至字典实例上，支持上层管线对旧 ManifestContainer 容器方法的透明调用
-MANIFEST.get_assets_for_cluster = get_assets_for_cluster  # type: ignore
+@dataclass
+class DerivedActivationResult:
+    cluster_id: str
+    activated_views: List[str] = field(default_factory=list)      # 成功注册的视图全称列表
+    view_manifest: Dict[str, str] = field(default_factory=dict)   # 视图名 -> 基础依赖表的映射关系
+    row_counts: Dict[str, int] = field(default_factory=dict)       # 每一个视图当前切片出来的实时行数（数据量审计）
