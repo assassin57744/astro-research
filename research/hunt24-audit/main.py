@@ -149,7 +149,7 @@ def resolve_runtime_matrix(
     ]
 
     if "all" in [t for t in raw_feature_spaces]:
-        raw_feature_spaces = [
+        resolved_feature_spaces = [
             "2d",
             "3d",
             "5d",
@@ -206,7 +206,7 @@ def parse_args() -> argparse.Namespace:
         "-f",
         "--feature-spaces",
         default="5d",
-        choices=valid_feature_spaces + ["all"],
+        # choices=valid_feature_spaces + ["all"],
         help="精筛阶段 GMM 相空间特征维度计算模式，使用 'all' 将循环执行所有受支持的空间模式",
     )
     parser.add_argument(

@@ -23,6 +23,7 @@ class Workflow:
     多轨多维科学管线指挥官。
     【精简收益】移除了所有对数仓中间激活状态（Runtime Context / Activation Report）的暴露耦合。
     """
+
     def __init__(
         self,
         cluster_ids: list[str],
@@ -69,19 +70,24 @@ class Workflow:
                     # ---------------------------------------------------------
                     # 【第一阶段】基础设施公用层（全空间共享，仅执行一次，避免IO死锁）
                     # ---------------------------------------------------------
-                    self.logger.info("⚙️  [Stage 1] 挂载数据基础设施物理底座...")
+                    self.logger.info("⚙️  [Stage 1] 挂载数据基础设施...")
                     db.activate_base_assets()  # Stage 1.2
+                    # 变更列名, 注册 std 视图
                     db.align_schemas()  # Stage 1.5
 
                     self.logger.info(
                         f"[debug] self.param_mode : {self.param_recon_mode}"
                     )
-                    cluster_params = db.init_cluster_params(param_recon_mode=self.param_recon_mode)
+
+                    # 初始化星团参数, 两种模式: 动态-根据 hunt 的结果动态生成; 静态-在 config.py 中配置 
+                    cluster_params = db.init_cluster_params(self.param_recon_mode)
                     self.logger.info(
                         f"🌟 [Stage 1.75] 星团运动特征参数确定成功. RA={cluster_params.get("CENTER_RA")}"
                     )
+                    # 挂载派生资产, 主要是 seeds 视图, 以 view 的形式存在, 实现硬截取
                     db.activate_derived_assets(cluster_params)
 
+                    # 读取星团观测数据, 待用
                     cluster_obs_field_df = db.get_cluster_data(slice_type="field")
 
                     # TODO: 对 obs_df 可以补充 Stage 1.9: 按照 config.py 中配置的规则进行截取, 当前未执行
@@ -90,22 +96,27 @@ class Workflow:
                     # ---------------------------------------------------------
                     # 【第二阶段】特征空间多轨循环（Stage 2 ~ Stage 4 动态解耦迭代）
                     # ---------------------------------------------------------
-                    
+
                     # 保存结果，用于最终多源联合判定
                     all_tracks_results = {}
 
                     for fs in self.feature_spaces:
                         space_name = fs
                         self.logger.info(
-                            f"🚀 [Track-Parallel] 启动基于 {fs} 精筛结果的审计"
+                            f"🚀 启动基于 {fs} 精筛结果的审计"
                         )
 
-                        # TODO : Stage 2: 提取群落空间种子
-                        self.logger.info(f"   📐 开始启动星团观测空间种子。指定物理轴: {fs}")
+                        # 提取群落空间种子
+                        self.logger.info(
+                            f"   📐 读取星团观测空间种子开始..."
+                        )
                         cluster_seeds_df = db.get_cluster_data(slice_type="seeds")
+                        self.logger.info(
+                            f"   📐 读取星团观测空间种子结束. 加载数据量: {len(cluster_seeds_df)}"
+                        )
 
-                        # Stage 3: 将物理观测空间动态投射入本轨特定的高维特征空间
-                        self.logger.info(f"   📐 动力学特征空间投射。指定物理轴: {fs}")
+                        # 将物理观测空间动态投射入本轨特定的高维特征空间
+                        self.logger.info(f"   📐 当前动力学特征空间 {fs} 映射开始...")
                         # feature_matrix = AstroTransformer(seed_stars).project_to_space(fs)
 
                         # Stage 4: 移交专属高维精筛混合模型进行 MLE 似然演化拟合

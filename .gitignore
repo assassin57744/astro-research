@@ -226,11 +226,11 @@ research/hunt24-audit/logs/
 research/hunt24-audit/analysis/
 research/hunt24-audit/notes/
 research/hunt24-audit/modules/astro_db_new.py
-research/hunt24-audit/modules/tmp*.py
+research/hunt24-audit/modules/-tmp*.py
 research/hunt24-audit/NOTES.md
 
-research/hunt24-audit/modules/operators_bak.py
-research/hunt24-audit/modules/schema_aligner_tmp_del.py
+research/hunt24-audit/modules/-operators_bak.py
+research/hunt24-audit/modules/-schema_aligner_tmp_del.py
 # research/hunt24-audit/modules/operators.py
 # research/hunt24-audit/modules/schema_aligner.py
 
