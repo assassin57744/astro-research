@@ -467,7 +467,10 @@ class UnifiedMemberValidator:
             upmask_cols = ["ra", "dec", "color", "mag"]
             
             # 1. 从外部注入已知恒星 CSV 库
-            ext_csv_path = Path(r"D:\git\astro-research\research\hunt24-audit\data\raw\gaia_archive\m67_pyUPMASK.csv")
+            
+            # ext_csv_path = Path(f"D:/git/astro-research/research/hunt24-audit/data/raw/gaia_archive/"f"{self.cluster_id.lower()}_pyUPMASK.csv")
+            ext_csv_path = Path(cfg.GAIA_INPUT_DIR) /  f"{self.cluster_id.lower()}_pyUPMASK.csv"
+            self.logger.info(f"📥 [PhysAudit] 尝试加载外部星表: {ext_csv_path}")
             ext_gaia_ids = set()
             
             if ext_csv_path.exists():
@@ -496,8 +499,8 @@ class UnifiedMemberValidator:
                 valid_indices = valid_df.index
                 
                 # 动态加载 pyUPMASK
-                pyupmask_dir = r"D:\git\astro-research\research\hunt24-audit\modules\pyUPMASK"
-                if pyupmask_dir not in sys.path: sys.path.append(pyupmask_dir)
+                # pyupmask_dir = r"D:/git/astro-research/research/hunt24-audit/modules/pyUPMASK"
+                # if pyupmask_dir not in sys.path: sys.path.append(pyupmask_dir)
                 # import modules.pyUPMASK as upmask_mod
 
                 n_iterations = int(self.get_param("UPMASK_ITERATIONS", 20))
@@ -539,6 +542,7 @@ class UnifiedMemberValidator:
                     cmd_chi2[sub_outlier] += 1.0
 
                 # 保存原有的测光残差值以便后续追溯
+                # TODO: 考虑将 cmd_residual 与 cmd_chi2 分开存储，避免混淆
                 audit_matrix.loc[valid_cmd_mask, "cmd_residual"] = cmd_chi2
                 audit_matrix.loc[valid_cmd_mask, "cmd_chi2"] = cmd_chi2  # 📥 写入新规卡方列
 
