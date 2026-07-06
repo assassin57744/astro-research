@@ -549,6 +549,7 @@ class AstroDB:
             )
             count = self.get_row_count(table_name)
             self.logger.info(f"📦 已物化物理表: {table_name} (行数: {count})")
+            self.logger.info(f"📦 源文件: {abs_path}")
         except Exception as e:
             self.logger.error(f"❌ 物化物理表 {table_name} 失败: {e}")
 
@@ -580,7 +581,7 @@ class AstroDB:
         update_cols = [c for c in df_updates.columns if c != key_col and c in dest_cols]
 
         if not update_cols:
-            self.logger.debug(f"⚠️ [Tag] {master_name} 没有匹配的列需要更新 (跳过)")
+            self.logger.info(f"⚠️ [Tag] {master_name} 没有匹配的列需要更新 (跳过)")
             return
 
         temp_name = f"tmp_tag_{int(time.time())}_{random.randint(0, 1000)}"

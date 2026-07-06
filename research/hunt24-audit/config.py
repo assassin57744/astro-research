@@ -81,6 +81,10 @@ MASTER_COLS = {
     "X_MATCH": "x_match_tag",   # Matched / PG_Only / Ref_Only
     "AUDIT": "audit_status",    # Confirmed / Candidate / Contamination
     "AUDIT_NOTE": "audit_note", # 审计备注（如：视差偏离、暗端漏检等）
+    "KINE_CHI2":"kine_chi2",
+    "PLX_CHI2":"plx_chi2",
+    "RV_CHI2":"rv_chi2",
+    "CMD_CHI2":"cmd_chi2",
 }
 
 class TMPL:
@@ -176,7 +180,7 @@ CLUSTERS = {
         "E_BP_RP": 0.06,  # 对应色余 E(BP-RP)
         # "PLX_REF": 7.33, "PMRA_REF": 20.10, "PMDEC_REF": -45.40,   
         "PLX_REF": 7.329881851789656,   # source: 基于hunt24的星团成员的均值
-        "PLX_ERROR": 0.5,  # 视差误差容忍度 (mas)
+        "PLX_ERROR": 0.512,  # 视差误差容忍度 (mas)
         "PMRA_REF": 19.816076644561296, "PMDEC_REF": -45.02481613280063,
         "PMRA_DISPERSION": 1.5, "PMDEC_DISPERSION": 1.2, # 自行空间分散度 (mas/yr), 非 3d_v/6d_p 模式下生效
         "PM_RADIUS": 3.0,  # 自行空间容忍度 (mas/yr)，source: Hunt2024 Figure 3 分布范围
@@ -186,13 +190,15 @@ CLUSTERS = {
         "UVW_ERROR": 2.0,  # 速度空间容忍度 (km/s)
         "U_ERROR": 2.2, "V_ERROR": 1.6, "W_ERROR": 1.0, # 速度空间分散度 (km/s), 仅 3d_v/6d_p 模式下生效
         "CMD_REF": np.array([0.0, 0.0, 0.0]),
-        "CMD_DEV": 0.8,  # CMD 偏离容忍度 (mag)
+        "CMD_DEV": 9.0,  # CMD 偏离容忍度 (mag)
         "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛     # TODO: 可以细化到分pm, plx, cmd, rv
         "SEED_RADIUS": 2.0, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)
         "SEED_PLX_LIM": 1.5,# 单位：mas, 源星种子搜索视差容忍度(第一次实验取值:1.5, 第二次实验取值:0.5)
         "SEED_MAX_MAG": 18.0, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
         "SEED_MAX_RUWE": 1.2,
-    },
+        "UPMASK_ITERATIONS": 20,
+        "UPMASK_MAX_CLUSTERS": 2
+        },
     "M44": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
         "SEED_IDX": IDX_FIELD_CLUSTER_M44_SEEDS,
@@ -204,13 +210,14 @@ CLUSTERS = {
         "RA_MIN": 120.0, "RA_MAX": 140.0, "DEC_MIN": 10.0, "DEC_MAX": 30.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 0.8,  # 单位：pc
         "HALF_MASS_RADIUS": 3.9,  # 单位：pc
-        "half_light_radius": 3.5,  # 单位：pc
+        "R_HALF_LIGHT": 3.5,  # 单位：pc
         "TIDAL_RADIUS": 12.0,  # 单位：pc
         "DISTANCE_PC": 187.0,
         "DISTANCE_MODULUS": 6.36,
         "EXT_AG": 0.05,
         "E_BP_RP": 0.03,  # 补齐色余
         "PLX_REF": 5.35, "PMRA_REF": -36.0, "PMDEC_REF": -12.9,
+        "PMRA_DISPERSION": 1.5, "PMDEC_DISPERSION": 1.2, # 自行空间分散度 (mas/yr), 非 3d_v/6d_p 模式下生效
         "RV_REF": 35.0,
         "UVW_REF": np.array([-34.5, -21.2, -6.8]),
         "V_ERROR": 2.0,
@@ -223,6 +230,8 @@ CLUSTERS = {
         "SEED_PLX_LIM": 1.2,
         "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.4,
+        "UPMASK_ITERATIONS": 20,
+        "UPMASK_MAX_CLUSTERS": 2
     },
     "Mel25": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_MEL25,
@@ -295,30 +304,36 @@ CLUSTERS = {
         "CAT_NAME": "NGC_2682",
         "ISO_FILE": "m67_4000myr.dat",
         "DIM_MODE": "2d",
-        "CENTER_RA": 132.83, "CENTER_DEC": 11.82, "RADIUS": 2.5,
+        "CENTER_RA": 132.8452564476688, "CENTER_DEC": 11.826338504396249, "RADIUS": 2.5,
         "RA_MIN": 128.0, "RA_MAX": 138.0, "DEC_MIN": 7.0, "DEC_MAX": 17.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.2,  # 单位：pc
         "HALF_MASS_RADIUS": 4.5,
-        "half_light_radius": 3.8,
+        "R_HALF_LIGHT": 3.8,
         "TIDAL_RADIUS": 16.0,
-        "DISTANCE_PC": 850.0,
+        "DISTANCE_PC": 868.7818642069942,
         "DISTANCE_MODULUS": 9.65,
         "EXT_AG": 0.10,
         "E_BP_RP": 0.05,
-        "PLX_REF": 1.17, "PMRA_REF": -10.96, "PMDEC_REF": -2.94,
+        "PLX_REF": 1.15179175, 
+        "PMRA_REF": -10.97335,
+        "PMDEC_REF": -2.9160399999999997,
+        "PMRA_DISPERSION": 0.16036244105151307,
+        "PMDEC_DISPERSION": 0.1593615336271586,
         "RV_REF": 33.7,
         "UVW_REF": np.array([-21.4, -25.2, -15.1]),
         "V_ERROR": 1.5, # 古老星团成员分布较为凝聚
         "RV_ERROR": 3.0,
         "KINE_SCORE_LIMIT": 2.0,
         "PM_RADIUS": 1.5,  # 远距离星团自行弥散极小
-        "PLX_ERROR": 0.2,  # 视差容忍度收紧
+        "PLX_ERROR": 0.029495399758903088,  # 视差容忍度收紧
         "CMD_DEV": 0.5,
         "SEED_RADIUS": 1.5,       # 继续扩大以包含更多外围种子
         "SEED_PLX_LIM": 0.4,       # 放宽视差限制以找回更多潜在种子
         "SEED_MAX_MAG": 20.0,
         "SEED_MAX_RUWE": 1.4,
-        "SEED_PM_LIM": 2.5,
+        "SEED_PM_LIM": 2.5,        
+        "UPMASK_ITERATIONS": 20,
+        "UPMASK_MAX_CLUSTERS": 2
     },
     "M13": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
@@ -351,6 +366,8 @@ CLUSTERS = {
         "SEED_MAX_MAG": 20.5,
         "SEED_MAX_RUWE": 1.4,
         "SEED_PM_LIM": 2.0,
+        "UPMASK_ITERATIONS": 20,
+        "UPMASK_MAX_CLUSTERS": 2
     },
     "M41": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M41,
@@ -359,17 +376,19 @@ CLUSTERS = {
         "ID_NAME": "ngc_2287",
         "CAT_NAME": "NGC_2287",
         "ISO_FILE": "m41_240myr.dat",
-        "CENTER_RA": 101.50, "CENTER_DEC": -20.75, "RADIUS": 2.53,
+        "CENTER_RA": 101.49596555452699, "CENTER_DEC": -20.710547532767876, "RADIUS": 2.53,
         "RA_MIN": 96.0, "RA_MAX": 107.0, "DEC_MIN": -25.0, "DEC_MAX": -15.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.5,  # 单位：pc
         "HALF_MASS_RADIUS": 4.0,
-        "half_light_radius": 3.6,
+        "R_HALF_LIGHT": 3.6,
         "TIDAL_RADIUS": 12.0,
-        "DISTANCE_PC": 710.0,
+        "DISTANCE_PC": 736.2945224042926,
         "DISTANCE_MODULUS": 9.25,
         "EXT_AG": 0.05,  # 消光较低
         "E_BP_RP": 0.03,
-        "PLX_REF": 1.41, "PMRA_REF": -1.55, "PMDEC_REF": -1.05,
+        "PLX_REF": 1.3587075000000002, "PMRA_REF": -4.362965, "PMDEC_REF": -1.351195,
+        "PMRA_DISPERSION": 0.13699214858888809,
+        "PMDEC_DISPERSION" : 0.1400777533193619,
         "RV_REF": 34.0,
         "UVW_REF": np.array([-10.5, -20.2, -5.1]),
         "V_ERROR": 2.0,
@@ -378,10 +397,12 @@ CLUSTERS = {
         "PM_RADIUS": 2.0,  # 较远星团，自行散布较小
         "PLX_ERROR": 0.3,
         "CMD_DEV": 0.6,
-        "SEED_RADIUS": 2.0,
+        "SEED_RADIUS": 0.2,
         "SEED_PLX_LIM": 0.9,  # PLX_ERROR * 3
         "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.4,
+        "UPMASK_ITERATIONS": 20,
+        "UPMASK_MAX_CLUSTERS": 2
     },
 }
 
@@ -405,17 +426,25 @@ FIELDS_VIZIER = {
 }
 
 FIELDS_GAIA_ARCHIVE = {
-    "id": "source_id",
-    "ra": "ra",
-    "dec": "dec",
-    "pmra": "pmra",
-    "pmdec": "pmdec",
-    "plx": "parallax",
-    "plx_err": "parallax_error",
-    "mag": "phot_g_mean_mag",
-    "color": "bp_rp",
-    "ruwe": "ruwe",
-    "rv": "radial_velocity",
+    "id": "source",
+    "ra": "RA_ICRS",
+    "dec": "DE_ICRS",
+    "ra_err": "e_RA_ICRS",
+    "dec_err": "e_DE_ICRS",
+    "pmra": "pmRA",
+    "pmdec": "pmDE",
+    "pmra_err": "e_pmRA",
+    "pmde_err": "e_pmDE",
+    "plx": "Plx",
+    "plx_err": "e_Plx",
+    "mag": "Gmag",
+    "mag_err": "e_gmag",
+    "color_excess": "corrected_color_excess",
+    "color_excess_sigma": "corrected_color_excess_sigma",
+    "color": "color",
+    "color_err": "e_color",
+    "ruwe": "RUWE",
+    "rv": "RV",
 }
 
 # 6.2 配置辅助函数
@@ -553,7 +582,7 @@ MANIFEST = {
     # --- Mel 25: Hyades ---
     IDX_FIELD_CLUSTER_MEL25: _make_gaia_entry(
         IDX_FIELD_CLUSTER_MEL25,
-        "gaiadr3_mel25_wide.parquet",
+        "gaiadr3_mel25_wide.fits",
     ),
     IDX_FIELD_CLUSTER_MEL25_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_MEL25_SEEDS,

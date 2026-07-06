@@ -124,7 +124,7 @@ class ClusterConfigManager:
             self, 
             cluster_id: str, 
             input_data: pd.DataFrame = None, 
-            metric: str = "median", 
+            metric: str = "mean", 
             use_gaia_raw: bool = True
         ) -> dict:
         """
@@ -147,7 +147,7 @@ class ClusterConfigManager:
         metric_mode = metric.lower()
         
         self.logger.info(
-            f"🧬 [资产精确重建] 启动重建管线 | 目标: {cluster_key} | "
+            f"🧬 [资产精确重建] 启动重建管线 | 目标: {cluster_id} | "
             f"算子: {metric_mode.upper()} | 物理源: {'Gaia原始仓' if use_gaia_raw else 'Hunt清洗仓'}"
         )
 
@@ -190,7 +190,7 @@ class ClusterConfigManager:
                             g.mag as g_mag, g.color as bp_rp, 
                             0.0 as extinction_g   -- Gaia 原始表无消光改正
                         FROM core_members cm
-                        INNER JOIN aln_m45_field g ON cm.id = g.id
+                        INNER JOIN aln_{cluster_id}_field g ON cm.id = g.id
                     """
                 else:
                     self.logger.info("🧹 [数据源：Hunt 清洗仓] 提取核心骨干星 Hunt 视差消光改正参数...")
@@ -240,8 +240,9 @@ class ClusterConfigManager:
             pmdec_ref = float(np.mean(pmdec_vals))
 
             # 传统标准差弥散
-            pmra_disp = max(float(np.std(pmra_vals)), 0.1)
-            pmdec_disp = max(float(np.std(pmdec_vals)), 0.1)
+            pmra_disp = float(np.std(pmra_vals))
+            pmdec_disp = float(np.std(pmdec_vals))
+            plx_disp = np.std(plx_vals)
 
             # 传统皮尔逊相关系数
             cov_matrix = np.cov(pmra_vals, pmdec_vals)
@@ -260,8 +261,9 @@ class ClusterConfigManager:
 
             pmra_mad = np.median(np.abs(pmra_vals - pmra_ref))
             pmdec_mad = np.median(np.abs(pmdec_vals - pmdec_ref))
-            pmra_disp = max(float(1.4826 * pmra_mad), 0.1)
-            pmdec_disp = max(float(1.4826 * pmdec_mad), 0.1)
+            pmra_disp = float(1.4826 * pmra_mad)
+            pmdec_disp = float(1.4826 * pmdec_mad)
+            plx_disp = np.std(plx_vals)
 
             # 鲁棒相关系数计算
             rem_ra = pmra_vals - pmra_ref
@@ -313,12 +315,26 @@ class ClusterConfigManager:
             "PMDEC_DISPERSION": pmdec_disp,
             "PM_CORR": pm_corr,
             "DISTANCE_PC": distance_pc,
-            "PLX_ERROR": 0.2,
+            "PLX_ERROR": plx_disp,
             "CMD_DEV": 0.8 if use_gaia_raw else 0.3, # Hunt 改正消光后 CMD 色散散布会显著降低
             "PHOT_EXTINCTION_AG": avg_extinction,     # 🚀 新增消光资产项
             "MAG_CORRECTED": not use_gaia_raw,        # 🚀 新增星等改正状态标记
             "RECONSTRUCTED": True,
         }
+
+        self.logger.info(
+            f'''所有星团的参数为：
+            CENTER_RA = {reconstructed_params["CENTER_RA"]},
+            CENTER_DE = {reconstructed_params["CENTER_DEC"]},
+            PLX_REF = {reconstructed_params["PLX_REF"]},
+            PLX_ERROR = {reconstructed_params["PLX_ERROR"]},
+            PMRA_REF = {reconstructed_params["PMRA_REF"]}
+            PMDEC_REF = {reconstructed_params["PMDEC_REF"]},
+            PMRA_DISPERSION = {reconstructed_params["PMRA_DISPERSION"]},
+            PMDEC_DISPERSION = {reconstructed_params["PMDEC_DISPERSION"]},
+            DISTANCE_PC = {reconstructed_params["DISTANCE_PC"]}.
+            '''
+        )
 
         # --- 🎯 6. 动态追加：调用 3D UVW 速度反演引擎 (向下透传高纯度核心骨干星数据集) ---
         uvw_data = self.reconstruct_cl_params_ex_from_db(
@@ -394,7 +410,7 @@ class ClusterConfigManager:
                     SELECT 
                         g.ra, g.dec, g.plx, g.pmra, g.pmdec, g.rv 
                     FROM core_members cm
-                    INNER JOIN aln_m45_field g ON cm.id = g.id
+                    INNER JOIN aln_{cluster_id}_field g ON cm.id = g.id
                     WHERE g.plx > 0 AND g.rv IS NOT NULL AND NOT isnan(g.rv)
                 """
             else:
