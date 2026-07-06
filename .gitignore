@@ -239,6 +239,7 @@ NOTES.md
 
 # 排除大型外部工具和二进制文件
 tools/external/
+research/hunt24-audit-backup/
 
 *.zip
 *.pdf
