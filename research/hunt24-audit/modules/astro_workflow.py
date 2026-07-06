@@ -309,9 +309,12 @@ class AstroWorkflow:
         st_sql = f"SELECT {col_x}, count(*) FROM {self.t_master} WHERE {col_x} IS NOT NULL GROUP BY {col_x}"
         stats_raw = self.db.execute(st_sql).fetchall()
         stats_cross = {row[0]: row[1] for row in stats_raw}
-        self.logger.info(
-            f"📊 [交叉审计] Matched: {stats_cross.get('Matched', 0)} | PG Only: {stats_cross.get('PG Only', 0)} | Ref Only: {stats_cross.get('Ref Only', 0)}"
-        )
+        self.logger.info(f"=" * 60)
+        self.logger.info(f"📊 [交叉审计] 结果")
+        self.logger.info(f"    Matched: {stats_cross.get('Matched', 0)}")
+        self.logger.info(f"    PG Only: {stats_cross.get('PG Only', 0)}")
+        self.logger.info(f"    Ref Only: {stats_cross.get('Ref Only', 0)}")
+        self.logger.info(f"=" * 60)
 
         return {
             "status": "success",
@@ -372,12 +375,18 @@ class AstroWorkflow:
             # 这里的 WHERE 条件不仅判断 audit_status 不为空，还要限定对应交叉匹配类型的星源
             # 从而保证 PG Only 的报告里只有 PG Only，Ref Only 的报告里只有 Ref Only
             col_x = cfg.MASTER_COLS["X_MATCH"]
-            x_match_val = "PG Only" if audit_type == "pg_only" else "Ref Only" if audit_type == "ref_only" else None
-            
+            x_match_val = (
+                "PG Only"
+                if audit_type == "pg_only"
+                else "Ref Only" if audit_type == "ref_only" else None
+            )
+
             if x_match_val:
                 sql_filter = f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL AND {col_x} = '{x_match_val}'"
             else:
-                sql_filter = f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL"
+                sql_filter = (
+                    f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL"
+                )
 
             self.db.register_view_from_sql(v_report, sql_filter)
             return v_report
@@ -593,7 +602,8 @@ class AstroWorkflow:
         return df_clean
 
     @astro_checkpoint(
-        cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res", force_refresh=False
+        cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
+        force_refresh=False,
     )
     def run_pgmm(self, ctx_cluster):
         """驱动核心 GMM 计算流水线：执行双轨制内核推理并固化结果。

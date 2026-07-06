@@ -438,13 +438,18 @@ FIELDS_GAIA_ARCHIVE = {
     "plx": "Plx",
     "plx_err": "e_Plx",
     "mag": "Gmag",
-    "mag_err": "e_gmag",
+    "mag_err": "e_Gmag",
+    "bpmag":"BPmag",
+    "bpmag_err":"e_BPmag",
+    "rpmag":"RPmag",
+    "rpmag_err":"e_RPmag",
     "color_excess": "corrected_color_excess",
     "color_excess_sigma": "corrected_color_excess_sigma",
     "color": "color",
-    "color_err": "e_color",
+    "color_err": "color_err",
     "ruwe": "RUWE",
     "rv": "RV",
+    "rv_err":"e_RV",
 }
 
 # 6.2 配置辅助函数
@@ -562,7 +567,7 @@ MANIFEST = {
     # --- M45: Pleiades ---
     IDX_FIELD_CLUSTER_M45: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M45,
-        "gaiadr3_m45_wide.parquet",
+        "gaiadr3_m45_wide.fits",
     ),
     IDX_FIELD_CLUSTER_M45_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M45_SEEDS,
@@ -572,7 +577,7 @@ MANIFEST = {
     # --- M44: Praesepe ---
     IDX_FIELD_CLUSTER_M44: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M44,
-        "gaiadr3_m44_wide.parquet",
+        "gaiadr3_m44_wide.fits",
     ),
     IDX_FIELD_CLUSTER_M44_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M44_SEEDS,
@@ -591,7 +596,7 @@ MANIFEST = {
     # --- Mel111: Coma Berenices ---
     IDX_FIELD_CLUSTER_MEL111: _make_gaia_entry(
         IDX_FIELD_CLUSTER_MEL111,
-        "gaiadr3_mel111_wide.parquet",
+        "gaiadr3_mel111_wide.fits",
     ),
     IDX_FIELD_CLUSTER_MEL111_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_MEL111_SEEDS,
@@ -600,7 +605,7 @@ MANIFEST = {
     # --- M67: NGC 2682 ---
     IDX_FIELD_CLUSTER_M67: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M67,
-        "gaiadr3_m67_wide.parquet",
+        "gaiadr3_m67_wide.fits",
     ),
     IDX_FIELD_CLUSTER_M67_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M67_SEEDS,
@@ -610,7 +615,7 @@ MANIFEST = {
     # --- M13: NGC 6205 (Globular Cluster) ---
     IDX_FIELD_CLUSTER_M13: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M13,
-        "gaiadr3_m13_wide.parquet",
+        "gaiadr3_m13_wide.fits",
     ),
     IDX_FIELD_CLUSTER_M13_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M13_SEEDS,
@@ -620,7 +625,7 @@ MANIFEST = {
     # --- M41: NGC 2287 (Little Beehive) ---
     IDX_FIELD_CLUSTER_M41: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M41,
-        "gaiadr3_m41_wide.parquet",
+        "gaiadr3_m41_wide.fits",
     ),
     IDX_FIELD_CLUSTER_M41_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M41_SEEDS,

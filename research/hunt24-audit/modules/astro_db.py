@@ -49,7 +49,7 @@ class AstroDB:
         self._connection_active = True
         self.data_manifest = manifest
 
-        self._setup_spatial_macros()
+        self._setup_db_macros()
 
         # ✨ 如果是全新的数据库，在此处执行数据结构/数仓初始化
         if is_new_db:
@@ -198,6 +198,7 @@ class AstroDB:
         v_audit_input = cfg.TMPL.V_ADT_INPUT.format(src=v_src)
 
         sql = self._get_enrichment_sql(v_src, t_base, threshold=threshold)
+        self.logger.debug(f"正在注册审计输入视图: {v_audit_input} (源: {v_src}, sql: {sql})")
         self.register_view_from_sql(v_audit_input, sql)
 
         count = self.get_row_count(v_audit_input)
@@ -269,6 +270,7 @@ class AstroDB:
             df = self._fetch_simbad_data(params)
 
         df = self._standardize_dataframe(df, numeric_cols=physics_cols)
+        # 转存到 'snapshots' 目录
         df.to_parquet(result_path, index=False)
 
     # --- 注册接口 ---
@@ -376,12 +378,29 @@ class AstroDB:
         except Exception as e:
             self.logger.error(f"无法获取表 {table_name} 的结构: {e}")
 
-    def _setup_spatial_macros(self):
-        """注册球面距离计算宏 (Haversine Formula)。"""
-        self.logger.info("📐 正在注册空间计算宏: haversine_distance (单位: Degree)")
+    # def _setup_spatial_macros(self):
+    #     """注册球面距离计算宏 (Haversine Formula)。"""
+    #     self.logger.info("📐 正在注册空间计算宏: haversine_distance (单位: Degree)")
 
-        # 针对天文学应用，直接返回度数（Degree）是最合理的
+    #     # 针对天文学应用，直接返回度数（Degree）是最合理的
+    #     sql = """
+    #     CREATE OR REPLACE MACRO haversine_distance(ra1, dec1, ra2, dec2) AS (
+    #         DEGREES(2 * ASIN(SQRT(
+    #             POW(SIN(RADIANS(dec2 - dec1) / 2), 2) +
+    #             COS(RADIANS(dec1)) * COS(RADIANS(dec2)) *
+    #             POW(SIN(RADIANS(ra2 - ra1) / 2), 2)
+    #         )))
+    #     );
+    #     """
+    #     self.con.execute(sql)
+
+    def _setup_db_macros(self):
+        """注册天文学相关的计算宏（空间距离与色余修正）。"""
+        self.logger.info("📐 正在注册空间计算宏: haversine_distance (单位: Degree)")
+        self.logger.info("✨ 正在注册色余与测光误差修正宏: calc_corrected_color_excess, calc_corrected_color_excess_sigma, calc_e_color")
+
         sql = """
+        -- 1. 球面距离计算宏 (Haversine Formula)
         CREATE OR REPLACE MACRO haversine_distance(ra1, dec1, ra2, dec2) AS (
             DEGREES(2 * ASIN(SQRT(
                 POW(SIN(RADIANS(dec2 - dec1) / 2), 2) +
@@ -389,7 +408,32 @@ class AstroDB:
                 POW(SIN(RADIANS(ra2 - ra1) / 2), 2)
             )))
         );
+
+        -- 2. 修正后的色余计算宏
+        CREATE OR REPLACE MACRO calc_corrected_color_excess(formal_color_excess) AS (
+            CASE 
+                WHEN formal_color_excess < 0.5 
+                    THEN formal_color_excess - 1.154360 + 0.033772 * formal_color_excess + 0.032277 * POW(formal_color_excess, 2)
+                WHEN formal_color_excess >= 0.5 AND formal_color_excess < 4.0 
+                    THEN formal_color_excess - 1.162004 + 0.011464 * formal_color_excess + 0.049255 * POW(formal_color_excess, 2) - 0.005879 * POW(formal_color_excess, 3)
+                WHEN formal_color_excess >= 4.0 
+                    THEN formal_color_excess - 1.057572 + 0.260015 * formal_color_excess - 0.049302 * POW(formal_color_excess, 2) + 0.002879 * POW(formal_color_excess, 3)
+                ELSE NULL
+            END
+        );
+
+        -- 3. 色余标准差计算宏
+        CREATE OR REPLACE MACRO calc_corrected_color_excess_sigma(gmag) AS (
+            0.0059898 + 8.817481e-12 * POW(gmag, 7.618399)
+        );
+
+        -- 4. 颜色综合误差计算宏
+        CREATE OR REPLACE MACRO calc_e_color(e_bpmag, e_rpmag) AS (
+            SQRT(POW(e_bpmag, 2) + POW(e_rpmag, 2))
+        );
         """
+        
+        # DuckDB 支持在单个 execute() 中执行多条以分号分隔的 SQL 语句
         self.con.execute(sql)
 
     def get_row_count(self, name, column=None):
@@ -522,7 +566,7 @@ class AstroDB:
                 continue
 
             if should_sync:
-                self.logger.info(f"🔄 正在同步数据: {k} -> {result_path}")
+                self.logger.info(f"🔄 正在下载并转换数据: {k} -> {result_path}")
                 try:
                     self._execute_sync_task(config, result_path)
                     file_exists = True  # 同步成功后更新状态
@@ -530,23 +574,42 @@ class AstroDB:
                     self.logger.error(f"❌ 同步 {k} 失败: {e}")
                     continue
             else:
-                self.logger.debug(f"⏭️  数据文件 {k}.parquet 已存在，跳过下载。")
+                self.logger.info(f"⏭️  数据文件 {k}.parquet 已存在，跳过下载。")
 
+            # 从 .parquet 中注册数据库
             if force or not table_exists:
                 self.logger.info(f"📋 正在注册数据库表: {t_raw}")
-                self.register_table_from_file(t_raw, result_path)
+                calc_custom_cols = False
+                # str = f"raw_{target_cluster_id}_field".lower()
+                # self.logger.info(f"🔍 检查是否需要计算自定义列: {str} == {t_raw} ?")
+                if t_raw.lower() == f"raw_{target_cluster_id}_field".lower() and target_cluster_id:
+                    calc_custom_cols = True    
+                self.register_table_from_file(t_raw, result_path, calc_custom_cols=calc_custom_cols)
             else:
                 self.logger.info(f"✅ 表 {t_raw} 已在内存中就绪，无需重新注册。")
 
         self.logger.info("✨ AstroDB L1 原始数据环境导入完成。")
 
-    def register_table_from_file(self, table_name, file_path):
+    def register_table_from_file(self, table_name, file_path, calc_custom_cols=False):
         """将 Parquet 文件物化为 DuckDB 物理表。"""
         abs_path = Path(file_path).resolve().as_posix()
         try:
-            self.con.execute(
-                f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{abs_path}')"
-            )
+            if calc_custom_cols:
+                sql = f"""
+                    CREATE OR REPLACE TABLE {table_name} AS 
+                    SELECT *, 
+                    calc_corrected_color_excess(color_excess) AS corrected_color_excess,
+                    calc_corrected_color_excess_sigma(gmag) AS corrected_color_excess_sigma,
+                    calc_e_color(e_bpmag, e_rpmag) AS color_err 
+                    FROM read_parquet('{abs_path}')
+                    """
+                # 仅在首次注册时添加自定义列
+                self.con.execute(sql)
+                self.logger.debug(f"📦 已由sql物化物理表(含自定义计算列). SQL语句: {sql} ")
+            else:
+                self.con.execute(
+                    f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{abs_path}')"
+                )
             count = self.get_row_count(table_name)
             self.logger.info(f"📦 已物化物理表: {table_name} (行数: {count})")
             self.logger.info(f"📦 源文件: {abs_path}")
