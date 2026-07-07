@@ -170,7 +170,7 @@ class ClusterConfigManager:
             try:
                 # 🎯 【核心 SQL 修改】：利用 CTE 自收敛计算临时几何质心，空间过滤 + 概率切片 Top 400
                 if use_gaia_raw:
-                    self.logger.info("📡 [数据源：Gaia 原始仓] 关联 aln_m45_field 提取核心骨干星原始相空间数据...")
+                    self.logger.info(f"📡 [数据源：Gaia 原始仓] 关联 aln_{cluster_id}_field 提取核心骨干星原始相空间数据...")
                     sql = f"""
                         WITH dynamic_center AS (
                             SELECT median(ra) AS c_ra, median(dec) AS c_dec 

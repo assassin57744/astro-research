@@ -79,28 +79,7 @@ class StarCluster:
 
     # 修改或追加到现有的 modules/cluster.py 的 StarCluster 类中
 
-    def load_or_reconstruct_parameters(self, mode: str = "static") -> bool:
-        """
-        🚀 [富领域行为] 统一负责星团物理属性的装载或自适应重建。
-        
-        参数:
-        - mode: "db" 代表启动高精度自我一致性物理资产反演引擎进行重建；
-                "static" 代表常规级联检索（内存/DuckDB/config.py）。
-        """
-        if mode == "db":
-            self.logger.info(f"🧬 [Domain] 触发星团相空间物理参数的自适应反演与自我重建...")
-            # 1. 核心行为内聚：让实体对象自己调用底座去重建自己
-            recon_res = self.cfg_mgr.reconstruct_cl_params_from_db(self.id)
-            if not recon_res:
-                self.logger.warning("⚠️ 历史数据重建返回空结果，将降级加载静态或已有参数。")
-                return self._hydrate_from_config()
-                
-            # 2. 重建成功后，刷新当前对象的内部物理状态属性
-            self._hydrate_from_config()
-            return True
-        else:
-            # 常规模式下，平滑加载已有参数
-            return self._hydrate_from_config()
+
 
     def _hydrate_from_config(self) -> bool:
         """从底座配置管理器中将最新的物理先验参数同步（Hydrate）到对象的内存属性中"""
@@ -127,3 +106,26 @@ class StarCluster:
         except Exception as e:
             self.logger.error(f"❌ 参数装载并同步至内存状态时崩溃: {e}")
             return False
+        
+    def load_or_reconstruct_parameters(self, mode: str = "file") -> bool:
+        """
+        🚀 [富领域行为] 统一负责星团物理属性的装载或自适应重建。
+        
+        参数:
+        - mode: "db" 代表启动高精度自我一致性物理资产反演引擎进行重建；
+                "file" 代表从文件加载参数。
+        """
+        if mode == "db":
+            self.logger.info(f"🧬 [Domain] 触发星团相空间物理参数的自适应反演与自我重建...")
+            # 1. 核心行为内聚：让实体对象自己调用底座去重建自己
+            recon_res = self.cfg_mgr.reconstruct_cl_params_from_db(self.id)
+            if not recon_res:
+                self.logger.warning("⚠️ 历史数据重建返回空结果，将降级加载静态或已有参数。")
+                return self._hydrate_from_config()
+                
+            # 2. 重建成功后，刷新当前对象的内部物理状态属性
+            self._hydrate_from_config()
+            return True
+        else:
+            # 常规模式下，平滑加载已有参数
+            return self._hydrate_from_config()
