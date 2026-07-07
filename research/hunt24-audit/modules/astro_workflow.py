@@ -1,32 +1,25 @@
 import logging
-import os
-from datetime import datetime
-import pandas as pd
-import numpy as np
-from astroquery.simbad import Simbad  # pylint: disable=unused-import
-from utils.decorators import astro_checkpoint  # 1. 导入装饰器
 
-# 扁平化后的内部导入
+import pandas as pd
+from astroquery.simbad import Simbad  # pylint: disable=unused-import
+
+from utils.decorators import astro_checkpoint
+
 from modules.astro_db import AstroDB
 from modules.pg_core import PriorGMM
-from modules.pg_core_ex import PriorGMMEx  # 🧪 引入独立测试核
+from modules.pg_core_ex import PriorGMMEx
 from modules.validator import UnifiedMemberValidator
 from modules.transformer import AstroTransformer
+from modules.reporter import render_final_report, render_all_modes_comparison
+from modules.cluster import StarCluster
 
 import config as cfg
 from config import (
-    IDX_CG20,
-    IDX_HEYL,
-    IDX_HUNT,
-    IDX_DR2IDX,
-    IDX_IDS_SIMBAD,
-    IDX_GMM,
     CLUSTERS,
     MANIFEST,
     GMM_CONFIG,
     MEMBER_SAMPLE_THRESHOLD,
     STD_COLS,
-    TMPL,
     GOLDEN_SAMPLE_THRESHOLD,
 )
 
@@ -45,7 +38,7 @@ class AstroWorkflow:
 
     def __init__(
         self,
-        db_instance: AstroDB,
+        db_instance: AstroDB | None = None,
         target_cluster=None,
         target_category=None,
         mode="3d",
@@ -54,19 +47,26 @@ class AstroWorkflow:
         """初始化工作流实例。
 
         Args:
-            db_instance (AstroDB): 活跃的 AstroDB 数据库对象。
+            db_instance (AstroDB | None): 活跃的 AstroDB 数据库对象。
+                为 None 时自动创建新实例（工作流关闭时自动释放）。
             target_cluster (str): 当前处理的星团 ID。
             target_category (str): 当前审计的类别。
             mode (str): 算法执行模式。
             algo (str): 聚类算法名称 (如 'dbscan', 'hdbscan')。
         """
-        self.db = db_instance
+        if db_instance is None:
+            self.db = AstroDB(manifest=cfg.MANIFEST)
+            self._owned_db = True
+        else:
+            self.db = db_instance
+            self._owned_db = False
+
         self.target_cluster = target_cluster
         self.target_category = target_category
         self.mode = mode
         self.algo = algo
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
-        self.manifest = getattr(db_instance, "data_manifest", {})
+        self.manifest = getattr(self.db, "data_manifest", {})
         self.t_master = cfg.TMPL.T_MASTER.format(
             cluster=self.target_cluster.lower(),
             category=self.target_category,
@@ -694,3 +694,271 @@ class AstroWorkflow:
         # 此处 master 表的数据还不完整, 不是合适导出的时机
         # self.db.save_to_warehouse(self.t_master)
         return self.t_master
+
+
+    # =========================================================================
+    # 端到端管线入口
+    # =========================================================================
+
+    def run(self, reconstruct_mode="file", result_mode="brief"):
+        """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
+        self.logger.info(f"🔄 启动闭环工作流: {self.target_cluster} [{self.mode}]")
+        try:
+            # [1/5] 数据同步
+            self.logger.info("📦 [1/5] 正在同步物理数据源...")
+            self.db.import_raw(target_cluster_id=self.target_cluster, force=False)
+
+            # [2/5] 数据对齐
+            ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
+            ctx_cluster["id"] = self.target_cluster
+            ref_tables = [
+                ctx_cluster["FIELD_IDX"],
+                ctx_cluster["SEED_IDX"],
+                self.target_category,
+                cfg.IDX_DR2IDX,
+                cfg.IDX_IDS_SIMBAD,
+            ]
+            self.logger.info(
+                f"📐 [2/5] 正在执行数据对齐 ({self.target_cluster}, 特征空间: {self.mode})..."
+            )
+            self.data_standardize_all(ref_tables, ctx_cluster)
+            self.logger.info("✅ 数据准备阶段完成。")
+
+            # [2.5/5] 星团领域实体参数重建
+            self.logger.info(f"🌌 [2.5/5] 载入目标星团领域实体模型: {self.target_cluster}")
+            cl = StarCluster(self.target_cluster, db_instance=self.db)
+            success = cl.load_or_reconstruct_parameters(mode=reconstruct_mode)
+            self.logger.info(
+                f"✅ 星团领域模型物理状态就绪。当前反演距离: {1000.0 / cl.plx_ref:.1f} pc"
+            )
+            if not success:
+                self.logger.error(
+                    f"❌ 无法初始化星团 {self.target_cluster} 的物理资产，管线终止。"
+                )
+                return None
+
+            return self._run_compute_pipeline(ctx_cluster, result_mode)
+        except Exception:
+            self.logger.error("❌ 流水线在运行期间发生严重崩溃", exc_info=True)
+            raise
+        finally:
+            if self._owned_db:
+                self.db.close()
+                self.logger.info("🔒 数据库连接已释放。")
+
+    def _run_compute_pipeline(self, ctx_cluster: dict, result_mode: str) -> dict | None:
+        """执行 GMM → 后处理 → 交叉审计 → 深度审计 → 导出 → 报告 计算阶段。
+
+        假定数据导入、标准化和星团参数重建已由调用方完成。
+        """
+        # [3/5] GMM 成员识别
+        self.logger.info(
+            f"🧠 [3/5] 启动 GMM 成员识别内核 (特征空间: {self.mode}, 算法: {self.algo})..."
+        )
+        t_result = self.run_pgmm(ctx_cluster)
+        self.logger.info(f"✨ 算法推断完成，结果表: {t_result}")
+
+        # [4/5] 后处理
+        self.logger.info("📊 [4/5] 正在合成分析宽表并提取候选成员视图...")
+        v_all = self.post_pgmm(t_result)
+        if v_all.get("status") != "success":
+            self.logger.error(f"❌ 后处理流程失败: {v_all.get('message')}")
+            return None
+        self.logger.info("✅ 数据处理流程结束，转入交叉审计阶段。")
+
+        # [5/5] 交叉审计
+        self.logger.info(
+            f"⚖️ [5/5] 执行多源文献交叉审计, 参考类别: {self.target_category}"
+        )
+        target_aln_view = self.manifest[self.target_category]["aln_view"].format(
+            cluster=self.target_cluster.lower()
+        )
+        audit_res = self.prepare_audit_data(v_all["v_candidates"], target_aln_view)
+
+        if audit_res.get("status") != "success":
+            self.logger.warning(
+                f"⚠️ 交叉比对审计未完全成功: {audit_res.get('message')}"
+            )
+            # 即使审计不完整也尝试出报告
+            return render_final_report(
+                self.target_cluster, self.target_category, self.mode, self.algo,
+                ctx_cluster, v_all, audit_res, {}, {}, self.logger,
+            )
+
+        self.logger.info(
+            f"✅ 交叉审计完成，"
+            f"PG Only: {audit_res.get('v_audit_pg_only')}, "
+            f"Ref Only: {audit_res.get('v_audit_ref_only')}"
+        )
+
+        # 深度审计
+        v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref = (
+            self._execute_deep_audits(audit_res)
+        )
+
+        # 导出
+        self._export_if_needed(audit_res, v_final_pg, v_final_ref, result_mode)
+
+        # 报告
+        return render_final_report(
+            self.target_cluster, self.target_category, self.mode, self.algo,
+            ctx_cluster, v_all, audit_res, deep_stats_pg, deep_stats_ref, self.logger,
+        )
+
+    # =========================================================================
+    # 深度审计
+    # =========================================================================
+
+    def _execute_deep_audits(self, audit_res: dict) -> tuple:
+        """对交叉比对产生的 PG Only / Ref Only 候选分别执行深度审计。
+
+        Returns:
+            (v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref)
+        """
+        v_audit_pg_only = audit_res.get("v_audit_pg_only")
+        v_audit_ref_only = audit_res.get("v_audit_ref_only")
+        x_stats = audit_res.get("stats", {})
+
+        # PG Only 深度审计
+        if not v_audit_pg_only or x_stats.get("PG Only", 0) == 0:
+            self.logger.warning("⚠️ 未找到算法独有候选 (PG Only)，跳过 PG Only 深度审计。")
+            v_final_pg, deep_stats_pg = None, {}
+        else:
+            self.logger.info(f"🔍 准备 PG Only 深度审计，目标视图: {v_audit_pg_only}")
+            v_final_pg, deep_stats_pg = self._run_deep_audit(
+                v_audit_pg_only, "pg_only"
+            )
+
+        # Ref Only 深度审计
+        if not v_audit_ref_only or x_stats.get("Ref Only", 0) == 0:
+            self.logger.warning(
+                "⚠️ 未找到文献独有候选 (Ref Only)，跳过 Ref Only 深度审计。"
+            )
+            v_final_ref, deep_stats_ref = None, {}
+        else:
+            self.logger.info(f"🔍 准备 Ref Only 深度审计，目标视图: {v_audit_ref_only}")
+            v_final_ref, deep_stats_ref = self._run_deep_audit(
+                v_audit_ref_only, "ref_only"
+            )
+
+        return v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref
+
+    def _run_deep_audit(self, v_audit_view: str, audit_type: str) -> tuple:
+        """对单个候选视图执行深度审计。
+
+        Returns:
+            (report_view_name | None, {audit_status: count})
+        """
+        v_result = self.run_audit(target=v_audit_view, audit_type=audit_type)
+        if not v_result:
+            return None, {}
+
+        sql = (
+            f"SELECT audit_status, count(*) FROM {v_result} "
+            f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
+        )
+        stats = dict(self.db.con.execute(sql).fetchall())
+        return v_result, stats
+
+    # =========================================================================
+    # 结果导出
+    # =========================================================================
+
+    def _export_if_needed(self, audit_res, v_final_pg, v_final_ref, result_mode):
+        """按需将管线产出物导出为 CSV/Parquet 文件。"""
+        if result_mode != "detailed":
+            self.logger.info("⏩ 跳过物理文件导出 (通过 CLI 参数禁用)。")
+            return
+
+        self.logger.info("💾 [Export] 正在执行耗时的数据资产导出任务...")
+
+        export_base = cfg.TMPL.FILE_EXPORT_BASE.format(
+            cluster=self.target_cluster,
+            category=self.target_category,
+            mode=self.mode,
+            algo=self.algo,
+        )
+
+        self.db.export_table(self.t_master, export_dir=cfg.RESULTS_DIR)
+
+        if v_final_pg:
+            self.db.export_table(
+                v_final_pg,
+                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(
+                    base=export_base + "_pg_only"
+                ),
+                format="csv",
+                export_dir=cfg.RESULTS_DIR,
+            )
+
+        if v_final_ref:
+            self.db.export_table(
+                v_final_ref,
+                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(
+                    base=export_base + "_ref_only"
+                ),
+                format="csv",
+                export_dir=cfg.RESULTS_DIR,
+            )
+
+        self.logger.info("✅ 结果导出完成。")
+
+    # =========================================================================
+    # 全模式批量运行
+    # =========================================================================
+
+    @staticmethod
+    def run_all_modes(
+        target_cluster_id: str,
+        target_category: str,
+        algo: str,
+        result_mode: str,
+        reconstruct_mode: str = "file",
+    ) -> None:
+        """循环所有特征空间模式，共享数据准备，产出汇总对比报告。"""
+        logger = logging.getLogger("AstroPipeline")
+        valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
+        db = AstroDB(manifest=cfg.MANIFEST)
+
+        # 星团上下文（所有模式共享）
+        ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
+        ctx_cluster["id"] = target_cluster_id
+        ref_tables = [
+            ctx_cluster["FIELD_IDX"],
+            ctx_cluster["SEED_IDX"],
+            target_category,
+            cfg.IDX_DR2IDX,
+            cfg.IDX_IDS_SIMBAD,
+        ]
+
+        try:
+            # --- 一次性数据准备（所有模式共享）---
+            logger.info("📦 正在同步物理数据源...")
+            db.import_raw(target_cluster_id=target_cluster_id, force=False)
+
+            wf_setup = AstroWorkflow(
+                db, target_cluster_id, target_category, valid_modes[0], algo
+            )
+            wf_setup.data_standardize_all(ref_tables, ctx_cluster)
+            logger.info("✅ 数据准备阶段完成（全模式共享）。")
+
+            # 星团物理参数重建（所有模式共享）
+            logger.info(f"🌌 载入目标星团领域实体模型: {target_cluster_id}")
+            cl = StarCluster(target_cluster_id, db_instance=db)
+            cl.load_or_reconstruct_parameters(mode=reconstruct_mode)
+            logger.info(
+                f"✅ 星团领域模型物理状态就绪。当前反演距离: {1000.0 / cl.plx_ref:.1f} pc"
+            )
+
+            # --- 逐模式执行计算管线 ---
+            all_results = []
+            for mode in valid_modes:
+                wf = AstroWorkflow(db, target_cluster_id, target_category, mode, algo)
+                summary = wf._run_compute_pipeline(ctx_cluster, result_mode)
+                if summary:
+                    all_results.append(summary)
+
+            render_all_modes_comparison(all_results, logger)
+        finally:
+            db.close()
+            logger.info("🔒 数据库连接已释放。")
