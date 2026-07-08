@@ -1,154 +1,188 @@
-# modules/cluster_seed_extractor.py
+# -*- coding: utf-8 -*-
+"""
+modules/cluster_seed_extractor.py
+
+🎯 星团种子提取器（无监督前置粗筛引擎）。
+定位：Pipeline 的前置粗筛 Stage。
+重构要点：
+  1. 剥离了复杂的 KDE 数理算法和标准化逻辑，完全托管给 astro_membership 子包内的通用内核 helpers。
+  2. 保持对外业务接口 `extract_seeds` 的完全兼容，确保上游主工作流零污染。
+"""
+
 import logging
 import numpy as np
 import pandas as pd
-from sklearn.neighbors import NearestNeighbors
-from sklearn.neighbors import KernelDensity
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, HDBSCAN
+
+# 引入物理/数理辅助模块中的通用核心自适应算子
+from modules.astro_membership.helpers import calculate_adaptive_eps_kde
 
 
 class ClusterSeedExtractor:
     """
     🎯 星团种子提取器（无监督粗筛引擎）。
 
-    定位：Pipeline 的前置粗筛 Stage。
     物理语义：
-      1. 基于 Castro-Ginard et al. (2018) 论文逻辑，自适应感知天区本征恒星背景密度，动态解算最佳领域半径 EPS。
-      2. 运行精巧的几何空间硬截断（DBSCAN），大范围剔除银河系野星噪声，提取高纯度的成员星种子（Seeds），
-         为下游高阶概率精筛模型（如 PriorGMMEx）构建可靠的初始状态底座。
+      1. 通过调用 helpers 中的高斯核密度估计（KDE）重采样，自适应感知天区本征恒星背景密度，动态解算最佳邻域半径 EPS。
+      2. 运行高凝聚度硬截断（DBSCAN），大范围剔除银河系野星噪声，提取高纯度的成员星种子（Seeds），
+         为下游高阶概率精筛模型（如 BayesianGmmDisambiguation）构建可靠的初始状态底座。
     """
 
-    def __init__(self, min_pts: int = 9, num_simulations: int = 30):
+    def __init__(self, cluster_profile: dict = None, **kwargs):
         """
+        初始化粗筛引擎，100% 严格对接 config.py 中 CLUSTERS 字典的字段名。
+
         参数:
-        - min_pts (int): 构成密集核心星团所需的最小恒星点数（minPts）。论文推荐 5 ~ 9 颗星。
-        - num_simulations (int): KDE 随机背景重采样的迭代次数，用于完全消除天区内随机统计涨落带来的误差。
+        - cluster_profile (dict): 来自 config.CLUSTERS["M45"] 等星团的专属配置 Profile。
         """
         self.logger = logging.getLogger("AstroPipeline.ClusterSeedExtractor")
-        self.min_pts = min_pts
-        self.num_simulations = num_simulations
 
-        # 实际参与密度感知的物理相空间特征维度
-        self.features = ["ra", "dec", "plx", "pmra", "pmdec"]
+        # 🛡️ 兜底群落防线
+        profile = cluster_profile or {}
 
-    def calculate_adaptive_eps(self, field_stars_df: pd.DataFrame) -> float:
+        # 1. 严格映射 config.py 中的 "cluster_algo" 字段
+        self.cluster_algo = str(
+            profile.get("cluster_algo", kwargs.get("cluster_algo", "dbscan"))
+        ).lower()
+
+        # 2. 严格映射 config.py 中的 "dbscan_eps" 字段（支持 "auto" 或 浮点数）
+        self.dbscan_eps = profile.get("dbscan_eps", kwargs.get("dbscan_eps", "auto"))
+
+        # 3. 严格映射 config.py 中的 "dbscan_min_samples" 字段作为基础物理凝聚门限
+        self.min_pts = profile.get("dbscan_min_samples", kwargs.get("min_pts", 9))
+
+        # 4. 严格映射 config.py 中的 "hdbscan_min_cluster_size"
+        self.hdbscan_min_cluster_size = profile.get(
+            "hdbscan_min_cluster_size", kwargs.get("hdbscan_min_cluster_size", 15)
+        )
+
+        # 5. 严格映射 config.py 中的 "hdbscan_min_samples"
+        self.hdbscan_min_samples = profile.get(
+            "hdbscan_min_samples", kwargs.get("hdbscan_min_samples", None)
+        )
+
+        # 固定蒙特卡洛 KDE 重采样模拟深度（默认 30 次以达到科学无偏收敛）
+        self.num_simulations = kwargs.get("num_simulations", 30)
+
+    def extract_seeds(
+        self, field_stars_df: pd.DataFrame, features: list
+    ) -> pd.DataFrame:
         """
-        🧬 [核心物理算法] 动态感知局部天区背景密度，反演自适应的最佳领域半径 Epsilon (EPS)。
-
-        还原论文思路：
-          - Step A: 解算真实星表相空间的 (minPts - 1) 阶最近邻距离（k-NND）分布的极小值，感知高密度突变包络。
-          - Step B: 通过高斯核密度估计（KDE）重构无结构的平滑噪声统计底盘，计算背景随机聚集期望值。
-          - Step C: 算术平均调和两极，在“提高捕获率”与“防御野星污染”之间达成最优物理平衡。
-        """
-        # 剔除无效观测值，确保相空间矩阵完整
-        clean_df = field_stars_df[self.features].dropna()
-        n_samples = len(clean_df)
-
-        if n_samples <= self.min_pts:
-            self.logger.warning(
-                f"⚠️ 当前视场天区恒星样本量 ({n_samples}) 少于 minPts ({self.min_pts})，无法执行自适应调参！"
-            )
-            return -1.0
-
-        self.logger.info(
-            f"📡 [密度感知] 启动本征噪声线动态解算 | 样本量: {n_samples} | minPts: {self.min_pts}"
-        )
-
-        # 1. 特征矩阵标准化（核心工程防御：消除度、mas/yr、mas 之间的跨数量级标度残差，使欧氏距离具备物理意义）
-        X = clean_df.values
-        X_mean = X.mean(axis=0)
-        X_std = X.std(axis=0)
-        # 防止分母为 0 异常
-        X_std = np.where(X_std == 0, 1.0, X_std)
-        X_scaled = (X - X_mean) / X_std
-
-        # 论文设定：k 阶最近邻的 k = minPts - 1
-        k = self.min_pts - 1
-
-        # 🚀 步骤 A: 计算真实星表的 k-NND 突变谷值
-        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm="ball_tree").fit(X_scaled)
-        distances, _ = nbrs.kneighbors(X_scaled)
-        # 提取真实样本到其第 k 个最近邻居的特征距离
-        eps_knn = float(np.min(distances[:, k]))
-        self.logger.debug(
-            f"📊 [Step A] 真实相空间最近邻特征谷值 eps_knn = {eps_knn:.6f}"
-        )
-
-        # 🚀 步骤 B: 通过高斯 KDE 随机重采样构建平滑统计大盘
-        kde = KernelDensity(kernel="gaussian", bandwidth="scott").fit(X_scaled)
-        rand_min_distances = []
-
-        for i in range(self.num_simulations):
-            # 模拟生成一个完全无物理星团、只有本征随机涨落的平滑伪星表
-            X_rand = kde.sample(n_samples=n_samples, random_state=i)
-            nbrs_rand = NearestNeighbors(n_neighbors=k + 1, algorithm="ball_tree").fit(
-                X_rand
-            )
-            dist_rand, _ = nbrs_rand.kneighbors(X_rand)
-            rand_min_distances.append(np.min(dist_rand[:, k]))
-
-        # 对 30 次平滑背景期望取算术平均
-        eps_rand = float(np.mean(rand_min_distances))
-        self.logger.debug(
-            f"🎲 [Step B] {self.num_simulations} 次高斯底盘无结构随机期望 eps_rand = {eps_rand:.6f}"
-        )
-
-        # 🚀 步骤 C: 算术平均调和
-        optimal_eps = (eps_knn + eps_rand) / 2.0
-        self.logger.info(
-            f"🎯 [Step C] Castro-Ginard 调和完成！获得该天区自适应最优超参数: EPS = {optimal_eps:.4f}"
-        )
-
-        return optimal_eps
-
-    def extract_seeds(self, field_stars_df: pd.DataFrame, eps: float) -> pd.DataFrame:
-        """
-        🏃‍♂️ 执行无监督密度切割，剔除噪声，提取种子星。
+        从输入的混乱初始星表中，自适应提取出高纯度的凝聚种子（支持 DBSCAN 与 HDBSCAN 策略）。
 
         参数:
-        - field_stars_df: 包含局部视场恒星全大盘的原始 DataFrame。
-        - eps: 由 calculate_adaptive_eps 动态反演得到的自适应半径。
+        - field_stars_df (pd.DataFrame): 某星团靶场的初始全量观测星表（包含 id 和相空间各特征列）。
+        - features (list): 参与计算的相空间特征列名列表。
 
         返回:
-        - pd.DataFrame: 提取出的高纯度种子星副本（df_seeds），附带 'seed_label' 列。
+        - pd.DataFrame: 筛选出的高纯度星团种子星子集，保持原数据帧的所有物理列，并附加 'cluster_label' 列。
         """
-        if eps <= 0:
-            self.logger.error("❌ 输入的 EPS 参数非法，拒绝提取种子，返回空表。")
-            return pd.DataFrame(columns=field_stars_df.columns)
-
         # 浅拷贝防止破坏外层原始星表
         working_df = field_stars_df.copy()
 
-        # 保持与自适应解算时 100% 一致的标准化特征标度
-        clean_mask = working_df[self.features].notna().all(axis=1)
-        X_raw = working_df.loc[clean_mask, self.features].values
+        # 1. 过滤由于高维特征残缺导致的 NaN 样本
+        clean_mask = working_df[features].notna().all(axis=1)
+        X_raw = working_df.loc[clean_mask, features].values
 
         if len(X_raw) == 0:
-            self.logger.warning("⚠️ 没有有效恒星样本满足相空间特征完整性，无法提取。")
+            self.logger.warning(
+                "⚠️ 没有有效恒星样本满足相空间特征完整性，拒绝提取种子，返回空表。"
+            )
             return pd.DataFrame(columns=field_stars_df.columns)
 
-        X_scaled = (X_raw - X_raw.mean(axis=0)) / np.where(
-            X_raw.std(axis=0) == 0, 1.0, X_raw.std(axis=0)
-        )
+        # 统一执行特征空间归一化
+        X_mean = X_raw.mean(axis=0)
+        X_std = np.where(X_raw.std(axis=0) == 0, 1.0, X_raw.std(axis=0))
+        X_scaled = (X_raw - X_mean) / X_std
 
-        # 运行 DBSCAN 进行硬性几何相空间密度识别
+        # --------------------------------==================--------------------------------
+        # 🌟 2. 依据配置策略进行流控路由（DBSCAN 与 HDBSCAN 分流）
+        # --------------------------------==================--------------------------------
+        if self.cluster_algo == "hdbscan":
+            self.logger.info(
+                f"🧬 [HDBSCAN 粗筛] 启动变密度层级树剪枝 | "
+                f"min_cluster_size: {self.hdbscan_min_cluster_size} | min_samples: {self.hdbscan_min_samples}"
+            )
+
+            # 🛡️ 物理微扰防线：注入微小噪声打破浮点数可能因高密度平局导致的树构建崩溃
+            X_input = X_scaled.astype(np.float64, order="C") + np.random.normal(
+                0, 1e-9, X_scaled.shape
+            )
+
+            db = HDBSCAN(
+                min_cluster_size=self.hdbscan_min_cluster_size,
+                min_samples=self.hdbscan_min_samples,  # 完美透传 config.py 配置
+                cluster_selection_method="eom",  # Excess of Mass 算法，完美拟合恒星团质量函数
+                n_jobs=-1,
+            ).fit(X_input)
+            labels = db.labels_
+
+        else:
+            # 🚀 DBSCAN 核心分支：动态解析 dbscan_eps 字段
+            # 经典 DBSCAN + Castro-Ginard (2018) 先验定标路径
+            actual_eps = self.dbscan_eps
+
+            if str(actual_eps).lower() == "auto":
+                # 🌟 情况 A: 显式配置了 "auto"，调度重采样解算
+                self.logger.info(
+                    "⏳ [DBSCAN 自适应] 检测到 dbscan_eps='auto'，正在启动 KDE 银河系背景重采样模拟..."
+                )
+                actual_eps = calculate_adaptive_eps_kde(
+                    X_raw=X_raw,
+                    min_pts=self.min_pts,
+                    num_simulations=self.num_simulations,
+                )
+                self.logger.info(
+                    f"🤖 [KDE 动态定标成功] 逆向求解出物理噪声隔离边界: EPS = {actual_eps:.4f}"
+                )
+            else:
+                # 🌟 情况 B: 配置了硬编码的物理数值（例如 0.25），直接解析并跳过重采样
+                try:
+                    actual_eps = float(actual_eps)
+                    self.logger.info(
+                        f"🎿 [DBSCAN 静态经验值] 跳过 KDE 模拟，直接采用配置指定的物理半径: EPS = {actual_eps:.4f}"
+                    )
+                except (ValueError, TypeError):
+                    self.logger.warning(
+                        f"⚠️ 无法解析配置中的 dbscan_eps 值 '{actual_eps}'，强行回退至默认自适应 KDE 定标..."
+                    )
+                    actual_eps = calculate_adaptive_eps_kde(
+                        X_raw,
+                        min_pts=self.min_pts,
+                        num_simulations=self.num_simulations,
+                    )
+
+            self.logger.info(
+                f"🗜️ 正在运行无监督物理截断扫描 (EPS={actual_eps:.4f}, minPts={self.min_pts})..."
+            )
+            db = DBSCAN(eps=actual_eps, min_samples=self.min_pts, n_jobs=-1).fit(
+                X_scaled
+            )
+            labels = db.labels_
+
+        # --------------------------------==================--------------------------------
+        # 3. 统一数据收拢与高纯核心析取
+        # --------------------------------==================--------------------------------
+        # 初始化并将聚类标签安全映射回工作 DataFrame 中
+        working_df["cluster_label"] = -1
+        working_df.loc[clean_mask, "cluster_label"] = labels
+
+        if labels.max() < 0:
+            self.logger.warning(
+                "💥 核心拦截：当前天区未发现满足物理凝聚的超密度实体，前置种子库枯竭！"
+            )
+            return pd.DataFrame(columns=field_stars_df.columns)
+
+        # 寻找点数最多的那个核心簇（非背景野星 -1）
+        unique_labels, counts = np.unique(labels[labels != -1], return_counts=True)
+        best_cluster_label = unique_labels[np.argmax(counts)]
+
+        # 析取
+        df_seeds = working_df[working_df["cluster_label"] == best_cluster_label].copy()
+
         self.logger.info(
-            f"🗜️ 正在运行无监督物理截断扫描 (EPS={eps:.4f}, minPts={self.min_pts})..."
-        )
-        db = DBSCAN(eps=eps, min_samples=self.min_pts, n_jobs=-1).fit(X_scaled)
-
-        # 标签回填（不满足 clean_mask 的默认填充为 -1 噪声）
-        labels = np.full(len(working_df), -1, dtype=int)
-        labels[clean_mask] = db.labels_
-        working_df["seed_label"] = labels
-
-        # 过滤提取：丢弃 -1 (噪声野星)，只保留密集核心集群（labels >= 0）
-        df_seeds = working_df[working_df["seed_label"] >= 0].copy()
-
-        # 物理资产产量审计
-        n_clusters = len(set(db.labels_)) - (1 if -1 in db.labels_ else 0)
-        self.logger.info(
-            f"🎉 粗筛扫描结束！共捕获高密度核心聚集群 x {n_clusters}，成功分离提取出 {len(df_seeds)} 颗高纯度种子星。"
+            f"🎯 [{self.cluster_algo.upper()} 种子粗筛成功] 目标星团标识: {best_cluster_label} | "
+            f"大范围剔除银盘背景野星噪声后，成功出库高纯度初始种子星: {len(df_seeds)} 颗。"
         )
 
         return df_seeds

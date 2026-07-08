@@ -198,9 +198,12 @@ CLUSTERS = {
         "SEED_MAX_RUWE": 1.2,
         "UPMASK_ITERATIONS": 20,
         "UPMASK_MAX_CLUSTERS": 2,
+        # 🌟 核心算法路由策略集成
         "DISAMBIGUATION_MODE": "threshold_gmm",  # 年轻星团，卡方一刀切高效高纯
         "SUBSTRUCTURE_MODE": "identity",         # 无显著潮汐尾，保持单高斯
         "SIGMA_CUTOFF": 3.0,                     # 阶段一专用超参
+        "SEED_FROM_LITERATURE": False,           # 不使用文献种子集作为初始种子
+        "MEMBER_THRESHOLD": 0.5,
         },
     "M44": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
@@ -238,6 +241,9 @@ CLUSTERS = {
         # 🌟 核心算法路由策略集成
         "DISAMBIGUATION_MODE": "bayesian_gmm",   # 中年星团，银盘背景复杂，引入对抗
         "SUBSTRUCTURE_MODE": "dual_comp",        # 解剖 Core + 整体 潮汐尾
+        "CLUSTER_ALGO": "dbscan",
+        "DBSCAN_MIN_SAMPLES": 80,
+        "DBSCAN_EPS": "auto",                    # 🌟 开启全自动自适应调参
         "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
     },
     "Mel25": {
@@ -344,7 +350,12 @@ CLUSTERS = {
         # 🌟 核心算法路由策略集成
         "DISAMBIGUATION_MODE": "bayesian_gmm",   # 老疏散星团，强噪声对抗
         "SUBSTRUCTURE_MODE": "dual_comp",        # 守护并剥离长期演化遗留的潮汐尾
+        "CLUSTER_ALGO": "dbscan",
+        "DBSCAN_MIN_SAMPLES": 40,
+        "DBSCAN_EPS": 0.25,                      # 🌟 也可以选择硬编码死一个物理经验值
         "MEMBER_THRESHOLD": 0.6,                 # 略微收紧门槛以压制银盘野星
+        "SEED_FROM_LITERATURE": True,            # 使用文献种子集作为初始种子
+        "LIT_SEED_IDX": "cg20",                  # 使用 CG20 文献种子集作为初始种子   
     },
     "M13": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
