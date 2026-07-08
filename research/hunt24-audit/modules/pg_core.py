@@ -13,9 +13,9 @@ from utils.decorators import astro_checkpoint
 
 
 @dataclass
-class GMMModelParamsEx:
+class GMMModelParams:
     """
-    模型参数容器（封测版）：保存从 PriorGMMEx 训练阶段提取的所有物理先验知识。
+    模型参数容器（封测版）：保存从 PriorGMM 训练阶段提取的所有物理先验知识。
 
     Attributes:
         cluster_model (GaussianMixture): 拟合好的星团成员高斯分布模型。
@@ -38,7 +38,7 @@ class GMMModelParamsEx:
     center_coords: dict = field(default_factory=dict)
 
 
-class PriorGMMEx:
+class PriorGMM:
     """
     种子星引导的高维先验迭代成员判定算法（PriorGMM 实验性增强版）。
 
@@ -82,7 +82,7 @@ class PriorGMMEx:
         self.hdbscan_eps = self.config.get("hdbscan_cluster_selection_epsilon", 0.0)
 
         self.logger.info(
-            f"🧪 [PriorGMMEx] 实验性内核加载成功 | 模式: {self.dim_mode.upper()} | 算法: {self.cluster_algo.upper()} | 维度轴: {self.features}"
+            f"🧪 [PriorGMM] 实验性内核加载成功 | 模式: {self.dim_mode.upper()} | 算法: {self.cluster_algo.upper()} | 维度轴: {self.features}"
         )
 
     def _apply_adaptive_centering(
@@ -118,7 +118,7 @@ class PriorGMMEx:
 
         return df_copy, out_centers
 
-    def fit(self, df_seeds: pd.DataFrame, df_field: pd.DataFrame) -> GMMModelParamsEx:
+    def fit(self, df_seeds: pd.DataFrame, df_field: pd.DataFrame) -> GMMModelParams:
         """
         训练接口：利用种子星与全域背景构建高斯混合先验模型。
 
@@ -127,10 +127,10 @@ class PriorGMMEx:
             df_field (pd.DataFrame): 包含背景与成员的全域背景数据。
 
         Returns:
-            GMMModelParamsEx: 包含模型状态的参数对象。
+            GMMModelParams: 包含模型状态的参数对象。
         """
         self.logger.info(
-            f"--- 🧪 [PriorGMMEx] 开始拟合先验模型 ({self.dim_mode.upper()}) ---"
+            f"--- 🧪 [PriorGMM] 开始拟合先验模型 ({self.dim_mode.upper()}) ---"
         )
 
         # --------------------------------==================--------------------------------
@@ -261,7 +261,7 @@ class PriorGMMEx:
             f"✨ [内核验证] 星团先验模型拟合成功。归一化中心偏移: { {f: round(v, 4) for f, v in zip(self.features, cluster_model.means_[0])} }"
         )
 
-        return GMMModelParamsEx(
+        return GMMModelParams(
             cluster_model=cluster_model,
             field_model=field_model,
             scaler=scaler,
@@ -275,7 +275,7 @@ class PriorGMMEx:
     def predict(
         self,
         df_predict: pd.DataFrame,
-        params: GMMModelParamsEx,
+        params: GMMModelParams,
         max_iter: int = 250,
         tol: float = 1e-6,
     ) -> pd.DataFrame:
@@ -284,7 +284,7 @@ class PriorGMMEx:
 
         Args:
             df_predict (pd.DataFrame): 待判定的天体数据帧。
-            params (GMMModelParamsEx): 训练好的模型参数对象。
+            params (GMMModelParams): 训练好的模型参数对象。
             max_iter (int): 最大收敛迭代步数。
             tol (float): 收敛停止的容差阈值。
 
@@ -292,7 +292,7 @@ class PriorGMMEx:
             pd.DataFrame: 包含 ID 和计算得出的成员概率（prob）的结果集。
         """
         total_stars = len(df_predict)
-        self.logger.info(f"--- 🧪 [PriorGMMEx] 启动递归推理流程 | 目标量: {total_stars} ---")
+        self.logger.info(f"--- 🧪 [PriorGMM] 启动递归推理流程 | 目标量: {total_stars} ---")
 
         # --------------------------------==================--------------------------------
         # 1. 物理坐标对齐与标准化映射
@@ -350,7 +350,7 @@ class PriorGMMEx:
         self.logger.info(
             f"✨ [测试核收工] 判定任务顺利结束 | 成功掘出星团高置信度成员星: {n_members} 颗。"
         )
-        self.logger.info(f"--- 🧪 PriorGMMEx 管道内核运行结束 ---")
+        self.logger.info(f"--- 🧪 PriorGMM 管道内核运行结束 ---")
 
         return pd.DataFrame(
             {
