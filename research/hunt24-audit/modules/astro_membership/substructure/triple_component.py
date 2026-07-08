@@ -1,0 +1,1 @@
+# triple_component.py  # 路径 2: Core + Leading + Trailing (3组件)

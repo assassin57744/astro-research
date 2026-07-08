@@ -197,7 +197,10 @@ CLUSTERS = {
         "SEED_MAX_MAG": 18.0, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
         "SEED_MAX_RUWE": 1.2,
         "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2
+        "UPMASK_MAX_CLUSTERS": 2,
+        "DISAMBIGUATION_MODE": "threshold_gmm",  # 年轻星团，卡方一刀切高效高纯
+        "SUBSTRUCTURE_MODE": "identity",         # 无显著潮汐尾，保持单高斯
+        "SIGMA_CUTOFF": 3.0,                     # 阶段一专用超参
         },
     "M44": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
@@ -231,7 +234,11 @@ CLUSTERS = {
         "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.4,
         "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2
+        "UPMASK_MAX_CLUSTERS": 2,
+        # 🌟 核心算法路由策略集成
+        "DISAMBIGUATION_MODE": "bayesian_gmm",   # 中年星团，银盘背景复杂，引入对抗
+        "SUBSTRUCTURE_MODE": "dual_comp",        # 解剖 Core + 整体 潮汐尾
+        "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
     },
     "Mel25": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_MEL25,
@@ -333,7 +340,11 @@ CLUSTERS = {
         "SEED_MAX_RUWE": 1.4,
         "SEED_PM_LIM": 2.5,        
         "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2
+        "UPMASK_MAX_CLUSTERS": 2,
+        # 🌟 核心算法路由策略集成
+        "DISAMBIGUATION_MODE": "bayesian_gmm",   # 老疏散星团，强噪声对抗
+        "SUBSTRUCTURE_MODE": "dual_comp",        # 守护并剥离长期演化遗留的潮汐尾
+        "MEMBER_THRESHOLD": 0.6,                 # 略微收紧门槛以压制银盘野星
     },
     "M13": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
@@ -367,7 +378,10 @@ CLUSTERS = {
         "SEED_MAX_RUWE": 1.4,
         "SEED_PM_LIM": 2.0,
         "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2
+        "UPMASK_MAX_CLUSTERS": 2,
+        # 🌟 核心算法路由策略集成
+        "DISAMBIGUATION_MODE": "blind_gmm",      # 球状星团，恒星资产丰厚，直接自适应盲跑
+        "SUBSTRUCTURE_MODE": "triple_comp",      # 精细解剖核心、前导尾与后随尾
     },
     "M41": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M41,
@@ -402,7 +416,11 @@ CLUSTERS = {
         "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.4,
         "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2
+        "UPMASK_MAX_CLUSTERS": 2,
+        # 🌟 核心算法路由策略集成
+        "DISAMBIGUATION_MODE": "threshold_gmm",   # 老疏散星团，强噪声对抗
+        "SUBSTRUCTURE_MODE": "identity",        # 守护并剥离长期演化遗留的潮汐尾
+        "MEMBER_THRESHOLD": 3.0,                 # 略微收紧门槛以压制银盘野星
     },
 }
 
