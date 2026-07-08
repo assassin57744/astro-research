@@ -1,0 +1,1 @@
+# dual_component.py    # 路径 1: Core + Tail (2组件)
