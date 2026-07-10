@@ -322,7 +322,7 @@ class ClusterConfigManager:
             "RECONSTRUCTED": True,
         }
 
-        self.logger.info(
+        self.logger.debug(
             f'''所有星团的参数为：
             CENTER_RA = {reconstructed_params["CENTER_RA"]},
             CENTER_DE = {reconstructed_params["CENTER_DEC"]},

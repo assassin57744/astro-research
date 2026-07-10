@@ -61,7 +61,8 @@ def calculate_adaptive_eps_kde(
         
         # 记录这次模拟中，最极端的随机凝聚大涨落波动上限
         # 数学语义：如果低于这个距离，说明哪怕是纯野星背景也极可能因为随机巧合凝聚在一起
-        sim_eps_list.append(np.max(distances[:, min_pts - 1]))
+        # sim_eps_list.append(np.max(distances[:, min_pts - 1]))
+        sim_eps_list.append(np.min(distances[:, min_pts - 1]))
 
     # 4. 科学沉淀：取多次模拟上限的均值，作为斩断一切随机噪声、筛选真实星团实体的 EPS 屏障
     optimal_eps = float(np.mean(sim_eps_list))
