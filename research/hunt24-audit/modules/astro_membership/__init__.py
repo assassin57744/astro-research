@@ -7,9 +7,9 @@ from .disambiguation.bayesian import BayesianGmmDisambiguation
 from .disambiguation.threshold import ThresholdGmmDisambiguation
 from .disambiguation.blind import BlindGmmDisambiguation
 
-from .substructure.identity import IdentitySubstructure
-from .substructure.dual_component import DualCompSubstructure
-from .substructure.triple_component import TripleCompSubstructure
+# from .substructure.identity import IdentitySubstructure
+# from .substructure.dual_component import DualCompSubstructure
+# from .substructure.triple_component import TripleCompSubstructure
 
 logger = logging.getLogger("hunt24.membership")
 
@@ -24,11 +24,11 @@ class AstroMembershipPipeline:
         "blind_gmm": BlindGmmDisambiguation
     }
     
-    SUBSTRUCTURE_MAP = {
-        "identity": IdentitySubstructure,
-        "dual_comp": DualCompSubstructure,
-        "triple_comp": TripleCompSubstructure
-    }
+    # SUBSTRUCTURE_MAP = {
+    #     "identity": IdentitySubstructure,
+    #     "dual_comp": DualCompSubstructure,
+    #     "triple_comp": TripleCompSubstructure
+    # }
 
     def __init__(self, disambiguation_mode: str, substructure_mode: str, **kwargs):
         dis_cls = self.DISAMBIGUATION_MAP.get(disambiguation_mode, BayesianGmmDisambiguation)
