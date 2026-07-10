@@ -192,18 +192,42 @@ CLUSTERS = {
         "CMD_REF": np.array([0.0, 0.0, 0.0]),
         "CMD_DEV": 9.0,  # CMD 偏离容忍度 (mag)
         "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛     # TODO: 可以细化到分pm, plx, cmd, rv
-        "SEED_RADIUS": 2.0, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)
-        "SEED_PLX_LIM": 1.5,# 单位：mas, 源星种子搜索视差容忍度(第一次实验取值:1.5, 第二次实验取值:0.5)
-        "SEED_MAX_MAG": 18.0, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
-        "SEED_MAX_RUWE": 1.2,
+        # 🌟 核心算法参数 - 种子区域截断范围
+        "SEED_RADIUS": 5.0, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)
+        "SEED_PLX_LIM": 4.0,# 单位：mas, 源星种子搜索视差容忍度(第一次实验取值:1.5, 第二次实验取值:0.5)
+        "SEED_MAX_MAG": 19.5, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
+        "SEED_MAX_RUWE": 1.4,
         "UPMASK_ITERATIONS": 20,
         "UPMASK_MAX_CLUSTERS": 2,
         # 🌟 核心算法路由策略集成
-        "DISAMBIGUATION_MODE": "threshold_gmm",  # 年轻星团，卡方一刀切高效高纯
-        "SUBSTRUCTURE_MODE": "identity",         # 无显著潮汐尾，保持单高斯
-        "SIGMA_CUTOFF": 3.0,                     # 阶段一专用超参
+        # "DISAMBIGUATION_MODE": "threshold_gmm",  # 年轻星团，卡方一刀切高效高纯
+        # "SUBSTRUCTURE_MODE": "identity",         # 无显著潮汐尾，保持单高斯
+        # "SIGMA_CUTOFF": 3.0,                     # 阶段一专用超参
         "SEED_FROM_LITERATURE": False,           # 不使用文献种子集作为初始种子
         "MEMBER_THRESHOLD": 0.5,
+        "DBSCAN_EPS": "auto", #0.3,                    # 🌟 开启全自动自适应调参
+        "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
+        "STRATEGY_PARAMS": {
+            # 1. 对应 ThresholdGmmDisambiguation 
+            # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
+            "threshold": {
+                "sigma_cutoff": 4.5,  
+            },
+            
+            # 2. 对应 BlindGmmDisambiguation
+            # 🌟 扁平化注入：等价于 BlindGmmDisambiguation(n_components=4, covariance_type="full", default_roi=5.0)
+            "blind": {
+                "n_components": 4,
+                "covariance_type": "full",
+                "default_roi": 5.0
+            },
+            
+            # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
+            "bayesian": {
+                "eps": 0.4,
+                "min_samples": 4
+            }
+        }
         },
     "M44": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
@@ -232,9 +256,9 @@ CLUSTERS = {
         "PM_RADIUS": 4.0,  # 自行半径容忍度 (mas/yr)
         "PLX_ERROR": 0.4,  # 视差误差/弥散容忍度 (mas)
         "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag)
-        "SEED_RADIUS": 2.0,
-        "SEED_PLX_LIM": 1.2,
-        "SEED_MAX_MAG": 18.0,
+        "SEED_RADIUS": 5.0,
+        "SEED_PLX_LIM": 1.9,
+        "SEED_MAX_MAG": 19.5,
         "SEED_MAX_RUWE": 1.4,
         "UPMASK_ITERATIONS": 20,
         "UPMASK_MAX_CLUSTERS": 2,
@@ -244,6 +268,28 @@ CLUSTERS = {
         "CLUSTER_ALGO": "dbscan",
         "DBSCAN_MIN_SAMPLES": 80,
         "DBSCAN_EPS": "auto",                    # 🌟 开启全自动自适应调参
+        "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
+        "STRATEGY_PARAMS": {
+            # 1. 对应 ThresholdGmmDisambiguation 
+            # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
+            "threshold": {
+                "sigma_cutoff": 4.5,  
+            },
+            
+            # 2. 对应 BlindGmmDisambiguation
+            # 🌟 扁平化注入：等价于 BlindGmmDisambiguation(n_components=4, covariance_type="full", default_roi=5.0)
+            "blind": {
+                "n_components": 4,
+                "covariance_type": "full",
+                "default_roi": 5.0
+            },
+            
+            # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
+            "bayesian": {
+                "eps": 0.4,
+                "min_samples": 4
+            }
+        },
         "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
     },
     "Mel25": {
@@ -340,11 +386,11 @@ CLUSTERS = {
         "PM_RADIUS": 1.5,  # 远距离星团自行弥散极小
         "PLX_ERROR": 0.029495399758903088,  # 视差容忍度收紧
         "CMD_DEV": 0.5,
-        "SEED_RADIUS": 1.5,       # 继续扩大以包含更多外围种子
-        "SEED_PLX_LIM": 0.4,       # 放宽视差限制以找回更多潜在种子
-        "SEED_MAX_MAG": 20.0,
+        "SEED_RADIUS": 2.5,       # 继续扩大以包含更多外围种子
+        "SEED_PLX_LIM": 1.2,       # 放宽视差限制以找回更多潜在种子
+        "SEED_MAX_MAG": 22.0,
         "SEED_MAX_RUWE": 1.4,
-        "SEED_PM_LIM": 2.5,        
+        "SEED_PM_LIM": 10.0,      # 放宽自行限制以捕获更多外围种子 
         "UPMASK_ITERATIONS": 20,
         "UPMASK_MAX_CLUSTERS": 2,
         # 🌟 核心算法路由策略集成
@@ -352,10 +398,35 @@ CLUSTERS = {
         "SUBSTRUCTURE_MODE": "dual_comp",        # 守护并剥离长期演化遗留的潮汐尾
         "CLUSTER_ALGO": "dbscan",
         "DBSCAN_MIN_SAMPLES": 40,
-        "DBSCAN_EPS": 0.25,                      # 🌟 也可以选择硬编码死一个物理经验值
+        # "DBSCAN_EPS": 0.25,                      # 🌟 也可以选择硬编码死一个物理经验值
+        "DBSCAN_EPS": "auto",                      # 🌟 也可以选择硬编码死一个物理经验值
         "MEMBER_THRESHOLD": 0.6,                 # 略微收紧门槛以压制银盘野星
         "SEED_FROM_LITERATURE": True,            # 使用文献种子集作为初始种子
-        "LIT_SEED_IDX": "cg20",                  # 使用 CG20 文献种子集作为初始种子   
+        "LIT_SEED_IDX": "cg20",                  # 使用 CG20 文献种子集作为初始种子  
+        "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
+        "STRATEGY_PARAMS": {
+            # 1. 对应 ThresholdGmmDisambiguation 
+            # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
+            "threshold": {
+                "sigma_cutoff": 4.5,  
+            },
+            
+            # 2. 对应 BlindGmmDisambiguation
+            # 🌟 扁平化注入：等价于 BlindGmmDisambiguation(n_components=4, covariance_type="full", default_roi=5.0)
+            "blind": {
+                "n_components": 4,
+                "covariance_type": "full",
+                "default_roi": 5.0
+            },
+            
+            # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
+            "bayesian": {
+                "eps": "auto",
+                "min_samples": 4
+            }
+        },
+        "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
+     
     },
     "M13": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
@@ -422,9 +493,9 @@ CLUSTERS = {
         "PM_RADIUS": 2.0,  # 较远星团，自行散布较小
         "PLX_ERROR": 0.3,
         "CMD_DEV": 0.6,
-        "SEED_RADIUS": 0.2,
-        "SEED_PLX_LIM": 0.9,  # PLX_ERROR * 3
-        "SEED_MAX_MAG": 18.0,
+        "SEED_RADIUS": 1.5,
+        "SEED_PLX_LIM": 0.6,  # PLX_ERROR * 3
+        "SEED_MAX_MAG": 19.5,
         "SEED_MAX_RUWE": 1.4,
         "UPMASK_ITERATIONS": 20,
         "UPMASK_MAX_CLUSTERS": 2,
@@ -432,6 +503,30 @@ CLUSTERS = {
         "DISAMBIGUATION_MODE": "threshold_gmm",   # 老疏散星团，强噪声对抗
         "SUBSTRUCTURE_MODE": "identity",        # 守护并剥离长期演化遗留的潮汐尾
         "MEMBER_THRESHOLD": 3.0,                 # 略微收紧门槛以压制银盘野星
+        "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
+        "DBSCAN_EPS": "auto",                      # 🌟 也可以选择硬编码死一个物理经验值
+        "STRATEGY_PARAMS": {
+            # 1. 对应 ThresholdGmmDisambiguation 
+            # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
+            "threshold": {
+                "sigma_cutoff": 4.5,  
+            },
+            
+            # 2. 对应 BlindGmmDisambiguation
+            # 🌟 扁平化注入：等价于 BlindGmmDisambiguation(n_components=4, covariance_type="full", default_roi=5.0)
+            "blind": {
+                "n_components": 4,
+                "covariance_type": "full",
+                "default_roi": 5.0
+            },
+            
+            # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
+            "bayesian": {
+                "eps": "auto",
+                "min_samples": 4
+            }
+        },
+        "MEMBER_THRESHOLD": 0.5, 
     },
 }
 
@@ -820,6 +915,8 @@ GMM_CONFIG = {
     "max_iter": 20,
     "tol": 1e-5,
     "use_experimental": True,  # 启用实验性功能，如基于近邻的智能初始化
+    # "default_strategy": "threshold", # 实验模式下的默认精筛策略
+    "default_strategy": "bayesian",  # 实验模式下的默认精筛策略
     "enable_subsampling": False,  # 是否启用背景下采样优化，以加速模型拟合
     "subsampling_limit": 500000, # 下采样触发门限及目标样本量
 }

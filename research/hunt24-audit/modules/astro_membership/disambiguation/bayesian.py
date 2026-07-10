@@ -90,6 +90,8 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         else:
             use_density_prune = True
 
+        use_density_prune = False  # 强制关闭密度修剪，直接使用全量种子集拟合 GMM
+
         # --------------------------------==================--------------------------------
         # 2. 数学空间归一化 (Standardization)
         # --------------------------------==================--------------------------------
@@ -144,6 +146,9 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
                         raise te
                 algo_name = "HDBSCAN"
             else:
+                self.logger.info(
+                    f"🧬 [DBSCAN 粗筛] 启动密度修剪 | eps: {self.dbscan_eps} | min_samples: {self.dbscan_min_samples}"
+                )
                 db = DBSCAN(
                     eps=self.dbscan_eps, min_samples=self.dbscan_min_samples
                 ).fit(X_seeds_scaled)
@@ -194,12 +199,14 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
 
         probs = np.zeros(total_stars)
 
+        f_floor = f_current * 0.2  # 🌟 动态护栏：根据每个星团的初始本征规模，自适应定制保护底线
+
         for iteration in range(1, self.max_iter + 1):
             num = p_cl * f_current
             den = num + p_fi * (1.0 - f_current)
             probs = num / (den + 1e-15)  # 注入微小 eps 防止分母零溃缩
 
-            f_new = np.mean(probs)
+            f_new = max(np.mean(probs), f_floor) # 保护底线，防止过度收敛导致成员权重被完全抹平
             diff = abs(f_new - f_current)
 
             if iteration % 20 == 0 or diff < self.tol:

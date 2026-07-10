@@ -128,7 +128,7 @@ class ClusterSeedExtractor:
                     "⏳ [DBSCAN 自适应] 检测到 dbscan_eps='auto'，正在启动 KDE 银河系背景重采样模拟..."
                 )
                 actual_eps = calculate_adaptive_eps_kde(
-                    X_raw=X_raw,
+                    X_raw=X_raw,                 # # 传入归一化后的特征矩阵******************
                     min_pts=self.min_pts,
                     num_simulations=self.num_simulations,
                 )

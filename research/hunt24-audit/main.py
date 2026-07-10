@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         type=str,
-        default="3d",
+        default="5d",
         choices=valid_modes + ["all"],
         help="GMM 算法的特征维度模式，使用 'all' 将循环执行所有模式",
     )

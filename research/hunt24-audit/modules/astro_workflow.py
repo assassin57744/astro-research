@@ -123,6 +123,8 @@ class AstroWorkflow:
         query = f"SELECT * FROM {v_src}"
         df_raw = self.db.query(query)
 
+        self.logger.info(f"从数据源 [{v_src}] 读取到原始种子星数据: {len(df_raw)} 颗")
+
         # 🚀 仅针对当前运行模式所需的特征执行 dropna
         # 这样在 2D 模式下，即便视差 (plx) 缺失，只要自行 (pm) 还在，种子星就不会被丢弃。
         if required_features:
@@ -603,17 +605,193 @@ class AstroWorkflow:
 
     @astro_checkpoint(
         cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
-        force_refresh=False,
+        force_refresh=True,
     )
     def run_pgmm(self, ctx_cluster):
-        """驱动核心 GMM 计算流水线：执行双轨制内核推理并固化结果。
+        """驱动核心精筛计算流水线：支持实验双轨制安全开关。
 
+
+        运行高斯混合模型（GMM）成员星判定管线。
+        
+        支持双轨控制：
+          - 稳定旧轨 (use_experimental=False): 维持老 PriorGMM 行为，依赖外部种子表。
+          - 实验新轨 (use_experimental=True): 启用 ClusterSeedExtractor 自适应无监督粗筛种子，
+            并无缝路由至多态精筛策略工厂（Bayesian / Threshold / Blind）。
         Args:
-            ctx_cluster (dict): 星团上下文环境。
+            ctx_cluster (dict): 星团上下文环境，包含星团专有的 Profile 参数。
 
         Returns:
-            str: 算法结果在数据库中的固化表名。
+            str: 算法结果在数据库中的固化总表名 (self.t_master)。
         """
+        # 1. 确定运行模式与特征空间需求
+        # required_features = self._get_required_features()
+        _, required_features = self._parse_pipeline_config()
+        self.logger.info(f"📊 当前管线请求的特征空间: {required_features}")
+
+        # 2. 获取并提取全量靶场数据 (Target Field)
+        field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
+        df_target_raw = self._get_target(
+            idx_data=field_idx,
+            cfg_src=MANIFEST[field_idx],
+            manifest=self.manifest,
+            ctx=ctx_cluster,
+        )
+
+        # 3. 初始化 Master 状态大表
+        self.db.init_master_table(self.t_master, df_target_raw)
+
+        # 获取实验性功能全局开关标志
+        use_experimental = GMM_CONFIG.get("use_experimental", False)
+
+        if not use_experimental:
+            # =========================================================================
+            # 🔒 【稳定旧轨】：100% 还原传统生产管线行为
+            # =========================================================================
+            self.logger.warning("🔒 [双轨分流] 当前处于稳定生产模式：统一执行 PriorGMM 老轨行为")
+            
+            # A. 通过传统黑盒方法获取外部物理种子表数据
+            seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
+            df_seeds_raw = self._get_seeds(
+                idx_data=seed_idx,
+                src=MANIFEST[seed_idx],
+                manifest=self.manifest,
+                ctx=ctx_cluster,
+                required_features=required_features,
+            )
+
+            # B. 统一进行高维特征转换（新老共用原 workflow 的私有桥接方法）
+            current_mode = self.mode
+            df_target_ext = self._transform_and_bridge_features(
+                df_target_raw, ctx_cluster, current_mode, required_features
+            )
+            df_seeds_ext = self._transform_and_bridge_features(
+                df_seeds_raw, ctx_cluster, current_mode, required_features
+            )
+
+            # C. 统一执行 NaN 缺损防御性清洗
+            df_target_final = self._defensive_nan_purge(
+                df_target_ext, required_features, label="Target_field"
+            )
+            df_seeds_purge = self._defensive_nan_purge(
+                df_seeds_ext, required_features, label="Seeds"
+            )
+
+            # D. 驱动原始老内核进行拟合与推演
+            engine = PriorGMM(params=self, ctx_cluster=ctx_cluster)
+            engine.fit(df_target_final, df_seeds_purge, required_features)
+            df_res = engine.predict(df_target_final, required_features)
+
+        else:
+            # =========================================================================
+            # 🚀 【实验新轨】：并线自适应无监督粗筛 Extractor + 多态策略工厂
+            # =========================================================================
+            strategy_name = ctx_cluster.get(
+                "STRATEGY", GMM_CONFIG.get("default_strategy", "bayesian")
+            ).lower()
+            self.logger.info(f"🚀 [双轨分流] 已激活实验性多态管线。当前激活策略: [{strategy_name.upper()}]")
+
+            # A. 靶场全量天区进行高维特征变换（如 ICRS 转换为 3D/5D/6D 等物理模式）
+            current_mode = self.mode
+            self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
+            df_target_ext = self._transform_and_bridge_features(
+                df_target_raw, ctx_cluster, current_mode, required_features
+            )
+
+            # B. 靶场全量天区执行 NaN 防御清洗，构建干净的多维矩阵底座
+            df_target_final = self._defensive_nan_purge(
+                df_target_ext, required_features, label="Target_field"
+            )
+
+            # C. 🔌 正式唤醒重构的 ClusterSeedExtractor。自适应感知天区背景噪声并自动生成高纯度种子星
+            self.logger.info("🧬 正在调度 ClusterSeedExtractor 运行自适应粗筛提取种子星...")
+            from modules.cluster_seed_extractor import ClusterSeedExtractor
+
+            seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
+            df_seeds_raw = self._get_seeds(
+                idx_data=seed_idx,
+                src=MANIFEST[seed_idx],
+                manifest=self.manifest,
+                ctx=ctx_cluster,
+                required_features=required_features,
+            )
+
+            df_seeds_ext = self._transform_and_bridge_features(
+                df_seeds_raw, ctx_cluster, current_mode, required_features
+            )
+
+            df_seeds_purge = self._defensive_nan_purge(
+                df_seeds_ext, required_features, label="Seeds"
+            )
+            
+            # 严格按照构造函数契约传入当前星团的 Profile 配置字典
+            extractor = ClusterSeedExtractor(cluster_profile=ctx_cluster)
+            df_seeds_final = extractor.extract_seeds(
+                # field_stars_df=df_target_final,
+                field_stars_df=df_seeds_purge,
+                features=required_features
+            )
+
+            # 拦截提取异常，防止下游硬崩溃
+            if df_seeds_final is None or df_seeds_final.empty:
+                raise ValueError("❌ 种子星粗筛危机：ClusterSeedExtractor 未能凝聚出任何有效种子星！")
+            self.logger.info(f"✅ 种子星粗筛成功！共沉淀出 {len(df_seeds_final)} 颗高纯度核心种子星。")
+            self.logger.info(f"🚀 [双轨分流] 已激活实验性多态管线。当前激活策略: [{strategy_name.upper()}]")
+
+            # D. 路由并动态装配具体的实验精筛解异策略
+            strategy_params = ctx_cluster.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
+            strategy_kwargs = {**strategy_params}
+            strategy_kwargs.setdefault("spatial_cols", ["ra", "dec"])
+            strategy_kwargs.setdefault("scale_col", "plx")
+
+            # 延迟动态导入，避免老模式运行未包含新模块时抛错
+            from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
+            from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
+            from modules.astro_membership.disambiguation.blind import BlindGmmDisambiguation
+
+            STRATEGY_CLASSES = {
+                "bayesian": BayesianGmmDisambiguation,
+                "threshold": ThresholdGmmDisambiguation,
+                "blind": BlindGmmDisambiguation,
+            }
+
+            if strategy_name not in STRATEGY_CLASSES:
+                raise ValueError(f"❌ 实验程序错误: 未知的策略类型 [{strategy_name}]")
+            else:
+                self.logger.info(f"✅ 已成功路由至策略类 [{STRATEGY_CLASSES[strategy_name].__name__}]")
+
+            # 实例化策略引擎并一键推演
+            engine = STRATEGY_CLASSES[strategy_name](**strategy_kwargs)
+            df_res = engine.fit_predict(df_target_final, df_seeds_final, required_features)
+
+        # =========================================================================
+        # 🤝 【统一安全回灌通道】：严格顺应底层只有 id 与 prob 的真实物理 Facts
+        # =========================================================================
+        if df_res is None or df_res.empty:
+            raise ValueError("❌ 算法内核异常：策略返回或缓存读取的 DataFrame 为空！")
+        else:
+            self.logger.info(f"✅ 算法内核计算完成，生成结果集共计 {len(df_res)} 颗天体。")
+
+        self.logger.info("📥 正在将精筛洗涤概率结果同步至 Master 表...")
+        
+        # 严防硬编码臆造字段带来的 KeyError，新旧版本策略一律通过本通道安全同步
+        updates = df_res[[cfg.STD_COLS["ID"], "prob"]].copy()
+        self.db.tag_master_table(self.t_master, updates)
+
+        return self.t_master
+    
+    def _________run_pgmm_bak(self, ctx_cluster):
+        """驱动核心精筛计算流水线：支持实验双轨制开关。
+        
+        若 config.GMM_CONFIG["use_experimental"] 为 False，执行原始稳定版 PriorGMM 内核；
+        若为 True，则激活重构后的多态策略工厂实验内核。
+
+        Args:
+            ctx_cluster (dict): 星团上下文环境，包含星团专有的 Profile 参数。
+
+        Returns:
+            str: 算法结果在数据库中的固化总表名 (self.t_master)。
+        """
+        # 1. 解析基础管线模式与特征空间
         gmm_cfg, required_features = self._parse_pipeline_config()
 
         use_experimental = gmm_cfg.get("use_experimental", False)
@@ -625,7 +803,7 @@ class AstroWorkflow:
 
         self.logger.info("📡 正在准备特征工程输入数据...")
 
-        # 步骤 1: 获取目标星数据
+        # 2. 获取并提取全量靶场数据 (Target Field)
         field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
         df_target_raw = self._get_target(
             idx_data=field_idx,
@@ -634,10 +812,10 @@ class AstroWorkflow:
             ctx=ctx_cluster,
         )
 
-        # 🚀 初始化主表, 必须先初始化 Master 表，因为 _get_seeds 会尝试更新它
+        # 3. 初始化 Master 状态大表
         self.db.init_master_table(self.t_master, df_target_raw)
 
-        # 步骤 2: 获取种子星数据 (此时 tag_master_table 可以安全执行)
+        # 4. 获取种子星数据
         seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
         df_seeds_raw = self._get_seeds(
             idx_data=seed_idx,
@@ -646,7 +824,8 @@ class AstroWorkflow:
             ctx=ctx_cluster,
             required_features=required_features,
         )
-
+        
+        # 5. 特征多维相空间高维转换 (ICRS 坐标转换为 3D/6D 等物理模式)
         current_mode = self.mode
         self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
         df_target_ext = self._transform_and_bridge_features(
@@ -656,6 +835,7 @@ class AstroWorkflow:
             df_seeds_raw, ctx_cluster, current_mode, required_features
         )
 
+        # 6. 特征清洗与 NaN 缺损防御性拦截
         self.logger.info("🧹 正在执行特征清洗与 NaN 防御...")
         df_target_final = self._defensive_nan_purge(
             df_target_ext, required_features, label="Target_field"
@@ -696,9 +876,9 @@ class AstroWorkflow:
         return self.t_master
 
 
-    # =========================================================================
-    # 端到端管线入口
-    # =========================================================================
+        # =========================================================================
+        # 🛡️ 【第二阶段双轨控制】：安全分流判定
+        # =========================================================================
 
     def run(self, reconstruct_mode="file", result_mode="brief"):
         """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
