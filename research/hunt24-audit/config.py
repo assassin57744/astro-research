@@ -36,8 +36,8 @@ GAIA_PWD = os.getenv("GAIA_PWD")
 # =================================================================
 # 2. 科学计算门限与物理常数 (Thresholds & Physics)
 # =================================================================
-MEMBER_SAMPLE_THRESHOLD = 0.2
-GOLDEN_SAMPLE_THRESHOLD = 0.8
+MEMBER_SAMPLE_THRESHOLD = 1e-5
+GOLDEN_SAMPLE_THRESHOLD = 1 - MEMBER_SAMPLE_THRESHOLD
 
 AUDIT_PROB_HIGH = 0.7  # 成员身份判定高门限
 AUDIT_PROB_LOW = 0.3  # 成员身份判定低门限（背景噪点）
@@ -231,7 +231,10 @@ CLUSTERS = {
         "SEED_FROM_LITERATURE": False,  # 不使用文献种子集作为初始种子
         "MEMBER_THRESHOLD": 0.5,
         "DBSCAN_EPS": "auto",  # 0.3,                    # 🌟 开启全自动自适应调参
-        "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
+        # 一阶段策略选择器
+        "STRATEGY": "bayesian",  # 当前激活策略：卡方截断
+        # 二阶段策略选择器
+        "SUBSTRUCTURE_PATH_MODE": 0,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -243,7 +246,21 @@ CLUSTERS = {
             "blind": {"n_components": 4, "covariance_type": "full", "default_roi": 5.0},
             # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
             "bayesian": {"eps": 0.4, "min_samples": 4},
+            "substructure_modeller": {
+                "identity": {
+                    "reg_covar": 1e-6,
+                },
+                "dual": {
+                    "tail_direction_deg": 145.0,  # 🌟 可以根据 M41 的动力学遗留方向手动指定各向异性拉伸偏角
+                    "density_weight_alpha": 0.6   # 激活 2D-KDE 逆密度平权，逼迫模型去边缘捞暗弱的尾巴星
+                },
+                "triple": {"leading_tail_length": None, "trailing_tail_length": None},
+            },
         },
+        # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
+        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
+        "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
+        "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
     },
     "M44": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
@@ -293,7 +310,10 @@ CLUSTERS = {
         "CLUSTER_ALGO": "dbscan",
         "DBSCAN_MIN_SAMPLES": 80,
         "DBSCAN_EPS": "auto",  # 🌟 开启全自动自适应调参
-        "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
+        # 一阶段策略选择器
+        "STRATEGY": "bayesian",  # 当前激活策略：卡方截断
+        # 二阶段策略选择器
+        "SUBSTRUCTURE_PATH_MODE": 2,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -305,8 +325,24 @@ CLUSTERS = {
             "blind": {"n_components": 4, "covariance_type": "full", "default_roi": 5.0},
             # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
             "bayesian": {"eps": 0.4, "min_samples": 4},
+            "substructure_modeller": {
+                "identity": {
+                    "reg_covar": 1e-6,
+                },
+                "dual": {
+                    "tail_direction_deg": 145.0,  # 🌟 可以根据 M41 的动力学遗留方向手动指定各向异性拉伸偏角
+                    "density_weight_alpha": 0.6   # 激活 2D-KDE 逆密度平权，逼迫模型去边缘捞暗弱的尾巴星
+                },
+                "triple": {"leading_tail_length": None, "trailing_tail_length": None},
+            },
         },
         "MEMBER_THRESHOLD": 0.5,  # 阶段一贝叶斯切分门槛
+
+        # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
+        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
+        "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
+        "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
+        # "MEMBER_THRESHOLD": 0.5,      # 废弃不用
     },
     "Mel25": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_MEL25,
@@ -441,7 +477,10 @@ CLUSTERS = {
         "MEMBER_THRESHOLD": 0.6,  # 略微收紧门槛以压制银盘野星
         "SEED_FROM_LITERATURE": True,  # 使用文献种子集作为初始种子
         "LIT_SEED_IDX": "cg20",  # 使用 CG20 文献种子集作为初始种子
-        "STRATEGY": "bayesian",  # 🌟 当前激活策略：贝叶斯竞争
+        # 一阶段策略选择器
+        "STRATEGY": "bayesian",  # 当前激活策略：卡方截断
+        # 二阶段策略选择器
+        "SUBSTRUCTURE_PATH_MODE": 2,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -451,8 +490,22 @@ CLUSTERS = {
             "blind": {"n_components": 4, "covariance_type": "full", "default_roi": 5.0},
             # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
             "bayesian": {"eps": "auto", "min_samples": 4},
+            "substructure_modeller": {
+                "identity": {
+                    "reg_covar": 1e-6,
+                },
+                "dual": {
+                    "tail_direction_deg": 145.0,  # 🌟 可以根据 M41 的动力学遗留方向手动指定各向异性拉伸偏角
+                    "density_weight_alpha": 0.6   # 激活 2D-KDE 逆密度平权，逼迫模型去边缘捞暗弱的尾巴星
+                },
+                "triple": {"leading_tail_length": None, "trailing_tail_length": None},
+            },
         },
         "MEMBER_THRESHOLD": 0.5,  # 阶段一贝叶斯切分门槛
+        # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
+        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
+        "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
+        "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
     },
     "M13": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
@@ -549,7 +602,7 @@ CLUSTERS = {
         # 一阶段策略选择器
         "STRATEGY": "bayesian",  # 当前激活策略：卡方截断
         # 二阶段策略选择器
-        "SUBSTRUCTURE_PATH_MODE": 0,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
+        "SUBSTRUCTURE_PATH_MODE": 2,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation
             "threshold": {
@@ -565,17 +618,17 @@ CLUSTERS = {
                     "reg_covar": 1e-6,
                 },
                 "dual": {
-                    "tail_direction_deg": None,  # 潮汐长尾的动力学拉伸偏角
-                    "density_weight_alpha": 0.5,  # 2D-KDE逆密度平权惩罚因子
+                    "tail_direction_deg": 145.0,  # 🌟 可以根据 M41 的动力学遗留方向手动指定各向异性拉伸偏角
+                    "density_weight_alpha": 0.6   # 激活 2D-KDE 逆密度平权，逼迫模型去边缘捞暗弱的尾巴星
                 },
                 "triple": {"leading_tail_length": None, "trailing_tail_length": None},
             },
         },
         # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
-        "CUTTER_MODE": "chi2",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
+        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
         "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
         "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
-        "MEMBER_THRESHOLD": 0.5,
+        # "MEMBER_THRESHOLD": 0.5,      # 废弃不用
     },
 }
 

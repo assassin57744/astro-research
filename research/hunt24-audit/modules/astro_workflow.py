@@ -8,6 +8,7 @@ modules/workflow.py
 
 import logging
 import pandas as pd
+import numpy as np
 from astroquery.simbad import Simbad  # pylint: disable=unused-import
 
 from utils.decorators import astro_checkpoint
@@ -741,8 +742,16 @@ class AstroWorkflow:
 
             if df_seeds_final is None or df_seeds_final.empty:
                 raise ValueError("❌ 种子星粗筛危机：ClusterSeedExtractor 未能凝聚出任何有效种子星！")
+
+            # 🛠️ 【别名桥接防线】：一阶段输出字段为 'cluster_label'，在此处完美映射为二阶段需要的 'seed_label'
+            if "cluster_label" in df_seeds_final.columns and "seed_label" not in df_seeds_final.columns:
+                df_seeds_final = df_seeds_final.rename(columns={"cluster_label": "seed_label"})
+
+            actual_best_label = df_seeds_final["seed_label"].iloc[0]  # 因为经过了析取，此时里面所有的值都相等
+            ctx_cluster["TARGET_CLUSTER_LABEL"] = actual_best_label
             
-            self.logger.info(f"✅ [Phase 1] 沉淀完成。共洗出 {len(df_seeds_final)} 颗高纯度种子星。")
+            self.logger.info(f"✅ [Phase 1] 沉淀完成。共洗出 {len(df_seeds_final)} 颗种子星。")
+            self.logger.info(f"探测到目标星团实际聚类标签为 [{actual_best_label}]，已动态同步契约。")
 
             # -------------------------------------------------------------------------
             # 🎯 【Phase 2 / 二阶段】：根据 use_experimental 的值进行后期分流结算
@@ -781,6 +790,9 @@ class AstroWorkflow:
                 if 'seed_label' not in df_seeds_final.columns:
                     raise KeyError("❌ 接口契约破裂：轨道 2 必须要求一阶段输出包含 'seed_label' 列！")
 
+                if 'TARGET_CLUSTER_LABEL' not in ctx_cluster:
+                    ctx_cluster["TARGET_CLUSTER_LABEL"] = df_seeds_final["seed_label"].iloc[0]
+
                 path_mode = ctx_cluster.get("SUBSTRUCTURE_PATH_MODE", 0)
                 self.logger.info(f"🌌 [Phase 2] 激活细分亚结构解剖流。当前路径模式: [路径 {path_mode}]")
 
@@ -799,25 +811,128 @@ class AstroWorkflow:
                 modeller.fit(df_seeds_final) 
                 df_demarcated = modeller.predict_membership(df_target_final)
 
-                # 调用斩杀算子进行场裁剪
-                target_score_col = "log_p_identity" if path_mode == 0 else "p_total_cluster"
-                cutter = DensityFieldCutter(config=ctx_cluster)
-                self.logger.info(f"✂️ 正在激活 DensityFieldCutter，基于评分列 [{target_score_col}] 计算断层边界...")
-                
-                df_final_audit = cutter.cut_field(
-                    df_all=df_demarcated, 
-                    target_score_col=target_score_col, 
-                    features=required_features
-                )
+                # =====================================================================
+                # 🎯 【核心分流裁剪防御】：路径 0 与带潮汐尾的多组分轨道彻底解耦
+                # =====================================================================
+                if path_mode == 0:
+                    self.logger.info("🌌 检测到路径 0 [Identity 单组分]，激活非线性马氏距离卡方显式裁剪防线...")
+                    
+                    # 1. 提取单组分在五维本征相空间的数学实体先验
+                    gmm = modeller.model
+                    mean = gmm.means_[0]
+                    covariance = gmm.covariances_[0]
+                    inv_covariance = np.linalg.inv(covariance) # 逆矩阵用于解算马氏距离
+                    
+                    # 2. 提取参与拟合的 5D 特征矩阵 (RA, DEC, pmra, pmdec, plx 等)
+                    X_target = df_demarcated[required_features].values
+                    
+                    # 3. 向量化计算全量靶场天体到 M41 物理中心的马氏距离平方 (Mahalanobis Distance^2)
+                    delta = X_target - mean
+                    # 矩阵乘法：d^2 = delta * inv_cov * delta^T
+                    mahalanobis_sq = np.sum(np.dot(delta, inv_covariance) * delta, axis=1)
+                    
+                    # 4. 基于五维相空间 (df=5) 的卡方分布进行物理斩杀
+                    # 5自由度下：chi2.ppf(0.9973, df=5) 约等于 16.51 (等价于高斯空间的 3-Sigma 严格截断)
+                    # 允许通过 config.py 中的 CUTTER_CHI2_QUANTILE 调节（默认 0.995 压制野星）
+                    from scipy.stats import chi2
+                    quantile = ctx_cluster.get("CUTTER_CHI2_QUANTILE", 0.995)
+                    self.logger.info(f"卡方裁剪置信度: {quantile}")
+                    chi2_threshold = chi2.ppf(quantile, df=len(required_features))
+                    
+                    self.logger.info(f"📐 5D 相空间自由度置信度: {quantile} | 映射卡方临界门槛: {chi2_threshold:.4f}")
+                    
+                    # 5. 打标：只有在卡方核心本征超球体内部的天体才被承认为本征成员星
+                    is_member_mask = (mahalanobis_sq <= chi2_threshold)
+                    
+                    # 6. 行索引精准格式化回灌
+                    df_res = df_target_final.copy()
+                    df_res["prob"] = 0.0
+                    df_res.loc[is_member_mask, "prob"] = 1.0
+                    
+                    member_count = int(is_member_mask.sum())
 
-                # 原始行索引精准映射（保证回灌格式契约）
-                df_res = df_target_final.copy()
-                df_res["prob"] = 0.0  
-                member_mask = (df_final_audit["is_member"] == True)
-                df_res.loc[df_final_audit[member_mask].index, "prob"] = 1.0
-                
-                self.logger.info(f"🎯 轨道 2 自适应截断最终锁定 [{int(df_res['prob'].sum())}] 颗高本征成员星。")
-        
+                else:
+                    # =====================================================================
+                    # 路径 1 & 2：具备多组分（核心+潮汐长尾），防御“数值全域放行”陷阱
+                    # =====================================================================
+                    self.logger.info("🌌 检测到路径 1/2 [多组分长尾]，激活『核心超球体物理屏障』防线...")
+                    
+                    gmm = modeller.model
+                    # 强行提取 Component 0 (Core 核心) 的数理实体
+                    core_mean = gmm.means_[0]
+                    core_cov = gmm.covariances_[0]
+                    inv_core_cov = np.linalg.inv(core_cov)
+                    
+                    # 计算全量沙盘天体到【核心】的 5D 马氏距离平方
+                    X_target = df_demarcated[required_features].values
+                    delta_core = X_target - core_mean
+                    mahalanobis_core_sq = np.sum(np.dot(delta_core, inv_core_cov) * delta_core, axis=1)
+                    
+                    # 🛑 【物理隔离屏障】：全域野星距离核心如果远超理论边界（例如大范围放宽到 7-Sigma 以外）
+                    # 证明它绝对是银盘杂散噪声，被膨胀的 Tail 组分错误捕获了。在此直接判为 0
+                    from scipy.stats import chi2
+                    # 7-Sigma 在 5自由度下的卡方截断大约在 50~60 左右，这里给一个较宽的物理隔离墙（如 100）
+                    # 或者用宽松的置信度自适应生成
+                    max_physical_bound = chi2.ppf(0.999999, df=len(required_features))
+                    
+                    self.logger.info(f"🚧 建立物理防噪墙（7-Sigma 理论边界）: Mahalanobis_Core_Sq <= {max_physical_bound:.2f}")
+                    
+                    # 1. 严格筛选出落入物理超球体内部的“准成员星”子集（其余几十万颗直接判定为野星，不再参与数学裁剪）
+                    passed_barrier_mask = (mahalanobis_core_sq <= max_physical_bound)
+                    df_candidates = df_demarcated[passed_barrier_mask].copy()
+                    
+                    self.logger.info(f"🛡️ 物理屏障拦截完毕：大范围过滤掉远端银盘噪声，拦截剩余候选天体 [{len(df_candidates)}] 颗。")
+                    
+                    # 初始全量标黑
+                    df_res = df_target_final.copy()
+                    df_res["prob"] = 0.0
+                    member_count = 0
+
+                    if not df_candidates.empty:
+                        # 2. 检查配置的裁剪模式
+                        cutter_mode = ctx_cluster.get("CUTTER_MODE", "knee").lower()
+                        
+                        if cutter_mode == "chi2":
+                            # 如果配置是 chi2，直接对候选集应用置信度卡方裁剪，不给 DensityFieldCutter 污染的机会
+                            quantile = ctx_cluster.get("CUTTER_CHI2_QUANTILE", 0.995)
+                            self.logger.info(f"卡方裁剪置信度: {quantile}")
+                            chi2_threshold = chi2.ppf(quantile, df=len(required_features))
+                            
+                            # 在候选集里进一步精筛马氏距离
+                            final_member_mask = (mahalanobis_core_sq <= chi2_threshold)
+                            df_res.loc[final_member_mask, "prob"] = 1.0
+                            member_count = int(df_res["prob"].sum())
+                            self.logger.info(f"📐 多组分自适应卡方硬截断完成（门槛: {chi2_threshold:.4f}）")
+                        
+                        else:
+                            # 如果是 knee 拐点模式，我们【仅将过滤干净的候选集】丢给 DensityFieldCutter
+                            # 避开零堆积高原导致的曲率崩塌
+                            cutter = DensityFieldCutter(config=ctx_cluster)
+                            self.logger.info("✂️ 正在激活 DensityFieldCutter 对物理候选星集进行亚结构自适应拐点精筛...")
+                            
+                            df_final_audit = cutter.cut_field(
+                                df_all=df_candidates, 
+                                target_score_col="p_total_cluster", 
+                                features=required_features
+                            )
+                            
+                            # 索引精准映射回原全量表
+                            true_members = df_final_audit[df_final_audit["is_member"] == True]
+                            df_res.loc[true_members.index, "prob"] = 1.0
+                            member_count = len(true_members)
+
+                    # =====================================================================
+                    # 🛠️ 【契约完备性回灌】：将多维亚结构概率矩阵安全灌回最终结果集，防止下游报 KeyError
+                    # =====================================================================
+                    df_res["p_total_cluster"] = df_demarcated["p_total_cluster"]
+                    if "p_core" in df_demarcated.columns:
+                        df_res["p_core"] = df_demarcated["p_core"]
+                    if "p_tail" in df_demarcated.columns:
+                        df_res["p_tail"] = df_demarcated["p_tail"]
+                    if "log_p_identity" in df_demarcated.columns:
+                        df_res["log_p_identity"] = df_demarcated["log_p_identity"]
+
+                self.logger.info(f"🎯 轨道 2 截断结算完毕！最终锁定 [{member_count}] 颗高本征成员星。")
         else:
             raise ValueError(f"❌ 未知的实验轨道开关值: {use_experimental}. 请检查 GMM_CONFIG['use_experimental'] 配置。")
 
@@ -836,101 +951,101 @@ class AstroWorkflow:
 
         return self.t_master
     
-    def _________run_pgmm_bak(self, ctx_cluster):
-        """驱动核心精筛计算流水线：支持实验双轨制开关。
+    # def _________run_pgmm_bak(self, ctx_cluster):
+    #     """驱动核心精筛计算流水线：支持实验双轨制开关。
         
-        若 config.GMM_CONFIG["use_experimental"] 为 False，执行原始稳定版 PriorGMM 内核；
-        若为 True，则激活重构后的多态策略工厂实验内核。
+    #     若 config.GMM_CONFIG["use_experimental"] 为 False，执行原始稳定版 PriorGMM 内核；
+    #     若为 True，则激活重构后的多态策略工厂实验内核。
 
-        Args:
-            ctx_cluster (dict): 星团上下文环境，包含星团专有的 Profile 参数。
+    #     Args:
+    #         ctx_cluster (dict): 星团上下文环境，包含星团专有的 Profile 参数。
 
-        Returns:
-            str: 算法结果在数据库中的固化总表名 (self.t_master)。
-        """
-        # 1. 解析基础管线模式与特征空间
-        gmm_cfg, required_features = self._parse_pipeline_config()
+    #     Returns:
+    #         str: 算法结果在数据库中的固化总表名 (self.t_master)。
+    #     """
+    #     # 1. 解析基础管线模式与特征空间
+    #     gmm_cfg, required_features = self._parse_pipeline_config()
 
-        use_experimental = gmm_cfg.get("use_experimental", False)
-        kernel_name = "PriorGMMEx" if use_experimental else "PriorGMM"
-        self.logger.info(f"🧪 [双轨制触发] 当前任务分配至内核 [{kernel_name}] 运行。")
-        engine = (
-            PriorGMMEx(config=gmm_cfg) if use_experimental else PriorGMM(config=gmm_cfg)
-        )
+    #     use_experimental = gmm_cfg.get("use_experimental", False)
+    #     kernel_name = "PriorGMMEx" if use_experimental else "PriorGMM"
+    #     self.logger.info(f"🧪 [双轨制触发] 当前任务分配至内核 [{kernel_name}] 运行。")
+    #     engine = (
+    #         PriorGMMEx(config=gmm_cfg) if use_experimental else PriorGMM(config=gmm_cfg)
+    #     )
 
-        self.logger.info("📡 正在准备特征工程输入数据...")
+    #     self.logger.info("📡 正在准备特征工程输入数据...")
 
-        # 2. 获取并提取全量靶场数据 (Target Field)
-        field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
-        df_target_raw = self._get_target(
-            idx_data=field_idx,
-            cfg_src=MANIFEST[field_idx],
-            manifest=self.manifest,
-            ctx=ctx_cluster,
-        )
+    #     # 2. 获取并提取全量靶场数据 (Target Field)
+    #     field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
+    #     df_target_raw = self._get_target(
+    #         idx_data=field_idx,
+    #         cfg_src=MANIFEST[field_idx],
+    #         manifest=self.manifest,
+    #         ctx=ctx_cluster,
+    #     )
 
-        # 3. 初始化 Master 状态大表
-        self.db.init_master_table(self.t_master, df_target_raw)
+    #     # 3. 初始化 Master 状态大表
+    #     self.db.init_master_table(self.t_master, df_target_raw)
 
-        # 4. 获取种子星数据
-        seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
-        df_seeds_raw = self._get_seeds(
-            idx_data=seed_idx,
-            src=MANIFEST[seed_idx],
-            manifest=self.manifest,
-            ctx=ctx_cluster,
-            required_features=required_features,
-        )
+    #     # 4. 获取种子星数据
+    #     seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
+    #     df_seeds_raw = self._get_seeds(
+    #         idx_data=seed_idx,
+    #         src=MANIFEST[seed_idx],
+    #         manifest=self.manifest,
+    #         ctx=ctx_cluster,
+    #         required_features=required_features,
+    #     )
         
-        # 5. 特征多维相空间高维转换 (ICRS 坐标转换为 3D/6D 等物理模式)
-        current_mode = self.mode
-        self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
-        df_target_ext = self._transform_and_bridge_features(
-            df_target_raw, ctx_cluster, current_mode, required_features
-        )
-        df_seeds_ext = self._transform_and_bridge_features(
-            df_seeds_raw, ctx_cluster, current_mode, required_features
-        )
+    #     # 5. 特征多维相空间高维转换 (ICRS 坐标转换为 3D/6D 等物理模式)
+    #     current_mode = self.mode
+    #     self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
+    #     df_target_ext = self._transform_and_bridge_features(
+    #         df_target_raw, ctx_cluster, current_mode, required_features
+    #     )
+    #     df_seeds_ext = self._transform_and_bridge_features(
+    #         df_seeds_raw, ctx_cluster, current_mode, required_features
+    #     )
 
-        # 6. 特征清洗与 NaN 缺损防御性拦截
-        self.logger.info("🧹 正在执行特征清洗与 NaN 防御...")
-        df_target_final = self._defensive_nan_purge(
-            df_target_ext, required_features, label="Target_field"
-        )
-        df_seeds_final = self._defensive_nan_purge(
-            df_seeds_ext, required_features, label="Seeds"
-        )
+    #     # 6. 特征清洗与 NaN 缺损防御性拦截
+    #     self.logger.info("🧹 正在执行特征清洗与 NaN 防御...")
+    #     df_target_final = self._defensive_nan_purge(
+    #         df_target_ext, required_features, label="Target_field"
+    #     )
+    #     df_seeds_final = self._defensive_nan_purge(
+    #         df_seeds_ext, required_features, label="Seeds"
+    #     )
 
-        self.logger.info(f"🔥 开始驱动 {kernel_name} 引擎计算...")
+    #     self.logger.info(f"🔥 开始驱动 {kernel_name} 引擎计算...")
 
-        # 🚀 [性能优化] 针对千万级背景样本的下采样策略
-        # 只有在 config.py 中显式开启且样本量超过门限时才执行
-        enable_sub = GMM_CONFIG.get("enable_subsampling", False)
-        sub_limit = GMM_CONFIG.get("subsampling_limit", 500000)
+    #     # 🚀 [性能优化] 针对千万级背景样本的下采样策略
+    #     # 只有在 config.py 中显式开启且样本量超过门限时才执行
+    #     enable_sub = GMM_CONFIG.get("enable_subsampling", False)
+    #     sub_limit = GMM_CONFIG.get("subsampling_limit", 500000)
 
-        df_target_for_fit = df_target_final
-        if enable_sub and len(df_target_final) > sub_limit:
-            self.logger.info(
-                f"🚀 [性能优化] 背景样本量巨大 ({len(df_target_final)}), "
-                f"正在下采样至 {sub_limit} 用于模型拟合..."
-            )
-            df_target_for_fit = df_target_final.sample(n=sub_limit, random_state=42)
+    #     df_target_for_fit = df_target_final
+    #     if enable_sub and len(df_target_final) > sub_limit:
+    #         self.logger.info(
+    #             f"🚀 [性能优化] 背景样本量巨大 ({len(df_target_final)}), "
+    #             f"正在下采样至 {sub_limit} 用于模型拟合..."
+    #         )
+    #         df_target_for_fit = df_target_final.sample(n=sub_limit, random_state=42)
 
-        params = engine.fit(df_seeds_final, df_target_for_fit)
+    #     params = engine.fit(df_seeds_final, df_target_for_fit)
 
-        # 🚀 标记种子星类型 (Core/Noise)
-        if hasattr(params, "df_seeds_classified"):
-            updates = params.df_seeds_classified[[cfg.STD_COLS["ID"], "density_status"]]
-            self.db.tag_master_table(self.t_master, updates)
+    #     # 🚀 标记种子星类型 (Core/Noise)
+    #     if hasattr(params, "df_seeds_classified"):
+    #         updates = params.df_seeds_classified[[cfg.STD_COLS["ID"], "density_status"]]
+    #         self.db.tag_master_table(self.t_master, updates)
 
-        df_prob = engine.predict(df_target_final, params)
-        # 🚀 直接将概率回灌 Master 表，不再创建独立的 pgmm_xxx 表
-        self.db.tag_master_table(self.t_master, df_prob)
+    #     df_prob = engine.predict(df_target_final, params)
+    #     # 🚀 直接将概率回灌 Master 表，不再创建独立的 pgmm_xxx 表
+    #     self.db.tag_master_table(self.t_master, df_prob)
 
-        # 🚀 [混合模式] 固化 Master 表当前状态并作为结果返回
-        # 此处 master 表的数据还不完整, 不是合适导出的时机
-        # self.db.save_to_warehouse(self.t_master)
-        return self.t_master
+    #     # 🚀 [混合模式] 固化 Master 表当前状态并作为结果返回
+    #     # 此处 master 表的数据还不完整, 不是合适导出的时机
+    #     # self.db.save_to_warehouse(self.t_master)
+    #     return self.t_master
 
 
         # =========================================================================

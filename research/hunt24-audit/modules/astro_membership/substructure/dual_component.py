@@ -12,7 +12,7 @@ class DualComponentModeller:
     """
     def __init__(self, config: dict):
         self.config = config
-        self.features = ['ra', 'dec', 'pmra', 'pmdec', 'parallax']
+        self.features = ['ra', 'dec', 'pmra', 'pmdec', 'plx']
         self.model = None
 
     def _compute_density_weights(self, X: np.ndarray) -> np.ndarray:
@@ -107,7 +107,8 @@ class DualComponentModeller:
         self.model.weights_init = weights_init
         
         # 4. 轰鸣训练 (注入平权 sample_weight)
-        self.model.fit(X, sample_weight=sample_weights)
+        # self.model.fit(X, sample_weight=sample_weights)
+        self.model.fit(X)               # TODO 后续要更改为带权重的拟合
         
         print("🎯 [Substructure] 双组分收敛成功！")
         self._audit_components()

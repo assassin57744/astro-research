@@ -13,7 +13,7 @@ class IdentityComponentModeller:
     """
     def __init__(self, config: dict):
         self.config = config
-        self.features = ['ra', 'dec', 'pmra', 'pmdec', 'parallax']
+        self.features = ['ra', 'dec', 'pmra', 'pmdec', 'plx']
         self.model = None
 
     def _compute_density_weights(self, X: np.ndarray) -> np.ndarray:
@@ -80,7 +80,8 @@ class IdentityComponentModeller:
         self.model.weights_init = weights_init
         
         # 4. 轰鸣拟合
-        self.model.fit(X, sample_weight=sample_weights)
+        # self.model.fit(X, sample_weight=sample_weights)
+        self.model.fit(X)           # TODO 后续必须修改
         
         print("🎯 [Substructure] 单组分基准模型收敛成功！")
         self._audit_components()

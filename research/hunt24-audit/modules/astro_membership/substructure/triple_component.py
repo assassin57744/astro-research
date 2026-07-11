@@ -12,7 +12,7 @@ class TripleComponentModeller:
     """
     def __init__(self, config: dict):
         self.config = config
-        self.features = ['ra', 'dec', 'pmra', 'pmdec', 'parallax']
+        self.features = ['ra', 'dec', 'pmra', 'pmdec', 'plx']
         self.model = None
 
     def _compute_density_weights(self, X: np.ndarray) -> np.ndarray:
@@ -29,7 +29,8 @@ class TripleComponentModeller:
 
     def _generate_triple_priors(self, X: np.ndarray, seed_labels: np.ndarray):
         """
-        基于天体动力学各向异性，通过运动学主轴投影，分裂出前导尾与后随尾的硬初始化矩阵
+        基于天体动力学各向异性，通过运动学主轴投影，分裂出前导尾与后随尾的硬初始化矩阵。
+        [🛡️ 健壮重构版]：引入多级动态退化防护，防止外围星样本稀疏引发 SVD 空矩阵及索引越界崩溃。
         """
         # 1. 锁死绝对纯净的核心
         core_mask = (seed_labels == self.config['TARGET_CLUSTER_LABEL'])
@@ -43,30 +44,49 @@ class TripleComponentModeller:
         mean_core = np.mean(X_core, axis=0)
         cov_core = np.cov(X_core, rowvar=False)
 
-        # ---- 运动学主轴解耦：寻找潮汐撕裂方向 ----
-        # 计算外围星相对于核心的自行偏差
-        delta_pm = X_outer[:, 2:4] - mean_core[2:4]
-        
-        # 利用 SVD 提取外围速度场的主特征向量（即潮汐力拉伸的主轴方向）
-        U, S, Vt = np.linalg.svd(delta_pm, full_matrices=False)
-        primary_axis = Vt[0, :] # 2D 速度空间的主要撕裂矢量
-        
-        # 将每颗外围星投影到这条运动学主轴上
-        projections = np.dot(delta_pm, primary_axis)
-        
-        # 顺着主轴投影的正负，暴力切分前导阵营与后随阵营
-        leading_mask = (projections >= 0)
-        X_leading_init = X_outer[leading_mask]
-        X_trailing_init = X_outer[~leading_mask]
+        # ---- 运动学主轴解耦防线：寻找潮汐撕裂方向 ----
+        # 💡 [防御策略]: 只有在外围天体样本量能够有效支撑主成分解算时(至少2颗星)，才执行差分SVD
+        if len(X_outer) >= 2:
+            # 计算外围星相对于核心的自行偏差
+            delta_pm = X_outer[:, 2:4] - mean_core[2:4]
+            # 利用 SVD 提取外围速度场的主特征向量（即潮汐力拉伸的主轴方向）
+            U, S, Vt = np.linalg.svd(delta_pm - np.mean(delta_pm, axis=0), full_matrices=False)
+        else:
+            # 🚨 [一级降级兜底]: 如果外围根本没有或者几乎没有长尾星种子，直接用全量种子星的自行速度场作为基质进行SVD
+            print("⚠️ [Triple Prior] 观测到外围长尾种子星过稀疏，自动激活全局自行速度场降级计算主轴...")
+            delta_pm_global = X[:, 2:4] - mean_core[2:4]
+            U, S, Vt = np.linalg.svd(delta_pm_global - np.mean(delta_pm_global, axis=0), full_matrices=False)
+
+        # 🛑 [二级降级绝杀]: 如果由于极致紧凑等原因导致 Vt 的行数依旧为 0，强行赋予动力学本征单位矢量
+        if Vt.shape[0] == 0:
+            print("🚨 [Triple Prior] 速度空间奇异值分解退化为0维，强行灌注本征方向轴防止越界崩塌！")
+            primary_axis = np.array([1.0, 0.0])  # 强行指向 pmra 轴向
+        else:
+            primary_axis = Vt[0, :]  # 2D 速度空间的主要撕裂矢量
+
+        # ---- 基于主轴投影进行前导与后随阵营判定 ----
+        if len(X_outer) > 0:
+            # 正常对外围星进行运动学主轴投影与暴力切分
+            delta_pm_outer = X_outer[:, 2:4] - mean_core[2:4]
+            projections = np.dot(delta_pm_outer, primary_axis)
+            
+            leading_mask = (projections >= 0)
+            X_leading_init = X_outer[leading_mask]
+            X_trailing_init = X_outer[~leading_mask]
+        else:
+            # 若外围星直接为0，为了让后面的聚类先验矩阵能顺利拼接，手动赋空数组促使触发下游的物理外推兜底
+            X_leading_init = np.array([])
+            X_trailing_init = np.array([])
 
         # ---- Component 1: Leading Tail (前导尾先验) ----
         if len(X_leading_init) > 5:
             mean_leading = np.mean(X_leading_init, axis=0)
             cov_leading = np.cov(X_leading_init, rowvar=False) * 2.0
         else:
-            # 兜底：若前导样本过稀疏，从核心质心向前推移
+            # 🔮 兜底：若前导样本过稀疏，从核心质心向前推移（利用运动学撕裂方向映射回空间）
+            print("🌌 [Triple Prior] 前导尾样本不足，执行物理先验外推...")
             mean_leading = mean_core.copy()
-            mean_leading[0] += 0.5 # 空间 RA 正向外推
+            mean_leading[0] += 0.3  # 空间 RA 正向外推 0.3 度
             cov_leading = np.cov(X, rowvar=False) * 3.0
             
         # ---- Component 2: Trailing Tail (后随尾先验) ----
@@ -74,19 +94,20 @@ class TripleComponentModeller:
             mean_trailing = np.mean(X_trailing_init, axis=0)
             cov_trailing = np.cov(X_trailing_init, rowvar=False) * 2.0
         else:
-            # 兜底：向核心质心反向外推
+            # 🔮 兜底：向核心质心反向外推
+            print("🌌 [Triple Prior] 后随尾样本不足，执行物理先验外推...")
             mean_trailing = mean_core.copy()
-            mean_trailing[0] -= 0.5
+            mean_trailing[0] -= 0.3  # 空间 RA 反向外推 0.3 度
             cov_trailing = np.cov(X, rowvar=False) * 3.0
 
-        # 强行对两条尾巴的空间协方差进行方向性各向异性注入
+        # 强行对两条尾巴的空间协方差进行方向性各向异性注入，强迫混合模型具备横向延展的物理直觉
         cov_leading[0, 0] *= 4.0; cov_leading[1, 1] *= 4.0
         cov_trailing[0, 0] *= 4.0; cov_trailing[1, 1] *= 4.0
 
-        # 组合三组先验
+        # 组合三组先验契约
         means_init = np.vstack([mean_core, mean_leading, mean_trailing])
         covs_init = np.stack([cov_core, cov_leading, cov_trailing])
-        weights_init = np.array([0.5, 0.25, 0.25]) # 预估核心占一半，两条尾巴各分四分之一
+        weights_init = np.array([0.5, 0.25, 0.25])  # 预估核心占一半，两条尾巴各分四分之一
         
         return means_init, covs_init, weights_init
 
@@ -119,7 +140,8 @@ class TripleComponentModeller:
         self.model.weights_init = weights_init
         
         # 4. 轰鸣拟合
-        self.model.fit(X, sample_weight=sample_weights)
+        # self.model.fit(X, sample_weight=sample_weights)
+        self.model.fit(X)               # TODO 后续要更改为带权重的拟合
         
         print("🎯 [Substructure] 三组分亚结构精细解剖收敛成功！")
         self._audit_components()

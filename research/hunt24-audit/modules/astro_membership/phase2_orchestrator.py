@@ -25,7 +25,7 @@ class Phase2Orchestrator:
 
     def __init__(self, config: dict):
         self.config = config
-        self.features = ["ra", "dec", "pmra", "pmdec", "parallax"]
+        self.features = ["ra", "dec", "pmra", "pmdec", "plx"]
         self._route_substructure_model()
 
     def _route_substructure_model(self):
