@@ -36,8 +36,8 @@ GAIA_PWD = os.getenv("GAIA_PWD")
 # =================================================================
 # 2. 科学计算门限与物理常数 (Thresholds & Physics)
 # =================================================================
-MEMBER_SAMPLE_THRESHOLD = 1e-5
-GOLDEN_SAMPLE_THRESHOLD = 1 - MEMBER_SAMPLE_THRESHOLD
+MEMBER_SAMPLE_THRESHOLD = 5.0e-1
+GOLDEN_SAMPLE_THRESHOLD = 8.0e-1
 
 AUDIT_PROB_HIGH = 0.7  # 成员身份判定高门限
 AUDIT_PROB_LOW = 0.3  # 成员身份判定低门限（背景噪点）
@@ -234,7 +234,7 @@ CLUSTERS = {
         # 一阶段策略选择器
         "STRATEGY": "bayesian",  # 当前激活策略：卡方截断
         # 二阶段策略选择器
-        "SUBSTRUCTURE_PATH_MODE": 0,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
+        "SUBSTRUCTURE_PATH_MODE": 1,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -1022,7 +1022,7 @@ GMM_CONFIG = {
     "gmm_covariance_type": "full",
     "max_iter": 20,
     "tol": 1e-5,
-    "use_experimental": 1,  # 启用实验性功能，0: 原始, 1: 潮汐尾识别模式-phase1, 2: 潮汐尾识别模式-phase2
+    "use_experimental": 2,  # 启用实验性功能，0: 原始PriorGMM, 1: 潮汐尾识别模式-phase1(是否属于星团成员由外部判定), 2: 潮汐尾识别模式-phase2
     "default_strategy": "bayesian",  # 潮汐尾识别模式下, 阶段一的默认精筛策略
     "enable_subsampling": False,  # 是否启用背景下采样优化，以加速模型拟合
     "subsampling_limit": 500000,  # 下采样触发门限及目标样本量
