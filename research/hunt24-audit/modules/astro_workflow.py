@@ -1,17 +1,35 @@
-import logging
+# -*- coding: utf-8 -*-
+"""
+modules/workflow.py
 
+天文数据处理工作流编排引擎。
+集成了双轨制（稳定旧轨/实验新轨）精筛洗涤机制，支持高维贝叶斯对抗与自适应种子粗筛。
+"""
+
+import logging
 import pandas as pd
 from astroquery.simbad import Simbad  # pylint: disable=unused-import
 
 from utils.decorators import astro_checkpoint
-
 from modules.astro_db import AstroDB
 from modules.pg_core import PriorGMM
-from modules.pg_core_ex import PriorGMMEx
 from modules.validator import UnifiedMemberValidator
 from modules.transformer import AstroTransformer
 from modules.reporter import render_final_report, render_all_modes_comparison
 from modules.cluster import StarCluster
+
+# 🚀 实验新轨核心模块引入
+from modules.cluster_seed_extractor import ClusterSeedExtractor
+from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
+from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
+from modules.astro_membership.disambiguation.blind import BlindGmmDisambiguation
+
+from modules.astro_membership.substructure.identity import IdentityComponentModeller
+from modules.astro_membership.substructure.dual_component import DualComponentModeller
+from modules.astro_membership.substructure.triple_component import TripleComponentModeller
+
+from modules.astro_membership.phase2_orchestrator import Phase2Orchestrator
+from modules.astro_membership.cutter import DensityFieldCutter
 
 import config as cfg
 from config import (
@@ -47,12 +65,11 @@ class AstroWorkflow:
         """初始化工作流实例。
 
         Args:
-            db_instance (AstroDB | None): 活跃的 AstroDB 数据库对象。
-                为 None 时自动创建新实例（工作流关闭时自动释放）。
-            target_cluster (str): 当前处理的星团 ID。
-            target_category (str): 当前审计的类别。
-            mode (str): 算法执行模式。
-            algo (str): 聚类算法名称 (如 'dbscan', 'hdbscan')。
+            db_instance (AstroDB | None): 活跃原生数据库实例，传入 None 时内部自动构建。
+            target_cluster (str): 目标星团唯一标识符（不区分大小写）。
+            target_category (str): 目标文献比对类别。
+            mode (str): 动力学特征空间维度模式 ('3d', '5d', '6d')。
+            algo (str): 核心聚类识别算法（用于实验新轨多态路由）。
         """
         if db_instance is None:
             self.db = AstroDB(manifest=cfg.MANIFEST)
@@ -64,7 +81,7 @@ class AstroWorkflow:
         self.target_cluster = target_cluster
         self.target_category = target_category
         self.mode = mode
-        self.algo = algo
+        self.algo = algo  # 🎯 传递给实验多态策略的无监督算法标识
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(self.db, "data_manifest", {})
         self.t_master = cfg.TMPL.T_MASTER.format(
@@ -113,7 +130,7 @@ class AstroWorkflow:
 
         Args:
             idx_data (str): 数据键。
-            src (dict): 配置字典。
+            src (dict): 配置字典.
             required_features (list): 必须具备的物理特征列。
 
         Returns:
@@ -129,8 +146,7 @@ class AstroWorkflow:
         # 这样在 2D 模式下，即便视差 (plx) 缺失，只要自行 (pm) 还在，种子星就不会被丢弃。
         if required_features:
             # 🚀 [Bugfix] 仅对当前存在的特征执行清洗。
-            # 派生特征（如 l, b, U, V, W）此时尚未生成，
-            # 将在 Transformer 转换后的 _defensive_nan_purge 中处理
+            # 派生特征（如 l, b, U, V, W）此时尚未生成，将在 Transformer 转换后的 _defensive_nan_purge 中处理
             available_features = [f for f in required_features if f in df_raw.columns]
             df_seeds = df_raw.dropna(subset=available_features).copy()
         else:
@@ -329,7 +345,7 @@ class AstroWorkflow:
         """检查审计目标表在数据库中是否存在。
 
         Args:
-            v_target (str): 目标表名。
+            v_target (str): 目标表名.
 
         Returns:
             bool: 存在则返回 True。
@@ -494,7 +510,7 @@ class AstroWorkflow:
         """[私有方法] 原子拆解：解析 GMM 配置项与特征空间。
 
         Returns:
-            tuple: (配置字典, 运行模式字符串, 特征列名列表)。
+            tuple: (配置字典, 特征列名列表)。
         """
         # 采用局部副本，防止污染全局配置
         gmm_cfg = GMM_CONFIG.copy()
@@ -523,7 +539,7 @@ class AstroWorkflow:
         Args:
             df_raw: 原始 DataFrame。
             ctx_cluster: 星团上下文。
-            mode: 运行模式 (e.g., '3d', '6d_p')。
+            mode: 运行模式 (e.g., '3d', '6d_p') rotate。
             required_features: 所需特征列名列表。
 
         Returns:
@@ -608,20 +624,20 @@ class AstroWorkflow:
         force_refresh=True,
     )
     def run_pgmm(self, ctx_cluster):
-        """驱动核心精筛计算流水线：支持实验双轨制安全开关。
+        """驱动核心精筛计算流水线：支持一阶段新旧轨灰度并线。
 
-
-        运行高斯混合模型（GMM）成员星判定管线。
+        运行高斯混合模型（GMM）成员星消歧判定管线。
         
         支持双轨控制：
-          - 稳定旧轨 (use_experimental=False): 维持老 PriorGMM 行为，依赖外部种子表。
-          - 实验新轨 (use_experimental=True): 启用 ClusterSeedExtractor 自适应无监督粗筛种子，
-            并无缝路由至多态精筛策略工厂（Bayesian / Threshold / Blind）。
+          - 稳定旧轨 (use_experimental=False): 维持老 PriorGMM 行为，依赖外部静态种子表。
+          - 实验新轨 (use_experimental=True): 启用 ClusterSeedExtractor 洗涤自适应高纯度种子，
+            并统一路由至精简后的一阶段核心 2-Component 贝叶斯消歧器 (BayesianGmmDisambiguation)。
+
         Args:
             ctx_cluster (dict): 星团上下文环境，包含星团专有的 Profile 参数。
 
         Returns:
-            str: 算法结果在数据库中的固化总表名 (self.t_master)。
+            str: 一阶段算法结果在数据库中的固化总表名 (self.t_master)。
         """
         # 1. 确定运行模式与特征空间需求
         # required_features = self._get_required_features()
@@ -641,9 +657,9 @@ class AstroWorkflow:
         self.db.init_master_table(self.t_master, df_target_raw)
 
         # 获取实验性功能全局开关标志
-        use_experimental = GMM_CONFIG.get("use_experimental", False)
+        use_experimental = GMM_CONFIG.get("use_experimental", 0)
 
-        if not use_experimental:
+        if use_experimental == 0:
             # =========================================================================
             # 🔒 【稳定旧轨】：100% 还原传统生产管线行为
             # =========================================================================
@@ -681,31 +697,25 @@ class AstroWorkflow:
             engine.fit(df_target_final, df_seeds_purge, required_features)
             df_res = engine.predict(df_target_final, required_features)
 
-        else:
+        elif use_experimental in (1, 2):
             # =========================================================================
-            # 🚀 【实验新轨】：并线自适应无监督粗筛 Extractor + 多态策略工厂
+            # 🚀🌌 【实验轨道并线】：1 与 2 前期完全穿透共用，后期动态分流
             # =========================================================================
-            strategy_name = ctx_cluster.get(
-                "STRATEGY", GMM_CONFIG.get("default_strategy", "bayesian")
-            ).lower()
-            self.logger.info(f"🚀 [双轨分流] 已激活实验性多态管线。当前激活策略: [{strategy_name.upper()}]")
+            self.logger.info(f"⚡ [双轨分流] 已激活实验性并线轨道。当前模式值: [use_experimental={use_experimental}]")
 
-            # A. 靶场全量天区进行高维特征变换（如 ICRS 转换为 3D/5D/6D 等物理模式）
+            # -------------------------------------------------------------------------
+            # 🧬 【Phase 1 / 一阶段】：全量共用、完全穿透（等同于 C++ case 1 不加 break）
+            # -------------------------------------------------------------------------
+            # A. 靶场全量天区特征变换与防御性清洗
             current_mode = self.mode
-            self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
             df_target_ext = self._transform_and_bridge_features(
                 df_target_raw, ctx_cluster, current_mode, required_features
             )
-
-            # B. 靶场全量天区执行 NaN 防御清洗，构建干净的多维矩阵底座
             df_target_final = self._defensive_nan_purge(
                 df_target_ext, required_features, label="Target_field"
             )
 
-            # C. 🔌 正式唤醒重构的 ClusterSeedExtractor。自适应感知天区背景噪声并自动生成高纯度种子星
-            self.logger.info("🧬 正在调度 ClusterSeedExtractor 运行自适应粗筛提取种子星...")
-            from modules.cluster_seed_extractor import ClusterSeedExtractor
-
+            # B. 获取并清洗用于粗筛种子的基础物理星表
             seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
             df_seeds_raw = self._get_seeds(
                 idx_data=seed_idx,
@@ -714,63 +724,110 @@ class AstroWorkflow:
                 ctx=ctx_cluster,
                 required_features=required_features,
             )
-
             df_seeds_ext = self._transform_and_bridge_features(
                 df_seeds_raw, ctx_cluster, current_mode, required_features
             )
-
             df_seeds_purge = self._defensive_nan_purge(
                 df_seeds_ext, required_features, label="Seeds"
             )
             
-            # 严格按照构造函数契约传入当前星团的 Profile 配置字典
+            # C. 调度 ClusterSeedExtractor 从背景噪声中洗涤高纯度种子
+            self.logger.info("🧬 [Phase 1] 正在驱动自适应 ClusterSeedExtractor 洗涤高纯度种子...")
             extractor = ClusterSeedExtractor(cluster_profile=ctx_cluster)
             df_seeds_final = extractor.extract_seeds(
-                # field_stars_df=df_target_final,
                 field_stars_df=df_seeds_purge,
                 features=required_features
             )
 
-            # 拦截提取异常，防止下游硬崩溃
             if df_seeds_final is None or df_seeds_final.empty:
                 raise ValueError("❌ 种子星粗筛危机：ClusterSeedExtractor 未能凝聚出任何有效种子星！")
-            self.logger.info(f"✅ 种子星粗筛成功！共沉淀出 {len(df_seeds_final)} 颗高纯度核心种子星。")
-            self.logger.info(f"🚀 [双轨分流] 已激活实验性多态管线。当前激活策略: [{strategy_name.upper()}]")
+            
+            self.logger.info(f"✅ [Phase 1] 沉淀完成。共洗出 {len(df_seeds_final)} 颗高纯度种子星。")
 
-            # D. 路由并动态装配具体的实验精筛解异策略
-            strategy_params = ctx_cluster.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
-            strategy_kwargs = {**strategy_params}
-            strategy_kwargs.setdefault("spatial_cols", ["ra", "dec"])
-            strategy_kwargs.setdefault("scale_col", "plx")
+            # -------------------------------------------------------------------------
+            # 🎯 【Phase 2 / 二阶段】：根据 use_experimental 的值进行后期分流结算
+            # -------------------------------------------------------------------------
+            if use_experimental == 1:
+                # =====================================================================
+                # 轨道 1：多态策略工厂模式（Bayesian / Threshold / Blind）
+                # =====================================================================
+                strategy_name = ctx_cluster.get(
+                    "STRATEGY", GMM_CONFIG.get("default_strategy", "bayesian")
+                ).lower()
+                self.logger.info(f"🚀 [Phase 2] 激活多态策略工厂。当前激活策略: [{strategy_name.upper()}]")
 
-            # 延迟动态导入，避免老模式运行未包含新模块时抛错
-            from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
-            from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
-            from modules.astro_membership.disambiguation.blind import BlindGmmDisambiguation
+                strategy_params = ctx_cluster.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
+                strategy_kwargs = {**strategy_params}
+                strategy_kwargs.setdefault("cluster_algo", self.algo)
+                strategy_kwargs.setdefault("spatial_cols", ["ra", "dec"])
+                strategy_kwargs.setdefault("scale_col", "plx")
 
-            STRATEGY_CLASSES = {
-                "bayesian": BayesianGmmDisambiguation,
-                "threshold": ThresholdGmmDisambiguation,
-                "blind": BlindGmmDisambiguation,
-            }
+                STRATEGY_CLASSES = {
+                    "bayesian": BayesianGmmDisambiguation,
+                    "threshold": ThresholdGmmDisambiguation,
+                    "blind": BlindGmmDisambiguation,
+                }
 
-            if strategy_name not in STRATEGY_CLASSES:
-                raise ValueError(f"❌ 实验程序错误: 未知的策略类型 [{strategy_name}]")
-            else:
-                self.logger.info(f"✅ 已成功路由至策略类 [{STRATEGY_CLASSES[strategy_name].__name__}]")
+                if strategy_name not in STRATEGY_CLASSES:
+                    raise ValueError(f"❌ 实验程序错误: 未知的策略类型 [{strategy_name}]")
+                
+                engine = STRATEGY_CLASSES[strategy_name](**strategy_kwargs)
+                df_res = engine.fit_predict(df_target_final, df_seeds_final, required_features)
 
-            # 实例化策略引擎并一键推演
-            engine = STRATEGY_CLASSES[strategy_name](**strategy_kwargs)
-            df_res = engine.fit_predict(df_target_final, df_seeds_final, required_features)
+            elif use_experimental == 2:
+                # =====================================================================
+                # 轨道 2：多态亚结构解剖（Identity / Dual / Triple） + 密度场自适应裁剪
+                # =====================================================================
+                if 'seed_label' not in df_seeds_final.columns:
+                    raise KeyError("❌ 接口契约破裂：轨道 2 必须要求一阶段输出包含 'seed_label' 列！")
+
+                path_mode = ctx_cluster.get("SUBSTRUCTURE_PATH_MODE", 0)
+                self.logger.info(f"🌌 [Phase 2] 激活细分亚结构解剖流。当前路径模式: [路径 {path_mode}]")
+
+                SUBSTRUCTURE_MODELS = {
+                    0: IdentityComponentModeller,  # 年轻紧凑无尾基准椭球
+                    1: DualComponentModeller,      # 核心 + 潮汐长尾
+                    2: TripleComponentModeller,    # 核心 + 前导尾 + 后随尾非对称撕裂
+                }
+
+                if path_mode not in SUBSTRUCTURE_MODELS:
+                    raise ValueError(f"❌ 实验轨道 2 错误: 未知的亚结构路径模式 [{path_mode}]")
+
+                # 模型训练与多维概率投影
+                modeller = SUBSTRUCTURE_MODELS[path_mode](config=ctx_cluster)
+                self.logger.info("⚡ 正在将一阶段洗涤种子注入二阶段混合模型进行重构拟合...")
+                modeller.fit(df_seeds_final) 
+                df_demarcated = modeller.predict_membership(df_target_final)
+
+                # 调用斩杀算子进行场裁剪
+                target_score_col = "log_p_identity" if path_mode == 0 else "p_total_cluster"
+                cutter = DensityFieldCutter(config=ctx_cluster)
+                self.logger.info(f"✂️ 正在激活 DensityFieldCutter，基于评分列 [{target_score_col}] 计算断层边界...")
+                
+                df_final_audit = cutter.cut_field(
+                    df_all=df_demarcated, 
+                    target_score_col=target_score_col, 
+                    features=required_features
+                )
+
+                # 原始行索引精准映射（保证回灌格式契约）
+                df_res = df_target_final.copy()
+                df_res["prob"] = 0.0  
+                member_mask = (df_final_audit["is_member"] == True)
+                df_res.loc[df_final_audit[member_mask].index, "prob"] = 1.0
+                
+                self.logger.info(f"🎯 轨道 2 自适应截断最终锁定 [{int(df_res['prob'].sum())}] 颗高本征成员星。")
+        
+        else:
+            raise ValueError(f"❌ 未知的实验轨道开关值: {use_experimental}. 请检查 GMM_CONFIG['use_experimental'] 配置。")
 
         # =========================================================================
         # 🤝 【统一安全回灌通道】：严格顺应底层只有 id 与 prob 的真实物理 Facts
         # =========================================================================
         if df_res is None or df_res.empty:
             raise ValueError("❌ 算法内核异常：策略返回或缓存读取的 DataFrame 为空！")
-        else:
-            self.logger.info(f"✅ 算法内核计算完成，生成结果集共计 {len(df_res)} 颗天体。")
-
+        
+        self.logger.info(f"✅ 算法内核计算完成，生成结果集共计 {len(df_res)} 颗天体。")
         self.logger.info("📥 正在将精筛洗涤概率结果同步至 Master 表...")
         
         # 严防硬编码臆造字段带来的 KeyError，新旧版本策略一律通过本通道安全同步
@@ -939,7 +996,7 @@ class AstroWorkflow:
         self.logger.info(f"✨ 算法推断完成，结果表: {t_result}")
 
         # [4/5] 后处理
-        self.logger.info("📊 [4/5] 正在合成分析宽表并提取候选成员视图...")
+        self.logger.info("📊 [4/5] 正在合成 analysis 宽表并提取候选成员视图...")
         v_all = self.post_pgmm(t_result)
         if v_all.get("status") != "success":
             self.logger.error(f"❌ 后处理流程失败: {v_all.get('message')}")

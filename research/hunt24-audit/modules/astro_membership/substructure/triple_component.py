@@ -140,12 +140,12 @@ class TripleComponentModeller:
             print(f"     速度质心 (pmra, pmdec): ({mean[2]:.3f}, {mean[3]:.3f})")
             print(f"     5D 弥散方差: {np.array2string(diag_cov, precision=4)}")
 
-    def predict_membership(self, df_广域: pd.DataFrame) -> pd.DataFrame:
+    def predict_membership(self, df_field: pd.DataFrame) -> pd.DataFrame:
         """ 广域 18 度大沙盘解算与打标 """
-        X_all = df_广域[self.features].values
+        X_all = df_field[self.features].values
         probs = self.model.predict_proba(X_all)
         
-        df_res = df_广域.copy()
+        df_res = df_field.copy()
         df_res['p_core'] = probs[:, 0]
         df_res['p_leading'] = probs[:, 1]
         df_res['p_trailing'] = probs[:, 2]

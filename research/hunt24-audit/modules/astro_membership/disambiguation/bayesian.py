@@ -4,6 +4,8 @@ modules/astro_membership/disambiguation/bayesian.py
 
 独立子包策略：基于双模型贝叶斯对抗与极大似然 EMA 迭代的成员星歧义消除算法。
 专门用于处理银盘背景复杂、噪声严重的星团靶场（如 M44, M67）。
+本模块专注于“单流形高维物理先验（1-Cluster Prior） vs 全域背景经验分布（Empirical Field Density）”的贝叶斯后验迭代博弈。
+通过与前置 ClusterSeedExtractor 协同，在不启用二阶段的高级亚结构动力学识别时，亦能独立输出极高纯度、极其稳健的核心成员星资产。
 """
 
 import logging
@@ -44,6 +46,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         """
         self.logger = logging.getLogger(f"AstroPipeline.AstroMembership.{__name__}")
 
+        # 🎯 保留：无监督聚类控制超参数，供后续定制化用处扩展
         self.cluster_algo = cluster_algo.lower()
         self.dbscan_eps = dbscan_eps
         self.dbscan_min_samples = dbscan_min_samples
@@ -51,9 +54,14 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         self.hdbscan_min_samples = hdbscan_min_samples
         self.hdbscan_eps = hdbscan_eps
 
+        # 核心递归迭代超参数
         self.max_iter = max_iter
         self.tol = tol
         self.member_threshold = member_threshold
+        
+        self.logger.info(
+            f"⚙️ [BayesianGMM] 算子初始化完成 | 备用聚类算法: {self.cluster_algo} | 最大迭代步数: {self.max_iter}"
+        )
 
     def fit_predict(
         self, df_all: pd.DataFrame, df_seeds: pd.DataFrame, features: List[str]
@@ -62,7 +70,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         洗涤接口：消除背景歧义并为全量天体打上成员概率标签。
 
         Args:
-            df_all (pd.DataFrame): 经过特征工程前置对齐后的全量天区观测数据。
+            df_all (pd.DataFrame): 经过特征工程前置对齐后的全量天区观测数据（广域大沙盘）。
             df_seeds (pd.DataFrame): 经过无监督或外部物理先验初筛的高纯度种子数据集。
             features (List[str]): 参与高维相空间拟合的特征列名定义（由 MEMBERSHIP_FEATURES 指定）。
 
@@ -71,6 +79,9 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         """
         self.logger.info(
             f"🧬 [BayesianGMM] 启动高维洗涤内核 | 特征空间维度: {len(features)}D -> {features}"
+        )
+        self.logger.info(
+            f"📊 当前输入总盘面数据量: {len(df_all)} 颗星 | 输入种子源数据量: {len(df_seeds)} 颗星"
         )
 
         # --------------------------------==================--------------------------------
@@ -82,6 +93,10 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         )
 
         n_seeds = len(df_seeds_clean)
+        if n_seeds == 0:
+            raise ValueError("❌ [内核崩溃] 传入的一阶段有效种子星数量为 0，无法构建物理先验椭球！")
+
+        # 根据有效种子数量初步评估是否允许密度修剪
         if n_seeds < self.dbscan_min_samples:
             self.logger.warning(
                 f"⚠️ [内核警告] 有效种子星数量 ({n_seeds}) 低于修剪阈值 {self.dbscan_min_samples}。将跳过密度修剪。"
@@ -90,6 +105,8 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         else:
             use_density_prune = True
 
+        # 🔒 【安全锁】：遵照并线流控契约，目前默认强制关闭一阶段内部的密度修剪，直接让 ClusterSeedExtractor 成果直通 GMM
+        # 您在后续需要用到这部分片段时，只需解除此行的硬编码限制或由外部控制变量透传即可
         use_density_prune = False  # 强制关闭密度修剪，直接使用全量种子集拟合 GMM
 
         # --------------------------------==================--------------------------------
@@ -101,14 +118,17 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
 
         X_field_scaled = scaler.transform(df_field_clean[features])
         X_seeds_scaled = scaler.transform(df_seeds_clean[features])
+        self.logger.info("📐 物理相空间数学归一化完成，已统一对齐至全域背景方差基准结构。")
 
         # --------------------------------==================--------------------------------
         # 3. 🌌 构建全域背景似然场模型 (Field Model)
         # --------------------------------==================--------------------------------
+        # 将全域靶场大沙盘作为背景噪声池，拟合全天区的真实复杂经验背景分布
         field_model = GaussianMixture(
             n_components=1, covariance_type="full", random_state=42
         )
         field_model.fit(X_field_scaled)
+        self.logger.info("🌌 全域背景经验密度场拟合完成（Field Model Baseline 确立）。")
 
         # --------------------------------==================--------------------------------
         # 4. 🎯 稳健密度修剪：剥离种子集中的银盘噪声，锁定星团核心 (Cluster Model)
@@ -147,7 +167,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
                 algo_name = "HDBSCAN"
             else:
                 self.logger.info(
-                    f"🧬 [DBSCAN 粗筛] 启动密度修剪 | eps: {self.dbscan_eps} | min_samples: {self.dbscan_min_samples}"
+                    f"🧬 [DBSCAN 粗筛分支] 启动局部密度修剪 | eps: {self.dbscan_eps} | min_samples: {self.dbscan_min_samples}"
                 )
                 db = DBSCAN(
                     eps=self.dbscan_eps, min_samples=self.dbscan_min_samples
@@ -180,15 +200,17 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
                         f"🎯 [核心锁定] {algo_name} 修剪成功：剔除野星 {np.sum(labels == -1)} 颗，沉淀核心样本 {len(X_core)} 颗。"
                     )
 
-        # 拟合高纯度星团成员先验高斯
+        # 拟合高纯度星团成员先验高斯，锁定星团核心多维相空间的中心 μ 和协方差矩阵 Σ
         cluster_model = GaussianMixture(
             n_components=1, covariance_type="full", random_state=42
         )
         cluster_model.fit(X_core)
+        self.logger.info(f"🎯 星团核心 1-Component 高维物理先验椭球构建成功 | 核心拟合源数据样本数: {len(X_core)}")
 
         # --------------------------------==================--------------------------------
         # 5. 🔮 运动学/动力学混合空间递归对抗收敛迭代 (EMA 推理)
         # --------------------------------==================--------------------------------
+        self.logger.info("⏳ 正在计算全域样本基于双模型的绝对概率似然场...")
         total_stars = len(X_field_scaled)
         p_cl = np.exp(cluster_model.score_samples(X_field_scaled))
         p_fi = np.exp(field_model.score_samples(X_field_scaled))
@@ -201,6 +223,9 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
 
         f_floor = f_current * 0.2  # 🌟 动态护栏：根据每个星团的初始本征规模，自适应定制保护底线
 
+        self.logger.info(f"🛡️ 动态收敛护栏已激活 | 成员密度保护底线 f_floor = {f_floor:.6f} (防止外围成员被背景稀释吞噬)")
+
+        # 进入极大似然递归对抗的核心迭代循环
         for iteration in range(1, self.max_iter + 1):
             num = p_cl * f_current
             den = num + p_fi * (1.0 - f_current)
@@ -222,7 +247,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             f_current = f_new
         else:
             self.logger.warning(
-                f"⚠️ [收敛警告] 达到最大安全步数 ({self.max_iter}) 未完全收敛。delta: {diff:.2e}"
+                f"⚠️ [收敛警告] 达到最大安全步数 ({self.max_iter}) 未完全收敛。最终 delta: {diff:.2e} | 最终权重 f = {f_current:.6f}"
             )
 
         # --------------------------------==================--------------------------------
@@ -245,4 +270,5 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             )
             return df_final
 
+        self.logger.info("✨ 一阶段贝叶斯消歧数据清洗与概率结算完毕。")
         return df_result_clean

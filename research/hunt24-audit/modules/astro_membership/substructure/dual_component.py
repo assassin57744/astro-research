@@ -127,16 +127,16 @@ class DualComponentModeller:
             print(f"     空间质心 (RA, DEC): ({mean[0]:.3f}, {mean[1]:.3f})")
             print(f"     相空间本征弥散 (对角线方差): {np.array2string(diag_cov, precision=4)}")
 
-    def predict_membership(self, df_广域: pd.DataFrame) -> pd.DataFrame:
+    def predict_membership(self, df_field: pd.DataFrame) -> pd.DataFrame:
         """
         对 18 度广域沙盘全量成员进行亚结构概率解码
         """
-        X_all = df_广域[self.features].values
+        X_all = df_field[self.features].values
         
         # 计算每颗星属于 Core 和 Tail 的各自后验概率
         probs = self.model.predict_proba(X_all)
         
-        df_res = df_广域.copy()
+        df_res = df_field.copy()
         df_res['p_core'] = probs[:, 0]
         df_res['p_tail'] = probs[:, 1]
         df_res['p_total_cluster'] = df_res['p_core'] + df_res['p_tail']
