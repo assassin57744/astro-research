@@ -234,7 +234,7 @@ CLUSTERS = {
         # 一阶段策略选择器
         "STRATEGY": "bayesian",  # 当前激活策略：卡方截断
         # 二阶段策略选择器
-        "SUBSTRUCTURE_PATH_MODE": 1,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
+        "SUBSTRUCTURE_PATH_MODE": 2,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -258,9 +258,10 @@ CLUSTERS = {
             },
         },
         # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
-        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
-        "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
+        "CUTTER_MODE": "chi2",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
+        "CUTTER_CHI2_QUANTILE": 0.990,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
         "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
+        "TAIL_RECOVERY_THRESHOLD": 1.0e-2,   # 尾巴恢复阈值
     },
     "M44": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
@@ -339,8 +340,8 @@ CLUSTERS = {
         "MEMBER_THRESHOLD": 0.5,  # 阶段一贝叶斯切分门槛
 
         # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
-        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
-        "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
+        "CUTTER_MODE": "chi2",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
+        "CUTTER_CHI2_QUANTILE": 0.990,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
         "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
         # "MEMBER_THRESHOLD": 0.5,      # 废弃不用
     },
@@ -503,8 +504,8 @@ CLUSTERS = {
         },
         "MEMBER_THRESHOLD": 0.5,  # 阶段一贝叶斯切分门槛
         # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
-        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
-        "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
+        "CUTTER_MODE": "chi2",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点) 或 "none" (不检测)
+        "CUTTER_CHI2_QUANTILE": 0.990,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
         "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
     },
     "M13": {
@@ -591,7 +592,7 @@ CLUSTERS = {
         "CMD_DEV": 0.6,
         "SEED_RADIUS": 1.5,
         "SEED_PLX_LIM": 0.6,  # PLX_ERROR * 3
-        "SEED_MAX_MAG": 19.5,
+        "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.4,
         "UPMASK_ITERATIONS": 20,
         "UPMASK_MAX_CLUSTERS": 2,
@@ -600,7 +601,7 @@ CLUSTERS = {
         # "DISAMBIGUATION_MODE": "threshold_gmm",   # 老疏散星团，强噪声对抗
         # "SUBSTRUCTURE_MODE": "identity",        # 守护并剥离长期演化遗留的潮汐尾
         # 一阶段策略选择器
-        "STRATEGY": "bayesian",  # 当前激活策略：卡方截断
+        "STRATEGY": "bayesian",  # 当前激活策略：贝叶斯竞争
         # 二阶段策略选择器
         "SUBSTRUCTURE_PATH_MODE": 2,  # 0: Identity(无尾椭球), 1: Dual(单尾), 2: Triple(非对称双尾)
         "STRATEGY_PARAMS": {
@@ -625,8 +626,8 @@ CLUSTERS = {
             },
         },
         # 🌟 终极后处理斩杀算子 DensityFieldCutter 的自适应行为控制键
-        "CUTTER_MODE": "knee",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
-        "CUTTER_CHI2_QUANTILE": 0.997,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
+        "CUTTER_MODE": "chi2",  # 自适应截断检测模式: 'chi2' (卡方分位数) 或 'knee' (二阶曲率拐点)
+        "CUTTER_CHI2_QUANTILE": 0.990,  # 若为 chi2 模式：控制卡方自由度边界的硬卡分位数 (如 3-Sigma 对应 0.9973)
         "CUTTER_KNEE_SENSITIVITY": 1.0,  # 若为 knee 模式：自适应拐点探测的灵敏度调节系数
         # "MEMBER_THRESHOLD": 0.5,      # 废弃不用
     },
