@@ -212,7 +212,7 @@ def main() -> None:
             db_instance=None,
             target_cluster=target_cluster_id,
             target_category=args.category,
-            mode=args.mode,
+            feature_space=args.mode,
             algo=args.algo,
         )
         wf.run(

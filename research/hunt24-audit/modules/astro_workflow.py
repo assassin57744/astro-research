@@ -62,7 +62,7 @@ class AstroWorkflow:
         db_instance: AstroDB | None = None,
         target_cluster=None,
         target_category=None,
-        mode="3d",
+        feature_space="5d",
         algo="dbscan",
     ):
         """初始化工作流实例。
@@ -85,7 +85,7 @@ class AstroWorkflow:
 
         self.target_cluster = target_cluster
         self.target_category = target_category
-        self.mode = mode
+        self.feature_space = feature_space
         self.algo = algo
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         
@@ -95,11 +95,11 @@ class AstroWorkflow:
         self.t_master = cfg.TMPL.T_MASTER.format(
             cluster=self.target_cluster.lower(),
             category=self.target_category,
-            mode=self.mode,
+            mode=self.feature_space,
             algo=self.algo,
         )
         
-        self.logger.info(f"✅ 工作流实例初始化完成: Cluster={target_cluster}, Mode={mode}, Algo={algo}")
+        self.logger.info(f"✅ 工作流实例初始化完成: Cluster={target_cluster}, Mode={feature_space}, Algo={algo}")
         self.logger.info(f"📍 目标 Master 状态表: {self.t_master}")
 
     def data_standardize(self, idx_data, cfg_data, manifest, ctx=None):
@@ -403,7 +403,7 @@ class AstroWorkflow:
 
             # 2. 初始化验证器引擎
             validator = UnifiedMemberValidator(
-                cluster_id=self.target_cluster, db_instance=self.db, mode=self.mode
+                cluster_id=self.target_cluster, db_instance=self.db, mode=self.feature_space
             )
 
             # 3. 预热文献缓存 (SIMBAD/Parent ID 批量查询)
@@ -514,7 +514,7 @@ class AstroWorkflow:
             tuple: (配置字典, 特征列名列表)。
         """
         gmm_cfg = GMM_CONFIG.copy()
-        current_mode = self.mode
+        current_mode = self.feature_space
         gmm_cfg["dim_mode"] = current_mode
 
         feature_map = gmm_cfg.get("feature_map", {})
@@ -623,8 +623,8 @@ class AstroWorkflow:
             df_seeds_raw = self._get_seeds(seed_idx, MANIFEST[seed_idx], self.manifest, ctx_cluster, required_features)
 
             # B. 统一特征工程
-            df_target_ext = self._transform_and_bridge_features(df_target_raw, ctx_cluster, self.mode, required_features)
-            df_seeds_ext = self._transform_and_bridge_features(df_seeds_raw, ctx_cluster, self.mode, required_features)
+            df_target_ext = self._transform_and_bridge_features(df_target_raw, ctx_cluster, self.feature_space, required_features)
+            df_seeds_ext = self._transform_and_bridge_features(df_seeds_raw, ctx_cluster, self.feature_space, required_features)
 
             # C. 防御性清洗
             df_target_final = self._defensive_nan_purge(df_target_ext, required_features, "TargetField")
@@ -643,13 +643,13 @@ class AstroWorkflow:
             self.logger.info(f"⚡ [Engine] 已激活实验性并线轨道 (Option={use_experimental})")
 
             # A. 统一特征变换
-            df_target_ext = self._transform_and_bridge_features(df_target_raw, ctx_cluster, self.mode, required_features)
+            df_target_ext = self._transform_and_bridge_features(df_target_raw, ctx_cluster, self.feature_space, required_features)
             df_target_final = self._defensive_nan_purge(df_target_ext, required_features, "TargetField")
 
             # B. 提取粗筛种子
             seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
             df_seeds_raw = self._get_seeds(seed_idx, MANIFEST[seed_idx], self.manifest, ctx_cluster, required_features)
-            df_seeds_ext = self._transform_and_bridge_features(df_seeds_raw, ctx_cluster, self.mode, required_features)
+            df_seeds_ext = self._transform_and_bridge_features(df_seeds_raw, ctx_cluster, self.feature_space, required_features)
             df_seeds_purge = self._defensive_nan_purge(df_seeds_ext, required_features, "Seeds")
             
             # C. 🧬 [Phase 1] 调度 ClusterSeedExtractor 自适应洗涤高纯度种子星
@@ -785,7 +785,7 @@ class AstroWorkflow:
     def run(self, reconstruct_mode="file", result_mode="brief"):
         """一键驱动完整的端到端管线（对外的唯一核心接口）。"""
         self.logger.info("=" * 70)
-        self.logger.info(f"🔄 [Workflow Start] Cluster: {self.target_cluster} | Mode: {self.mode}")
+        self.logger.info(f"🔄 [Workflow Start] Cluster: {self.target_cluster} | Mode: {self.feature_space}")
         self.logger.info("=" * 70)
         
         try:
@@ -841,7 +841,7 @@ class AstroWorkflow:
 
         if audit_res.get("status") != "success":
             self.logger.warning(f"⚠️ 交叉比对不完整: {audit_res.get('message')}。尝试输出降级报告...")
-            return render_final_report(self.target_cluster, self.target_category, self.mode, self.algo, ctx_cluster, v_all, audit_res, {}, {}, self.logger)
+            return render_final_report(self.target_cluster, self.target_category, self.feature_space, self.algo, ctx_cluster, v_all, audit_res, {}, {}, self.logger)
 
         # 深度审计（针对分流后的 PG Only / Ref Only）
         v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref = self._execute_deep_audits(audit_res)
@@ -852,7 +852,7 @@ class AstroWorkflow:
         # 渲染最终物理审计报告
         self.logger.info("🏁 工作流全部阶段执行完毕，正在生成汇总报告...")
         return render_final_report(
-            self.target_cluster, self.target_category, self.mode, self.algo,
+            self.target_cluster, self.target_category, self.feature_space, self.algo,
             ctx_cluster, v_all, audit_res, deep_stats_pg, deep_stats_ref, self.logger,
         )
 
@@ -894,7 +894,7 @@ class AstroWorkflow:
             return
 
         self.logger.info("💾 [Export] 正在导出详细审计资产 (CSV)...")
-        export_base = cfg.TMPL.FILE_EXPORT_BASE.format(cluster=self.target_cluster, category=self.target_category, mode=self.mode, algo=self.algo)
+        export_base = cfg.TMPL.FILE_EXPORT_BASE.format(cluster=self.target_cluster, category=self.target_category, mode=self.feature_space, algo=self.algo)
         
         # 导出 Master 全量结果
         self.db.export_table(self.t_master, export_dir=cfg.RESULTS_DIR)
