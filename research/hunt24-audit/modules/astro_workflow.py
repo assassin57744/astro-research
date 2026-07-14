@@ -698,7 +698,7 @@ class AstroWorkflow:
 
             # C. 🔌 正式唤醒重构的 ClusterSeedExtractor。自适应感知天区背景噪声并自动生成高纯度种子星
             self.logger.info("🧬 [Compute] 正在调度 ClusterSeedExtractor 运行自适应粗筛提取种子星...")
-            from modules.cluster_seed_extractor import ClusterSeedExtractor
+            from modules.seed_extractor import ClusterSeedExtractor
 
             seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
             df_seeds_raw = self._get_seeds(
