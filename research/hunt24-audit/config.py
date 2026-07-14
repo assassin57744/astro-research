@@ -98,7 +98,7 @@ class TMPL:
 
     # --- 算法结果与分析 ---
     T_RES_SG = "pgmm_{cluster}_{category}_{mode}_{algo}"  # SeedGMM 原始产出
-    T_MASTER = "master_{cluster}_{category}_{mode}_{algo}" # [混合模式] 状态跟踪宽表
+    T_MASTER = "master_{cluster}_{category}_{feature_space}_{algo}" # [混合模式] 状态跟踪宽表
     V_RES_SUB = "v_pgmm_{cluster}_{category}_{mode}_{algo}_{tag}"  # 结果子集视图名模板
     V_ALL = "v_wide_{cluster}_{category}_{mode}_{algo}"  # 集成所有参考星表的分析大宽表
     V_DIFF = "v_diff_{cluster}_{category}_{mode}_{algo}_vs_{idx}"  # 分歧源

@@ -36,24 +36,24 @@ class AstroWorkflow:
         manifest (dict): 来源于数据库实例的数据配置清单。
     """
 
-    def __init__(
-        self,
-        db_instance: AstroDB | None = None,
-        target_cluster=None,
-        target_category=None,
-        mode="3d",
-        algo="dbscan",
-    ):
+    def __init__(self, db_instance: AstroDB | None = None, **kwargs):
         """初始化工作流实例。
 
         Args:
             db_instance (AstroDB | None): 活跃的 AstroDB 数据库对象。
                 为 None 时自动创建新实例（工作流关闭时自动释放）。
-            target_cluster (str): 当前处理的星团 ID。
-            target_category (str): 当前审计的类别。
-            mode (str): 算法执行模式。
-            algo (str): 聚类算法名称 (如 'dbscan', 'hdbscan')。
+            kwargs: 可选的参数，用于传递星团 ID、目标类别、运行模式和算法。
         """
+
+        # 基础属性赋值（带默认值保护）
+        self.target_cluster = kwargs.get("target_cluster")
+        self.target_category = kwargs.get("category", "hunt")
+        self.feature_space = kwargs.get("mode", "5d")
+        self.algo = kwargs.get("algo", "dbscan")
+        
+        # 将所有额外参数存入 config 字典，方便后续逻辑调用
+        self.config = kwargs 
+
         if db_instance is None:
             self.db = AstroDB(manifest=cfg.MANIFEST)
             self._owned_db = True
@@ -61,16 +61,12 @@ class AstroWorkflow:
             self.db = db_instance
             self._owned_db = False
 
-        self.target_cluster = target_cluster
-        self.target_category = target_category
-        self.mode = mode
-        self.algo = algo
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(self.db, "data_manifest", {})
         self.t_master = cfg.TMPL.T_MASTER.format(
             cluster=self.target_cluster.lower(),
             category=self.target_category,
-            mode=self.mode,
+            feature_space=self.feature_space,
             algo=self.algo,
         )
 
@@ -360,7 +356,7 @@ class AstroWorkflow:
                 return None
 
             validator = UnifiedMemberValidator(
-                cluster_id=self.target_cluster, db_instance=self.db, mode=self.mode
+                cluster_id=self.target_cluster, db_instance=self.db, mode=self.feature_space
             )
 
             self._warm_up_literature_cache(validator, v_audit_input)
@@ -492,7 +488,7 @@ class AstroWorkflow:
         """
         # 采用局部副本，防止污染全局配置
         gmm_cfg = GMM_CONFIG.copy()
-        current_mode = self.mode
+        current_mode = self.feature_space
         gmm_cfg["dim_mode"] = current_mode
 
         feature_map = gmm_cfg.get("feature_map", {})
@@ -642,7 +638,7 @@ class AstroWorkflow:
             # 🔒 【稳定旧轨】：100% 还原传统生产管线行为
             # =========================================================================
             self.logger.warning("🔒 [Compute] [双轨分流] 当前处于稳定生产模式：统一执行 PriorGMM 老轨行为")
-            
+
             # A. 通过传统黑盒方法获取外部物理种子表数据
             seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
             df_seeds_raw = self._get_seeds(
@@ -654,7 +650,7 @@ class AstroWorkflow:
             )
 
             # B. 统一进行高维特征转换（新老共用原 workflow 的私有桥接方法）
-            current_mode = self.mode
+            current_mode = self.feature_space
             df_target_ext = self._transform_and_bridge_features(
                 df_target_raw, ctx_cluster, current_mode, required_features
             )
@@ -685,7 +681,7 @@ class AstroWorkflow:
             self.logger.info(f"🚀 [Compute] [双轨分流] 已激活实验性多态管线。当前策略: [{strategy_name.upper()}]")
 
             # A. 靶场全量天区进行高维特征变换（如 ICRS 转换为 3D/5D/6D 等物理模式）
-            current_mode = self.mode
+            current_mode = self.feature_space
             self.logger.info(f"⚡ [Compute] 正在转换特征空间为 [{current_mode.upper()}]...")
             df_target_ext = self._transform_and_bridge_features(
                 df_target_raw, ctx_cluster, current_mode, required_features
@@ -716,7 +712,7 @@ class AstroWorkflow:
             df_seeds_purge = self._defensive_nan_purge(
                 df_seeds_ext, required_features, label="Seeds"
             )
-            
+
             # 严格按照构造函数契约传入当前星团的 Profile 配置字典
             extractor = ClusterSeedExtractor(cluster_profile=ctx_cluster)
             df_seeds_final = extractor.extract_seeds(
@@ -765,13 +761,12 @@ class AstroWorkflow:
             self.logger.info(f"✅ [Compute] 算法内核计算完成，生成结果集共计 {len(df_res)} 颗天体。")
 
         self.logger.info("📥 [Compute] 正在将精筛洗涤概率结果同步至 Master 表...")
-        
+
         # 严防硬编码臆造字段带来的 KeyError，新旧版本策略一律通过本通道安全同步
         updates = df_res[[cfg.STD_COLS["ID"], "prob"]].copy()
         self.db.tag_master_table(self.t_master, updates)
 
         return self.t_master
-
 
         # =========================================================================
         # 🛡️ 【第二阶段双轨控制】：安全分流判定
@@ -779,7 +774,7 @@ class AstroWorkflow:
 
     def run(self, reconstruct_mode="file", result_mode="brief"):
         """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
-        self.logger.info(f"🔄 [Workflow] 启动闭环工作流: {self.target_cluster} [{self.mode}]")
+        self.logger.info(f"🔄 [Workflow] 启动闭环工作流: {self.target_cluster} [{self.feature_space}]")
         try:
             # [1/5] 数据同步
             self.logger.info("📦 [Workflow] [1/5] 正在同步物理数据源...")
@@ -796,7 +791,7 @@ class AstroWorkflow:
                 cfg.IDX_IDS_SIMBAD,
             ]
             self.logger.info(
-                f"📐 [Workflow] [2/5] 正在执行数据对齐 ({self.target_cluster}, 特征空间: {self.mode})..."
+                f"📐 [Workflow] [2/5] 正在执行数据对齐 ({self.target_cluster}, 特征空间: {self.feature_space})..."
             )
             self.data_standardize_all(ref_tables, ctx_cluster)
             self.logger.info("✅ [Workflow] 数据准备阶段完成。")
@@ -830,7 +825,7 @@ class AstroWorkflow:
         """
         # [3/5] GMM 成员识别
         self.logger.info(
-            f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.mode}, 算法: {self.algo})..."
+            f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.feature_space}, 算法: {self.algo})..."
         )
         t_result = self.run_pgmm(ctx_cluster)
         self.logger.info(f"✨ [Workflow] 算法推论完成，结果表: {t_result}")
@@ -858,7 +853,7 @@ class AstroWorkflow:
             )
             # 即使审计不完整也尝试出报告
             return render_final_report(
-                self.target_cluster, self.target_category, self.mode, self.algo,
+                self.target_cluster, self.target_category, self.feature_space, self.algo,
                 ctx_cluster, v_all, audit_res, {}, {}, self.logger,
             )
 
@@ -876,7 +871,7 @@ class AstroWorkflow:
 
         # 报告
         return render_final_report(
-            self.target_cluster, self.target_category, self.mode, self.algo,
+            self.target_cluster, self.target_category, self.feature_space, self.algo,
             ctx_cluster, v_all, audit_res, deep_stats_pg, deep_stats_ref, self.logger,
         )
 
@@ -950,7 +945,7 @@ class AstroWorkflow:
         export_base = cfg.TMPL.FILE_EXPORT_BASE.format(
             cluster=self.target_cluster,
             category=self.target_category,
-            mode=self.mode,
+            mode=self.feature_space,
             algo=self.algo,
         )
 

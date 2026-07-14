@@ -6,6 +6,7 @@
 import argparse
 import logging
 import sys
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def setup_logging(level: int = logging.INFO) -> None:
 
     logger.setLevel(logging.DEBUG)
 
+    # 统一日志格式，增加对齐
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname).4s] %(filename)18s:%(lineno)4d | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -46,7 +48,7 @@ def setup_logging(level: int = logging.INFO) -> None:
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    logger.info(f"📝 日志系统就绪。文件存放在: {log_path}")
+    logger.info(f"📝 [System] 日志系统就绪。执行快照: {log_path.name}")
 
 
 # =============================================================================
@@ -94,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="brief",
         choices=["brief", "detailed"],
-        help="结果产出等级: brief (精简, 仅日志及轻量报告) 或 detailed (详细, 导出全量 CSV 资产)",
+        help="结果产出等级: brief (精简) 或 detailed (导出全量资产)",
     )
     parser.add_argument(
         "--log-level",
@@ -108,8 +110,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="file",
         choices=["file", "db"],
-        help="配置来源: file (静态 config.py) 或 db (从历史数据重建物理参数)",
+        help="配置来源: file (静态) 或 db (历史重建)",
     )
+
+    # 未来可以在这里随意添加新参数，Workflow 会自动吸收
+    # parser.add_argument("--new-feature", type=float, default=0.5)
 
     maint_group = parser.add_argument_group("资产维护命令 (Maintenance)")
     maint_group.add_argument(
@@ -137,17 +142,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def handle_maintenance(args: argparse.Namespace) -> bool:
-    """处理资产维护子命令。返回 True 表示已执行维护操作。"""
+    """处理资产维护子命令。"""
+    manager = AssetManager()
     if args.query_backup:
-        AssetManager().query_backup_assets()
+        logger.info("🔍 [System] 正在查询备份资产状态...")
+        manager.query_backup_assets()
         return True
 
     if args.backup:
-        AssetManager().manage_backup_assets()
+        logger.info("📦 [System] 正在启动手动备份流程...")
+        manager.manage_backup_assets()
         return True
 
     if args.restore is not None:
-        AssetManager().restore_backup_assets(target=args.restore)
+        logger.warning(f"🔄 [System] 正在准备从备份 [{args.restore}] 执行强制恢复...")
+        manager.restore_backup_assets(target=args.restore)
         return True
 
     return False
@@ -159,16 +168,17 @@ def handle_maintenance(args: argparse.Namespace) -> bool:
 
 
 def _validate_cluster(cluster_str: str | None) -> str:
-    """校验并标准化星团名称。失败时直接退出进程。"""
+    """校验并标准化星团名称。"""
     if not cluster_str:
-        sys.exit("错误: 运行管线模式必须提供 cluster 参数。使用 --help 查看维护命令。")
+        logger.error("❌ [System] 运行模式缺失必填参数: cluster")
+        sys.exit(1)
 
     cluster_input = cluster_str.upper()
     cluster_map = {k.upper(): k for k in cfg.CLUSTERS.keys()}
 
     if cluster_input not in cluster_map:
         logger.error(
-            f"❌ 未知的星团名称: '{cluster_str}'。可选范围: {list(cfg.CLUSTERS.keys())}"
+            f"❌ [System] 未知的星团名称: '{cluster_str}'。可选范围: {list(cfg.CLUSTERS.keys())}"
         )
         sys.exit(1)
 
@@ -189,32 +199,32 @@ def main() -> None:
         level=numeric_level if isinstance(numeric_level, int) else logging.INFO
     )
 
+    # 1. 处理维护模式
     if handle_maintenance(args):
+        logger.info("✅ [System] 维护任务处理完成，程序退出。")
         return
 
+    # 2. 准备管线参数
     target_cluster_id = _validate_cluster(args.cluster)
+    
+    # 🌟 [设计模式] 接口解耦方案：
+    # 将 args 命名空间转换为字典，并注入已校验的星团 ID。
+    # 这样 Workflow 的构造函数无需随着 CLI 参数的增加而修改。
+    workflow_params = vars(args).copy()
+    workflow_params["target_cluster"] = target_cluster_id
 
-    logger.info(
-        f"🚀 启动分析管道 - 审计范围: {target_cluster_id}, "
-        f"精筛特征空间: {args.mode}, 审计对象: {args.category}"
-    )
+    logger.info(f"🚀 [Startup] 启动分析管道 - 审计目标: {target_cluster_id}")
+    logger.info(f"📊 [Startup] 运行模式: {args.mode} | 参考星表: {args.category} | 算法: {args.algo}")
 
     if args.mode == "all":
+        # 批量模式也建议统一接受配置字典
         AstroWorkflow.run_all_modes(
             target_cluster_id=target_cluster_id,
-            target_category=args.category,
-            algo=args.algo,
-            result_mode=args.result,
-            reconstruct_mode=args.reconstruct,
+            **workflow_params
         )
     else:
-        wf = AstroWorkflow(
-            db_instance=None,
-            target_cluster=target_cluster_id,
-            target_category=args.category,
-            mode=args.mode,
-            algo=args.algo,
-        )
+        # 🌟 动态解包传入所有参数
+        wf = AstroWorkflow(db_instance=None, **workflow_params)
         wf.run(
             reconstruct_mode=args.reconstruct,
             result_mode=args.result,
@@ -222,4 +232,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.warning("\n🛑 [System] 用户手动中断了管线运行 (Ctrl+C)。")
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(f"💥 [System] 发生未捕获的致命崩溃: {e}", exc_info=True)
+        sys.exit(1)
