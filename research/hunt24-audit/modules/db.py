@@ -530,22 +530,22 @@ class AstroDB:
             df[_id] = df[_id].astype("Int64")
         return df
 
-    def import_raw(self, target_cluster_id=None, force=False):
+    def import_raw(self, target_cluster=None, force=False):
         if not self.data_manifest:
             self.logger.warning("⚠️ [Startup] 未检测到 Data Manifest。")
             return
 
-        self.logger.info(f"🚀 [Startup] 开始引导 AstroDB 数据环境 (星团: {target_cluster_id or 'ALL'})...")
+        self.logger.info(f"🚀 [Startup] 开始引导 AstroDB 数据环境 (星团: {target_cluster or 'ALL'})...")
 
         # 核心优化：提取当前任务相关的索引，过滤无关星团的加载
         target_indices = set()
         other_clusters_indices = set()
-        if target_cluster_id and target_cluster_id in cfg.CLUSTERS:
-            target_indices.add(cfg.CLUSTERS[target_cluster_id].get("FIELD_IDX"))
-            target_indices.add(cfg.CLUSTERS[target_cluster_id].get("SEED_IDX"))
+        if target_cluster and target_cluster in cfg.CLUSTERS:
+            target_indices.add(cfg.CLUSTERS[target_cluster].get("FIELD_IDX"))
+            target_indices.add(cfg.CLUSTERS[target_cluster].get("SEED_IDX"))
 
             for cid, cinfo in cfg.CLUSTERS.items():
-                if cid != target_cluster_id:
+                if cid != target_cluster:
                     other_clusters_indices.add(cinfo.get("FIELD_IDX"))
                     other_clusters_indices.add(cinfo.get("SEED_IDX"))
 
@@ -597,7 +597,7 @@ class AstroDB:
                 calc_custom_cols = False
                 # str = f"raw_{target_cluster_id}_field".lower()
                 # self.logger.info(f"🔍 检查是否需要计算自定义列: {str} == {t_raw} ?")
-                if t_raw.lower() == f"raw_{target_cluster_id}_field".lower() and target_cluster_id:
+                if t_raw.lower() == f"raw_{target_cluster}_field".lower() and target_cluster:
                     calc_custom_cols = True    
                 self.register_table_from_file(t_raw, result_path, calc_custom_cols=calc_custom_cols)
             else:

@@ -107,7 +107,7 @@ class StarCluster:
             self.logger.error(f"❌ 参数装载并同步至内存状态时崩溃: {e}")
             return False
         
-    def load_or_reconstruct_parameters(self, mode: str = "file") -> bool:
+    def load_params(self, param_source: str = "file") -> bool:
         """
         🚀 [富领域行为] 统一负责星团物理属性的装载或自适应重建。
         
@@ -115,7 +115,7 @@ class StarCluster:
         - mode: "db" 代表启动高精度自我一致性物理资产反演引擎进行重建；
                 "file" 代表从文件加载参数。
         """
-        if mode == "db":
+        if param_source == "db":
             self.logger.info(f"🧬 [Domain] 触发星团相空间物理参数的自适应反演与自我重建...")
             # 1. 核心行为内聚：让实体对象自己调用底座去重建自己
             recon_res = self.cfg_mgr.reconstruct_cl_params_from_db(self.id)

@@ -44,6 +44,15 @@ class AstroWorkflow:
                 为 None 时自动创建新实例（工作流关闭时自动释放）。
             kwargs: 可选的参数，用于传递星团 ID、目标类别、运行模式和算法。
         """
+        if db_instance is None:
+            self.db = AstroDB(manifest=cfg.MANIFEST)
+            self._owned_db = True
+        else:
+            self.db = db_instance
+            self._owned_db = False
+
+        # 将所有额外参数存入 config 字典，方便后续逻辑调用
+        self.config = kwargs 
 
         # 基础属性赋值（带默认值保护）
         self.target_cluster = kwargs.get("target_cluster")
@@ -51,15 +60,9 @@ class AstroWorkflow:
         self.feature_space = kwargs.get("mode", "5d")
         self.algo = kwargs.get("algo", "dbscan")
         
-        # 将所有额外参数存入 config 字典，方便后续逻辑调用
-        self.config = kwargs 
-
-        if db_instance is None:
-            self.db = AstroDB(manifest=cfg.MANIFEST)
-            self._owned_db = True
-        else:
-            self.db = db_instance
-            self._owned_db = False
+        # 提取运行控制参数
+        self.param_source = kwargs.get("reconstruct", "file")
+        self.result_mode = kwargs.get("result", "brief")
 
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(self.db, "data_manifest", {})
@@ -772,13 +775,15 @@ class AstroWorkflow:
         # 🛡️ 【第二阶段双轨控制】：安全分流判定
         # =========================================================================
 
-    def run(self, reconstruct_mode="file", result_mode="brief"):
+    def run(self):
         """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
         self.logger.info(f"🔄 [Workflow] 启动闭环工作流: {self.target_cluster} [{self.feature_space}]")
+        self.logger.info(f"⚙️ [Workflow] 配置快照: Reconstruct={self.param_source}, Result={self.result_mode}")
+
         try:
             # [1/5] 数据同步
             self.logger.info("📦 [Workflow] [1/5] 正在同步物理数据源...")
-            self.db.import_raw(target_cluster_id=self.target_cluster, force=False)
+            self.db.import_raw(target_cluster=self.target_cluster, force=False)
 
             # [2/5] 数据对齐
             ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
@@ -799,7 +804,7 @@ class AstroWorkflow:
             # [2.5/5] 星团领域实体参数重建
             self.logger.info(f"🌌 [Workflow] [2.5/5] 载入目标星团领域实体模型: {self.target_cluster}")
             cl = StarCluster(self.target_cluster, db_instance=self.db)
-            success = cl.load_or_reconstruct_parameters(mode=reconstruct_mode)
+            success = cl.load_params(param_source=self.param_source)
             self.logger.info(
                 f"✅ [Workflow] 星团领域模型物理状态就绪。当前反演距离: {1000.0 / cl.plx_ref:.1f} pc"
             )
@@ -809,7 +814,7 @@ class AstroWorkflow:
                 )
                 return None
 
-            return self._run_compute_pipeline(ctx_cluster, result_mode)
+            return self._run_compute_pipeline(ctx_cluster)
         except Exception:
             self.logger.error("❌ [Workflow] 流水线在运行期间发生严重崩溃", exc_info=True)
             raise
@@ -818,7 +823,7 @@ class AstroWorkflow:
                 self.db.close()
                 self.logger.info("🔒 [System] 数据库连接已安全释放。")
 
-    def _run_compute_pipeline(self, ctx_cluster: dict, result_mode: str) -> dict | None:
+    def _run_compute_pipeline(self, ctx_cluster: dict) -> dict | None:
         """执行 GMM → 后处理 → 交叉审计 → 深度审计 → 导出 → 报告 计算阶段。
 
         假定数据导入、标准化和星团参数重建已由调用方完成。
@@ -867,7 +872,7 @@ class AstroWorkflow:
         )
 
         # 导出
-        self._export_if_needed(audit_res, v_final_pg, v_final_ref, result_mode)
+        self._export_if_needed(audit_res, v_final_pg, v_final_ref, self.result_mode)
 
         # 报告
         return render_final_report(
@@ -1004,7 +1009,7 @@ class AstroWorkflow:
         try:
             # --- 一次性数据准备（所有模式共享）---
             logger.info("📦 [Workflow] 正在同步物理数据源...")
-            db.import_raw(target_cluster_id=target_cluster_id, force=False)
+            db.import_raw(target_cluster=target_cluster_id, force=False)
 
             wf_setup = AstroWorkflow(
                 db, target_cluster_id, target_category, valid_modes[0], algo
@@ -1015,7 +1020,7 @@ class AstroWorkflow:
             # 星团物理参数重建（所有模式共享）
             logger.info(f"🌌 [Workflow] 载入目标星团领域实体模型: {target_cluster_id}")
             cl = StarCluster(target_cluster_id, db_instance=db)
-            cl.load_or_reconstruct_parameters(mode=reconstruct_mode)
+            cl.load_params(param_source=reconstruct_mode)
             logger.info(
                 f"✅ [Workflow] 星团领域模型物理状态就绪。反演距离: {1000.0 / cl.plx_ref:.1f} pc"
             )
@@ -1024,7 +1029,7 @@ class AstroWorkflow:
             all_results = []
             for mode in valid_modes:
                 wf = AstroWorkflow(db, target_cluster_id, target_category, mode, algo)
-                summary = wf._run_compute_pipeline(ctx_cluster, result_mode)
+                summary = wf._run_compute_pipeline(ctx_cluster)
                 if summary:
                     all_results.append(summary)
 

@@ -206,29 +206,26 @@ def main() -> None:
 
     # 2. 准备管线参数
     target_cluster_id = _validate_cluster(args.cluster)
-    
+
     # 🌟 [设计模式] 接口解耦方案：
     # 将 args 命名空间转换为字典，并注入已校验的星团 ID。
     # 这样 Workflow 的构造函数无需随着 CLI 参数的增加而修改。
     workflow_params = vars(args).copy()
     workflow_params["target_cluster"] = target_cluster_id
 
-    logger.info(f"🚀 [Startup] 启动分析管道 - 审计目标: {target_cluster_id}")
-    logger.info(f"📊 [Startup] 运行模式: {args.mode} | 参考星表: {args.category} | 算法: {args.algo}")
+    logger.info(f"🚀 [Startup] 启动分析管道 - 审计目标: {args.category}")
+    logger.info(f"📊 [Startup] 运行模式: {args.mode} | 审计范围: {target_cluster_id} | 算法: {args.algo}")
 
     if args.mode == "all":
+        # 暂不支持
+        logger.error("❌ [System] 暂不支持批量模式。")
+        raise NotImplementedError
         # 批量模式也建议统一接受配置字典
-        AstroWorkflow.run_all_modes(
-            target_cluster_id=target_cluster_id,
-            **workflow_params
-        )
+        # AstroWorkflow.run_all_modes(**workflow_params)
     else:
         # 🌟 动态解包传入所有参数
         wf = AstroWorkflow(db_instance=None, **workflow_params)
-        wf.run(
-            reconstruct_mode=args.reconstruct,
-            result_mode=args.result,
-        )
+        wf.run()
 
 
 if __name__ == "__main__":
