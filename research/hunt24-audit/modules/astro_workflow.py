@@ -83,7 +83,7 @@ class AstroWorkflow:
             manifest (dict): 全局清单。
             ctx (dict, optional): 包含星团几何信息的上下文。
         """
-        self.logger.info(f"🚀 正在执行数据标准化, 当前源: {idx_data}")
+        self.logger.info(f"🚀 [Process] 正在执行数据标准化, 当前源: {idx_data}")
 
         # 🛡️ 核心重构：确保 CAT_NAME 的解析优先级
         local_ctx = ctx.copy() if ctx else {}
@@ -103,7 +103,7 @@ class AstroWorkflow:
         actions = cfg_data.get("actions", {})
         for layer in ["std", "stx", "aln"]:
             if layer in actions:
-                self.logger.debug(f"  ∟ 正在执行层级动作: {layer.upper()}")
+                self.logger.debug(f"  ∟ [Process] 正在执行层级动作: {layer.upper()}")
                 action_func = actions[layer]
                 # 将修正后的上下文传给执行层
                 action_func(self.db, idx_data, cfg_data, self.manifest, local_ctx)
@@ -123,7 +123,7 @@ class AstroWorkflow:
         query = f"SELECT * FROM {v_src}"
         df_raw = self.db.query(query)
 
-        self.logger.info(f"从数据源 [{v_src}] 读取到原始种子星数据: {len(df_raw)} 颗")
+        self.logger.info(f"📋 [Process] 从视图 [{v_src}] 读取原始种子星: {len(df_raw)} 颗")
 
         # 🚀 仅针对当前运行模式所需的特征执行 dropna
         # 这样在 2D 模式下，即便视差 (plx) 缺失，只要自行 (pm) 还在，种子星就不会被丢弃。
@@ -136,7 +136,7 @@ class AstroWorkflow:
         else:
             df_seeds = df_raw.dropna().copy()
 
-        self.logger.info(f"从数据源 [{v_src}] 提取了 {len(df_seeds)} 颗种子星")
+        self.logger.info(f"✅ [Process] 种子星提取完成，有效样本: {len(df_seeds)} 颗")
 
         # 🚀 初始化种子标签：先全部标记为 'raw_seed'
         df_tag = df_seeds[[cfg.STD_COLS["ID"]]].copy()
@@ -161,7 +161,7 @@ class AstroWorkflow:
         df_target = self.db.query(sql)
 
         raw_count = len(df_target)
-        self.logger.info(f"从视图 [{v_aln}] 读取到原始数据: {raw_count} 颗")
+        self.logger.info(f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {raw_count} 颗")
 
         return df_target
 
@@ -174,7 +174,7 @@ class AstroWorkflow:
         """
         total = len(ref_tables)
         for i, k in enumerate(ref_tables, 1):
-            self.logger.info(f"📋 [{i}/{total}] 正在标准化参考星表: {k}")
+            self.logger.info(f"📋 [Process] [{i}/{total}] 正在标准化参考星表: {k}")
             self.data_standardize(
                 idx_data=k,
                 cfg_data=MANIFEST[k],
@@ -189,7 +189,7 @@ class AstroWorkflow:
             t_main_results (str): 算法结果总表名称。
         """
         self.logger.info(
-            f"[{self.target_cluster}] 启动 post_pipeline: 执行主表标签状态同步..."
+            f"📊 [Process] [{self.target_cluster}] 启动后处理: 正在同步主表标签状态..."
         )
         try:
             # 1. 动态增加成员分类标签列 (如果不存在)
@@ -225,7 +225,7 @@ class AstroWorkflow:
             n_golden, n_candidates, n_seeds, n_seed_core, n_seed_noise = stats
 
             self.logger.info("=" * 60)
-            self.logger.info(f"📊 [{self.target_cluster}] Master 表后处理标签同步完成:")
+            self.logger.info(f"📊 [Process] [{self.target_cluster}] Master 表后处理标签同步完成:")
             self.logger.info(f"  🔹 高置信金种子星 (is_golden): {n_golden} 颗")
             self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {n_candidates} 颗")
             self.logger.info(f"  🔹 原始输入种子星 (Seeds): {n_seeds} 颗")
@@ -250,7 +250,7 @@ class AstroWorkflow:
                 },
             }
         except Exception as e:
-            self.logger.info(f"Error in post_pipeline: {str(e)}")
+            self.logger.info(f"❌ [Process] Error in post_pipeline: {str(e)}")
             return {"status": "error", "message": str(e)}
 
     def prepare_audit_data(self, v_source, v_target):
@@ -264,13 +264,13 @@ class AstroWorkflow:
             dict: 包含审计子视图集 (audit_views) 及统计结果 (stats) 的字典。
         """
         if not self._verify_audit_target_exists(v_target):
-            self.logger.warning(f"审计目标表 '{v_target}' 不存在。")
+            self.logger.warning(f"⚠️ [Audit] 审计目标表 '{v_target}' 不存在，跳过交叉审计。")
             return {
                 "status": "warning",
                 "message": f"审计目标表 '{v_target}' 不存在，无法执行交叉审计。",
             }
 
-        self.logger.info(f"⚡ 发现审计目标表 '{v_target}'，开始交叉比对...")
+        self.logger.info(f"⚡ [Audit] 发现审计目标表 '{v_target}'，开始交叉比对...")
 
         # 🚀 [混合模式重构] 直接在 Master 表更新 x_match_tag
         col_x = cfg.MASTER_COLS["X_MATCH"]
@@ -290,11 +290,11 @@ class AstroWorkflow:
         df_x = self.db.query(sql_cross)
         self.db.tag_master_table(self.t_master, df_x)
 
-        self.logger.info(f"🚀 直接在 Master 表更新 x_match_tag 完成.")
+        self.logger.info(f"✅ [Audit] 直接在 Master 表更新 x_match_tag 完成.")
         self.logger.info(
-            f"🚀 - Master 表记录总数: {self.db.get_row_count(self.t_master)}"
+            f"🚀 [Audit] - Master 表记录总数: {self.db.get_row_count(self.t_master)}"
         )
-        self.logger.info(f"🚀 - Master 表更新记录总数: {df_x.shape[0]}")
+        self.logger.info(f"🚀 [Audit] - Master 表更新记录总数: {df_x.shape[0]}")
 
         # 为深度审计准备输入视图（PG Only 和 Ref Only）
         v_audit_pg_only = f"v_tmp_audit_pg_only"
@@ -312,7 +312,7 @@ class AstroWorkflow:
         stats_raw = self.db.execute(st_sql).fetchall()
         stats_cross = {row[0]: row[1] for row in stats_raw}
         self.logger.info(f"=" * 60)
-        self.logger.info(f"📊 [交叉审计] 结果")
+        self.logger.info(f"📊 [Audit] [交叉比对结果统计]")
         self.logger.info(f"    Matched: {stats_cross.get('Matched', 0)}")
         self.logger.info(f"    PG Only: {stats_cross.get('PG Only', 0)}")
         self.logger.info(f"    Ref Only: {stats_cross.get('Ref Only', 0)}")
@@ -351,12 +351,12 @@ class AstroWorkflow:
         Returns:
             str: 审计报告表名称。
         """
-        self.logger.info(f"🔍 🎬 [Workflow] 开始对 {target} 进行身份审计...")
+        self.logger.info(f"🔍 🎬 [Audit] 开始对 {target} 进行身份审计...")
 
         try:
             v_audit_input = self.pre_audit(target)
             if not v_audit_input:
-                self.logger.error("❌ 审计预处理失败，管线熔断。")
+                self.logger.error("❌ [Audit] 审计预处理失败，管线熔断。")
                 return None
 
             validator = UnifiedMemberValidator(
@@ -368,7 +368,7 @@ class AstroWorkflow:
             audit_report_df = validator.run_full_audit_ex(v_audit_input)
 
             # 🚀 [混合模式重构] 审计结果回灌 Master 表
-            self.logger.info(f"📥 正在将深度审计结果同步至 Master 表...")
+            self.logger.info(f"📥 [Audit] 正在将深度审计结果同步至 Master 表...")
             self.db.tag_master_table(self.t_master, audit_report_df)
 
             # 🚀 [混合模式] 审计完成后，返回 Master 表的一个逻辑视图作为“审计报告”
@@ -395,7 +395,7 @@ class AstroWorkflow:
 
         except Exception as e:
             self.logger.error(
-                f"❌ [Workflow] 审计流程运行期间发生严重故障: {str(e)}", exc_info=True
+                f"❌ [Audit] 审计流程运行期间发生严重故障: {str(e)}", exc_info=True
             )
             raise e
 
@@ -422,25 +422,19 @@ class AstroWorkflow:
             col_info = self.db.con.execute(f"PRAGMA table_info({cache_table})").df()
             if "parent" not in col_info["name"].values:
                 self.logger.warning(
-                    f"⚠️ [提前演进] 发现本地缓存表 `{cache_table}` 缺失 `parent` 字段，正在提前触发动态追加..."
+                    f"⚠️ [Audit] 发现本地缓存表 `{cache_table}` 缺失 `parent` 字段，正在提前触发动态追加..."
                 )
                 try:
                     self.db.con.execute(
                         f"ALTER TABLE {cache_table} ADD COLUMN parent VARCHAR;"
                     )
                     self.logger.info(
-                        f"✅ [提前演进成功] 已成功为表 `{cache_table}` 补齐 `parent` 数据通道。"
+                        f"✅ [Audit] 已成功为表 `{cache_table}` 补齐 `parent` 数据通道。"
                     )
                 except Exception as ddl_err:
-                    self.logger.error(f"❌ 动态追加 parent 列失败: {str(ddl_err)}")
+                    self.logger.error(f"❌ [Audit] 动态追加 parent 列失败: {str(ddl_err)}")
 
         # 找出在 v_source 中存在但 cache_table 中没有的 ID
-        # sql_missing = f"""
-        #     SELECT DISTINCT CAST(v.id AS VARCHAR) as id
-        #     FROM {v_source} v
-        #     ANTI JOIN {cache_table} c ON CAST(v.id AS VARCHAR) = c.gaia_dr3_id
-        # """
-
         # 🛠️ 【核心修改】将原本的 ANTI JOIN 转换为 LEFT JOIN + WHERE 条件
         # 判定刷新条件：1. 本地缓存表压根没有这个 ID (c.gaia_dr3_id IS NULL)
         #              2. 本地虽有这个 ID，但 parent 字段未被拉取或为占位符 (c.parent IS NULL OR c.parent = 'None')
@@ -455,16 +449,16 @@ class AstroWorkflow:
                OR LOWER(TRIM(c.parent)) = 'none'
         """
 
-        self.logger.info(f"🔍 正在检索 [{v_source}] 中缺失的文献缓存记录...")
+        self.logger.info(f"🔍 [Audit] 正在检索 [{v_source}] 中缺失的文献缓存记录...")
         df_missing = self.db.con.execute(sql_missing).df()
         ids_to_sync = df_missing["id"].tolist()
 
         if not ids_to_sync:
-            self.logger.info("✅ 缓存对齐完成：所有源均已在本地缓存中，跳过网络同步。")
+            self.logger.info("✅ [Audit] 缓存对齐完成：所有源均已在本地缓存中，跳过网络同步。")
             return
 
         self.logger.info(
-            f"🌐 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热..."
+            f"🌐 [Network] 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热同步..."
         )
         validator.sync_simbad_cache(ids_to_sync)
 
@@ -477,17 +471,17 @@ class AstroWorkflow:
         Returns:
             str: 审计输入视图名。
         """
-        self.logger.info(f"🔧 正在准备审计数据视图...")
+        self.logger.info(f"🔧 [Audit] 正在准备审计数据视图...")
 
         try:
             # 调用 DB 层提供的标准化审计输入视图构建接口
             field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
             t_base = MANIFEST[field_idx]["stx_view"]
             v_result = self.db.register_audit_input_view(v_target, t_base)
-            self.logger.info(f"✅ 审计数据准备完成，输入视图: {v_result}")
+            self.logger.info(f"✅ [Audit] 审计数据准备完成，输入视图: {v_result}")
             return v_result
         except Exception as e:
-            self.logger.error(f"❌ 审计数据准备失败: {str(e)}")
+            self.logger.error(f"❌ [Audit] 审计数据准备失败: {str(e)}")
             return None
 
     def _parse_pipeline_config(self) -> tuple[dict, list[str]]:
@@ -511,7 +505,7 @@ class AstroWorkflow:
 
         required_features = feature_map[current_mode]
         self.logger.info(
-            f"🌌 当前运行模式: [{current_mode}], 所需核心特征空间: {required_features}"
+            f"🌌 [Config] 当前运行模式: [{current_mode}], 所需特征空间: {required_features}"
         )
         return gmm_cfg, required_features
 
@@ -531,7 +525,7 @@ class AstroWorkflow:
         """
         if df_raw is None:
             self.logger.error(
-                "❌ [Bridge] 输入的原始 DataFrame 为 None，无法进行特征转换！"
+                "❌ [Compute] 输入的原始 DataFrame 为 None，无法进行特征转换！"
             )
             return None
 
@@ -564,7 +558,7 @@ class AstroWorkflow:
         ]
         if existing_dup_cols:
             self.logger.info(
-                f"🔄 [Bridge] 模式 [{mode}] 触发列名防重机制，从原始表中移除了已存在的列: {existing_dup_cols}"
+                f"🔄 [Compute] 模式 [{mode}] 触发列名防重机制，从原始表中移除了已存在的列: {existing_dup_cols}"
             )
             df_raw = df_raw.drop(columns=existing_dup_cols)
         df_extended = pd.concat([df_raw, df_features], axis=1)
@@ -584,7 +578,7 @@ class AstroWorkflow:
             pd.DataFrame: 清洗后的纯净数据。
         """
         if df_extended is None:
-            self.logger.error(f"❌ [数据清洗 - {label}] 数据为空，无法进行无效值过滤。")
+            self.logger.error(f"❌ [Compute] [{label}] 数据为空，无法进行无效值过滤。")
             return pd.DataFrame()
 
         initial_count = len(df_extended)
@@ -594,12 +588,12 @@ class AstroWorkflow:
 
         if dropped > 0:
             self.logger.warning(
-                f"⚠️ [防御性过滤 - {label}]: 剔除了 {dropped} 颗特征不完整(含NaN)的天体，"
+                f"⚠️ [Compute] [防御性过滤 - {label}]: 剔除了 {dropped} 颗特征不完整(含NaN)的天体，"
                 f"剩余有效样本: {len(df_clean)}。"
             )
         else:
             self.logger.info(
-                f"✅ [数据预检 - {label}] 样本特征完备，共计 {len(df_clean)} 颗星。"
+                f"✅ [Compute] [数据预检 - {label}] 样本特征完备，共计 {len(df_clean)} 颗星。"
             )
         return df_clean
 
@@ -626,7 +620,7 @@ class AstroWorkflow:
         # 1. 确定运行模式与特征空间需求
         # required_features = self._get_required_features()
         _, required_features = self._parse_pipeline_config()
-        self.logger.info(f"📊 当前管线请求的特征空间: {required_features}")
+        self.logger.info(f"📊 [Compute] 当前管线请求的特征空间: {required_features}")
 
         # 2. 获取并提取全量靶场数据 (Target Field)
         field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
@@ -647,7 +641,7 @@ class AstroWorkflow:
             # =========================================================================
             # 🔒 【稳定旧轨】：100% 还原传统生产管线行为
             # =========================================================================
-            self.logger.warning("🔒 [双轨分流] 当前处于稳定生产模式：统一执行 PriorGMM 老轨行为")
+            self.logger.warning("🔒 [Compute] [双轨分流] 当前处于稳定生产模式：统一执行 PriorGMM 老轨行为")
             
             # A. 通过传统黑盒方法获取外部物理种子表数据
             seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
@@ -688,11 +682,11 @@ class AstroWorkflow:
             strategy_name = ctx_cluster.get(
                 "STRATEGY", GMM_CONFIG.get("default_strategy", "bayesian")
             ).lower()
-            self.logger.info(f"🚀 [双轨分流] 已激活实验性多态管线。当前激活策略: [{strategy_name.upper()}]")
+            self.logger.info(f"🚀 [Compute] [双轨分流] 已激活实验性多态管线。当前策略: [{strategy_name.upper()}]")
 
             # A. 靶场全量天区进行高维特征变换（如 ICRS 转换为 3D/5D/6D 等物理模式）
             current_mode = self.mode
-            self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
+            self.logger.info(f"⚡ [Compute] 正在转换特征空间为 [{current_mode.upper()}]...")
             df_target_ext = self._transform_and_bridge_features(
                 df_target_raw, ctx_cluster, current_mode, required_features
             )
@@ -703,7 +697,7 @@ class AstroWorkflow:
             )
 
             # C. 🔌 正式唤醒重构的 ClusterSeedExtractor。自适应感知天区背景噪声并自动生成高纯度种子星
-            self.logger.info("🧬 正在调度 ClusterSeedExtractor 运行自适应粗筛提取种子星...")
+            self.logger.info("🧬 [Compute] 正在调度 ClusterSeedExtractor 运行自适应粗筛提取种子星...")
             from modules.cluster_seed_extractor import ClusterSeedExtractor
 
             seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
@@ -733,9 +727,8 @@ class AstroWorkflow:
 
             # 拦截提取异常，防止下游硬崩溃
             if df_seeds_final is None or df_seeds_final.empty:
-                raise ValueError("❌ 种子星粗筛危机：ClusterSeedExtractor 未能凝聚出任何有效种子星！")
-            self.logger.info(f"✅ 种子星粗筛成功！共沉淀出 {len(df_seeds_final)} 颗高纯度核心种子星。")
-            self.logger.info(f"🚀 [双轨分流] 已激活实验性多态管线。当前激活策略: [{strategy_name.upper()}]")
+                raise ValueError("❌ [Compute] 种子星粗筛危机：ClusterSeedExtractor 未能凝聚出任何有效种子星！")
+            self.logger.info(f"✅ [Compute] 种子星粗筛成功！共沉淀出 {len(df_seeds_final)} 颗高纯度核心种子星。")
 
             # D. 路由并动态装配具体的实验精筛解异策略
             strategy_params = ctx_cluster.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
@@ -755,9 +748,9 @@ class AstroWorkflow:
             }
 
             if strategy_name not in STRATEGY_CLASSES:
-                raise ValueError(f"❌ 实验程序错误: 未知的策略类型 [{strategy_name}]")
+                raise ValueError(f"❌ [Compute] 实验程序错误: 未知的策略类型 [{strategy_name}]")
             else:
-                self.logger.info(f"✅ 已成功路由至策略类 [{STRATEGY_CLASSES[strategy_name].__name__}]")
+                self.logger.info(f"✅ [Compute] 已成功路由至策略类 [{STRATEGY_CLASSES[strategy_name].__name__}]")
 
             # 实例化策略引擎并一键推演
             engine = STRATEGY_CLASSES[strategy_name](**strategy_kwargs)
@@ -767,11 +760,11 @@ class AstroWorkflow:
         # 🤝 【统一安全回灌通道】：严格顺应底层只有 id 与 prob 的真实物理 Facts
         # =========================================================================
         if df_res is None or df_res.empty:
-            raise ValueError("❌ 算法内核异常：策略返回或缓存读取的 DataFrame 为空！")
+            raise ValueError("❌ [Compute] 算法内核异常：策略返回或缓存读取的 DataFrame 为空！")
         else:
-            self.logger.info(f"✅ 算法内核计算完成，生成结果集共计 {len(df_res)} 颗天体。")
+            self.logger.info(f"✅ [Compute] 算法内核计算完成，生成结果集共计 {len(df_res)} 颗天体。")
 
-        self.logger.info("📥 正在将精筛洗涤概率结果同步至 Master 表...")
+        self.logger.info("📥 [Compute] 正在将精筛洗涤概率结果同步至 Master 表...")
         
         # 严防硬编码臆造字段带来的 KeyError，新旧版本策略一律通过本通道安全同步
         updates = df_res[[cfg.STD_COLS["ID"], "prob"]].copy()
@@ -796,12 +789,12 @@ class AstroWorkflow:
 
         use_experimental = gmm_cfg.get("use_experimental", False)
         kernel_name = "PriorGMMEx" if use_experimental else "PriorGMM"
-        self.logger.info(f"🧪 [双轨制触发] 当前任务分配至内核 [{kernel_name}] 运行。")
+        self.logger.info(f"🧪 [Compute] [双轨制触发] 当前任务分配至内核 [{kernel_name}] 运行。")
         engine = (
             PriorGMMEx(config=gmm_cfg) if use_experimental else PriorGMM(config=gmm_cfg)
         )
 
-        self.logger.info("📡 正在准备特征工程输入数据...")
+        self.logger.info("📡 [Process] 正在准备特征工程输入数据...")
 
         # 2. 获取并提取全量靶场数据 (Target Field)
         field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
@@ -827,7 +820,7 @@ class AstroWorkflow:
         
         # 5. 特征多维相空间高维转换 (ICRS 坐标转换为 3D/6D 等物理模式)
         current_mode = self.mode
-        self.logger.info(f"⚡ 正在转换特征空间为 [{current_mode.upper()}]...")
+        self.logger.info(f"⚡ [Compute] 正在转换特征空间为 [{current_mode.upper()}]...")
         df_target_ext = self._transform_and_bridge_features(
             df_target_raw, ctx_cluster, current_mode, required_features
         )
@@ -836,7 +829,7 @@ class AstroWorkflow:
         )
 
         # 6. 特征清洗与 NaN 缺损防御性拦截
-        self.logger.info("🧹 正在执行特征清洗与 NaN 防御...")
+        self.logger.info("🧹 [Compute] 正在执行特征清洗与 NaN 防御...")
         df_target_final = self._defensive_nan_purge(
             df_target_ext, required_features, label="Target_field"
         )
@@ -844,7 +837,7 @@ class AstroWorkflow:
             df_seeds_ext, required_features, label="Seeds"
         )
 
-        self.logger.info(f"🔥 开始驱动 {kernel_name} 引擎计算...")
+        self.logger.info(f"🔥 [Compute] 开始驱动 {kernel_name} 引擎计算...")
 
         # 🚀 [性能优化] 针对千万级背景样本的下采样策略
         # 只有在 config.py 中显式开启且样本量超过门限时才执行
@@ -854,7 +847,7 @@ class AstroWorkflow:
         df_target_for_fit = df_target_final
         if enable_sub and len(df_target_final) > sub_limit:
             self.logger.info(
-                f"🚀 [性能优化] 背景样本量巨大 ({len(df_target_final)}), "
+                f"🚀 [Compute] [性能优化] 背景样本量巨大 ({len(df_target_final)}), "
                 f"正在下采样至 {sub_limit} 用于模型拟合..."
             )
             df_target_for_fit = df_target_final.sample(n=sub_limit, random_state=42)
@@ -882,10 +875,10 @@ class AstroWorkflow:
 
     def run(self, reconstruct_mode="file", result_mode="brief"):
         """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
-        self.logger.info(f"🔄 启动闭环工作流: {self.target_cluster} [{self.mode}]")
+        self.logger.info(f"🔄 [Workflow] 启动闭环工作流: {self.target_cluster} [{self.mode}]")
         try:
             # [1/5] 数据同步
-            self.logger.info("📦 [1/5] 正在同步物理数据源...")
+            self.logger.info("📦 [Workflow] [1/5] 正在同步物理数据源...")
             self.db.import_raw(target_cluster_id=self.target_cluster, force=False)
 
             # [2/5] 数据对齐
@@ -899,32 +892,32 @@ class AstroWorkflow:
                 cfg.IDX_IDS_SIMBAD,
             ]
             self.logger.info(
-                f"📐 [2/5] 正在执行数据对齐 ({self.target_cluster}, 特征空间: {self.mode})..."
+                f"📐 [Workflow] [2/5] 正在执行数据对齐 ({self.target_cluster}, 特征空间: {self.mode})..."
             )
             self.data_standardize_all(ref_tables, ctx_cluster)
-            self.logger.info("✅ 数据准备阶段完成。")
+            self.logger.info("✅ [Workflow] 数据准备阶段完成。")
 
             # [2.5/5] 星团领域实体参数重建
-            self.logger.info(f"🌌 [2.5/5] 载入目标星团领域实体模型: {self.target_cluster}")
+            self.logger.info(f"🌌 [Workflow] [2.5/5] 载入目标星团领域实体模型: {self.target_cluster}")
             cl = StarCluster(self.target_cluster, db_instance=self.db)
             success = cl.load_or_reconstruct_parameters(mode=reconstruct_mode)
             self.logger.info(
-                f"✅ 星团领域模型物理状态就绪。当前反演距离: {1000.0 / cl.plx_ref:.1f} pc"
+                f"✅ [Workflow] 星团领域模型物理状态就绪。当前反演距离: {1000.0 / cl.plx_ref:.1f} pc"
             )
             if not success:
                 self.logger.error(
-                    f"❌ 无法初始化星团 {self.target_cluster} 的物理资产，管线终止。"
+                    f"❌ [Workflow] 无法初始化星团 {self.target_cluster} 的物理资产，管线终止。"
                 )
                 return None
 
             return self._run_compute_pipeline(ctx_cluster, result_mode)
         except Exception:
-            self.logger.error("❌ 流水线在运行期间发生严重崩溃", exc_info=True)
+            self.logger.error("❌ [Workflow] 流水线在运行期间发生严重崩溃", exc_info=True)
             raise
         finally:
             if self._owned_db:
                 self.db.close()
-                self.logger.info("🔒 数据库连接已释放。")
+                self.logger.info("🔒 [System] 数据库连接已安全释放。")
 
     def _run_compute_pipeline(self, ctx_cluster: dict, result_mode: str) -> dict | None:
         """执行 GMM → 后处理 → 交叉审计 → 深度审计 → 导出 → 报告 计算阶段。
@@ -933,22 +926,22 @@ class AstroWorkflow:
         """
         # [3/5] GMM 成员识别
         self.logger.info(
-            f"🧠 [3/5] 启动 GMM 成员识别内核 (特征空间: {self.mode}, 算法: {self.algo})..."
+            f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.mode}, 算法: {self.algo})..."
         )
         t_result = self.run_pgmm(ctx_cluster)
-        self.logger.info(f"✨ 算法推断完成，结果表: {t_result}")
+        self.logger.info(f"✨ [Workflow] 算法推论完成，结果表: {t_result}")
 
         # [4/5] 后处理
-        self.logger.info("📊 [4/5] 正在合成分析宽表并提取候选成员视图...")
+        self.logger.info("📊 [Workflow] [4/5] 正在合成分析宽表并提取候选成员视图...")
         v_all = self.post_pgmm(t_result)
         if v_all.get("status") != "success":
-            self.logger.error(f"❌ 后处理流程失败: {v_all.get('message')}")
+            self.logger.error(f"❌ [Workflow] 后处理流程失败: {v_all.get('message')}")
             return None
-        self.logger.info("✅ 数据处理流程结束，转入交叉审计阶段。")
+        self.logger.info("✅ [Workflow] 数据处理流程结束，转入交叉审计阶段。")
 
         # [5/5] 交叉审计
         self.logger.info(
-            f"⚖️ [5/5] 执行多源文献交叉审计, 参考类别: {self.target_category}"
+            f"⚖️ [Workflow] [5/5] 执行多源文献交叉审计, 参考类别: {self.target_category}"
         )
         target_aln_view = self.manifest[self.target_category]["aln_view"].format(
             cluster=self.target_cluster.lower()
@@ -957,7 +950,7 @@ class AstroWorkflow:
 
         if audit_res.get("status") != "success":
             self.logger.warning(
-                f"⚠️ 交叉比对审计未完全成功: {audit_res.get('message')}"
+                f"⚠️ [Workflow] 交叉比对审计未完全成功: {audit_res.get('message')}"
             )
             # 即使审计不完整也尝试出报告
             return render_final_report(
@@ -966,9 +959,7 @@ class AstroWorkflow:
             )
 
         self.logger.info(
-            f"✅ 交叉审计完成，"
-            f"PG Only: {audit_res.get('v_audit_pg_only')}, "
-            f"Ref Only: {audit_res.get('v_audit_ref_only')}"
+            f"✅ [Workflow] 交叉审计比对完成。"
         )
 
         # 深度审计
@@ -1001,10 +992,10 @@ class AstroWorkflow:
 
         # PG Only 深度审计
         if not v_audit_pg_only or x_stats.get("PG Only", 0) == 0:
-            self.logger.warning("⚠️ 未找到算法独有候选 (PG Only)，跳过 PG Only 深度审计。")
+            self.logger.warning("⚠️ [Audit] 未找到算法独有候选 (PG Only)，跳过 PG Only 深度审计。")
             v_final_pg, deep_stats_pg = None, {}
         else:
-            self.logger.info(f"🔍 准备 PG Only 深度审计，目标视图: {v_audit_pg_only}")
+            self.logger.info(f"🔍 [Audit] 准备对 PG Only 执行深度物理核实，目标: {v_audit_pg_only}")
             v_final_pg, deep_stats_pg = self._run_deep_audit(
                 v_audit_pg_only, "pg_only"
             )
@@ -1012,11 +1003,11 @@ class AstroWorkflow:
         # Ref Only 深度审计
         if not v_audit_ref_only or x_stats.get("Ref Only", 0) == 0:
             self.logger.warning(
-                "⚠️ 未找到文献独有候选 (Ref Only)，跳过 Ref Only 深度审计。"
+                "⚠️ [Audit] 未找到文献独有候选 (Ref Only)，跳过 Ref Only 深度审计。"
             )
             v_final_ref, deep_stats_ref = None, {}
         else:
-            self.logger.info(f"🔍 准备 Ref Only 深度审计，目标视图: {v_audit_ref_only}")
+            self.logger.info(f"🔍 [Audit] 准备对 Ref Only 执行深度物理核实，目标: {v_audit_ref_only}")
             v_final_ref, deep_stats_ref = self._run_deep_audit(
                 v_audit_ref_only, "ref_only"
             )
@@ -1047,7 +1038,7 @@ class AstroWorkflow:
     def _export_if_needed(self, audit_res, v_final_pg, v_final_ref, result_mode):
         """按需将管线产出物导出为 CSV/Parquet 文件。"""
         if result_mode != "detailed":
-            self.logger.info("⏩ 跳过物理文件导出 (通过 CLI 参数禁用)。")
+            self.logger.info("⏩ [Export] 跳过物理文件导出 (通过 CLI 参数禁用)。")
             return
 
         self.logger.info("💾 [Export] 正在执行耗时的数据资产导出任务...")
@@ -1081,7 +1072,7 @@ class AstroWorkflow:
                 export_dir=cfg.RESULTS_DIR,
             )
 
-        self.logger.info("✅ 结果导出完成。")
+        self.logger.info("✅ [Export] 结果导出完成。")
 
     # =========================================================================
     # 全模式批量运行
@@ -1113,21 +1104,21 @@ class AstroWorkflow:
 
         try:
             # --- 一次性数据准备（所有模式共享）---
-            logger.info("📦 正在同步物理数据源...")
+            logger.info("📦 [Workflow] 正在同步物理数据源...")
             db.import_raw(target_cluster_id=target_cluster_id, force=False)
 
             wf_setup = AstroWorkflow(
                 db, target_cluster_id, target_category, valid_modes[0], algo
             )
             wf_setup.data_standardize_all(ref_tables, ctx_cluster)
-            logger.info("✅ 数据准备阶段完成（全模式共享）。")
+            logger.info("✅ [Workflow] 数据准备阶段完成（全模式共享）。")
 
             # 星团物理参数重建（所有模式共享）
-            logger.info(f"🌌 载入目标星团领域实体模型: {target_cluster_id}")
+            logger.info(f"🌌 [Workflow] 载入目标星团领域实体模型: {target_cluster_id}")
             cl = StarCluster(target_cluster_id, db_instance=db)
             cl.load_or_reconstruct_parameters(mode=reconstruct_mode)
             logger.info(
-                f"✅ 星团领域模型物理状态就绪。当前反演距离: {1000.0 / cl.plx_ref:.1f} pc"
+                f"✅ [Workflow] 星团领域模型物理状态就绪。反演距离: {1000.0 / cl.plx_ref:.1f} pc"
             )
 
             # --- 逐模式执行计算管线 ---
@@ -1141,4 +1132,4 @@ class AstroWorkflow:
             render_all_modes_comparison(all_results, logger)
         finally:
             db.close()
-            logger.info("🔒 数据库连接已释放。")
+            logger.info("🔒 [System] 数据库连接已安全释放。")

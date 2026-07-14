@@ -39,10 +39,10 @@ class AstroDB:
             # 🛡️ 核心修复：确保数据库所在的目录（warehouse）物理存在，防止 duckdb.connect 抛出路径未找到异常
             db_path.parent.mkdir(parents=True, exist_ok=True)
             self.logger.warning(
-                f"🆕 未检测到本地数据库，正在预期位置初始化新空库: {db_path.absolute()}"
+                f"🆕 [Startup] 未检测到本地数据库，正在预期位置初始化新空库: {db_path.absolute()}"
             )
         else:
-            self.logger.info(f"💾 底层数据库安全对接成功: {db_path}")
+            self.logger.info(f"💾 [Startup] 底层数据库安全对接成功: {db_path.name}")
 
         # 确认存在后，再安全连接
         self.con = duckdb.connect(database=str(db_path))
@@ -66,7 +66,7 @@ class AstroDB:
         """
         初始化数据库基础元数据表。
         """
-        self.logger.info("⚡ 正在初始化数据库基础架构...")
+        self.logger.info("⚡ [Schema] 正在初始化数据库基础架构...")
         try:
             self.con.execute("""
                 CREATE TABLE IF NOT EXISTS t_db_metadata (
@@ -79,9 +79,9 @@ class AstroDB:
                 "INSERT INTO t_db_metadata (key, value) VALUES ('db_version', '1.0.0');"
             )
 
-            self.logger.info("✅ 数据库初始化完毕。")
+            self.logger.info("✅ [Schema] 数据库初始化完毕。")
         except Exception as e:
-            self.logger.error(f"❌ 初始化数据库基础表结构失败: {str(e)}")
+            self.logger.error(f"❌ [Schema] 初始化数据库基础表结构失败: {str(e)}")
             raise e
 
     # --- 引导与同步逻辑 ---
@@ -90,9 +90,9 @@ class AstroDB:
         """将 SQL 查询逻辑注册为视图。这是 Actions 类的核心支撑方法。"""
         try:
             self.con.execute(f"CREATE OR REPLACE VIEW {view_name} AS {sql_query}")
-            self.logger.debug(f"✅ 逻辑视图注册成功: {view_name}")
+            self.logger.debug(f"✅ [Registry] 逻辑视图注册成功: {view_name}")
         except Exception as e:
-            self.logger.error(f"❌ 注册视图 {view_name} 失败: {str(e)}")
+            self.logger.error(f"❌ [Registry] 注册视图 {view_name} 失败: {str(e)}")
             raise e
 
     def _get_physics_fields(self, view_name):
@@ -177,18 +177,18 @@ class AstroDB:
     def enrich_with_gaia_data(self, v_target, t_base, needed_fields=None):
         """自动补充 Gaia 物理参数并返回 DataFrame。"""
         if self.get_row_count(v_target) == 0:
-            self.logger.warning(f"{v_target} 为空，跳过增强步骤。")
+            self.logger.warning(f"⚠️ [Compute] {v_target} 为空，跳过增强步骤。")
             return pd.DataFrame()
 
         sql = self._get_enrichment_sql(v_target, t_base)
-        self.logger.info(f"正在从 {t_base} 为视图 {v_target} 补充物理参数...")
+        self.logger.info(f"🧪 [Compute] 正在从 {t_base} 为视图 {v_target} 补充物理参数...")
         res_df = self.query(sql)
 
         if needed_fields:
             actual_cols = res_df.columns.tolist()
             for f in needed_fields:
                 if f not in actual_cols:
-                    self.logger.error(f"❌ 数据增强失败：表 {t_base} 中未找到字段 {f}")
+                    self.logger.error(f"❌ [Compute] 数据增强失败：表 {t_base} 中未找到字段 {f}")
                     raise KeyError(f"Missing field: {f}")
         return res_df
 
@@ -198,18 +198,18 @@ class AstroDB:
         v_audit_input = cfg.TMPL.V_ADT_INPUT.format(src=v_src)
 
         sql = self._get_enrichment_sql(v_src, t_base, threshold=threshold)
-        self.logger.debug(f"正在注册审计输入视图: {v_audit_input} (源: {v_src}, sql: {sql})")
+        self.logger.debug(f"📋 [Registry] 正在注册审计输入视图: {v_audit_input} (源: {v_src})")
         self.register_view_from_sql(v_audit_input, sql)
 
         count = self.get_row_count(v_audit_input)
-        self.logger.info(f"✅ 审计输入视图 [{v_audit_input}] 准备就绪 (记录数: {count})")
+        self.logger.info(f"✅ [Registry] 审计输入视图 [{v_audit_input}] 准备就绪 (记录数: {count:,})")
         return v_audit_input
 
     def _execute_sync_task(self, task_cfg, result_path):
         """内部同步分发器：支持 local_file, vizier, gaia"""
         v_result = task_cfg.get("raw_table", "unknown_view")
         self.logger.info(
-            f"📡 执行同步任务: {v_result} (Provider: {task_cfg.get('provider')})"
+            f"📡 [Network] 执行同步任务: {v_result} (Provider: {task_cfg.get('provider')})"
         )
         provider = task_cfg.get("provider")
         params = task_cfg.get("params", {})
@@ -225,9 +225,9 @@ class AstroDB:
             # 使用 Path.rglob 进行更优雅的递归搜索
             matches = [str(p) for p in self.dirs["raw"].rglob(pattern)]
             if not matches:
-                raise FileNotFoundError(f"在 raw 子目录下未找到匹配文件: {pattern}")
+                raise FileNotFoundError(f"❌ [Network] 在 raw 子目录下未找到匹配文件: {pattern}")
             matches.sort()
-            self.logger.info(f"📚 匹配到 {len(matches)} 个分片，准备合并...")
+            self.logger.info(f"📚 [Network] 匹配到 {len(matches)} 个分片，准备合并...")
             df = self._load_and_merge_local_files(matches)
 
         # 2. Vizier 服务
@@ -250,7 +250,7 @@ class AstroDB:
                 df = res[0].to_pandas()
             else:
                 self.logger.error(
-                    f"🌌 Vizier 数据抓取失败. full_catalog: {full_catalog}; criteria: {criteria}"
+                    f"🌌 [Network] Vizier 数据抓取失败. full_catalog: {full_catalog}; criteria: {criteria}"
                 )
 
         # 3. Gaia Archive ADQL 查询
@@ -261,6 +261,7 @@ class AstroDB:
             if not query:
                 raise ValueError("Gaia 任务需提供 'query' 参数。")
 
+            self.logger.info(f"📡 [Network] 正在向 Gaia Archive 发送 ADQL 查询...")
             job = Gaia.launch_job_async(query)
             df = job.get_results().to_pandas()
             # physics_cols = self._get_physics_fields(task['std_view'])
@@ -272,6 +273,7 @@ class AstroDB:
         df = self._standardize_dataframe(df, numeric_cols=physics_cols)
         # 转存到 'snapshots' 目录
         df.to_parquet(result_path, index=False)
+        self.logger.info(f"💾 [Network] 远程/外部同步完成，已固化: {result_path.name}")
 
     # --- 注册接口 ---
 
@@ -281,6 +283,7 @@ class AstroDB:
         self.con.execute(
             f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM '{abs_path}'"
         )
+        self.logger.debug(f"✅ [Registry] 文件视图已挂载: {view_name}")
 
     def register_table_from_df(self, table_name, df):
         """将 DataFrame 物化为 DuckDB 物理表 (支持 UPSERT)"""
@@ -289,12 +292,12 @@ class AstroDB:
             f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM _tmp_df"
         )
         self.con.execute("DROP VIEW IF EXISTS _tmp_df")
-        self.logger.debug(f"已物化物理表: {table_name}")
+        self.logger.debug(f"✅ [Registry] 已物化物理表: {table_name}")
 
     def register_view_from_df(self, view_name, df):
         """将 DataFrame 注册为临时视图 (不产生物理拷贝)"""
         self.con.register(view_name, df)
-        self.logger.debug(f"已注册内存视图: {view_name}")
+        self.logger.debug(f"✅ [Registry] 已注册内存视图: {view_name}")
 
     def save_to_warehouse(self, table_or_view, storage_type="snapshots", filename=None):
         """将表或视图持久化为 Parquet 文件。"""
@@ -313,9 +316,9 @@ class AstroDB:
             df = self.query(f"SELECT * FROM {table_or_view}")
             df.to_parquet(path, index=False)
             
-            self.logger.info(f"💾 已将资产 {table_or_view} 固化至: {path}")
+            self.logger.info(f"💾 [Storage] 已将资产 {table_or_view} 固化至: {path.name}")
         except Exception as e:
-            self.logger.error(f"❌ 固化资产 {table_or_view} 失败: {e}")
+            self.logger.error(f"❌ [Storage] 固化资产 {table_or_view} 失败: {e}")
             
         return path
 
@@ -336,9 +339,10 @@ class AstroDB:
             self.con.execute(
                 f"COPY {table_name} TO '{output_path.as_posix()}' (FORMAT {format.upper()})"
             )
-        self.logger.info(f"💾 导出资产: {output_path.name} ({format.upper()}) -> {output_path.parent}")
+        self.logger.info(f"💾 [Storage] 导出资产: {output_path.name} ({format.upper()}) -> {output_path.parent}")
 
     def batch_export(self, table_names, export_dir=cfg.EXPORT_DIR):
+        self.logger.info(f"📦 [Storage] 启动批量导出任务，目标目录: {export_dir}")
         for name in table_names:
             self.export_table(name, export_dir=export_dir)
 
@@ -346,22 +350,23 @@ class AstroDB:
         if hasattr(self, "con") and self._connection_active:
             self.con.close()
             self._connection_active = False
+            self.logger.info("🔌 [System] AstroDB 数据库连接已安全关闭。")
 
     def query(self, sql_query):
         """执行 SQL 并返回 Pandas DataFrame。"""
         try:
             return self.con.sql(sql_query).df()
         except Exception as e:
-            self.logger.error(f"🔍 查询执行失败: {e}\nSQL: {sql_query}")
+            self.logger.error(f"🔍 [Query] 查询执行失败: {e}\nSQL: {sql_query}")
             return pd.DataFrame()
 
     def execute(self, sql):
         """通用 SQL 执行入口。"""
         try:
-            self.logger.debug(f"Executing SQL: {sql}")
+            self.logger.debug(f"🏗️ [Schema] Executing SQL: {sql}")
             return self.con.execute(sql)
         except Exception as e:
-            self.logger.error(f"❌ SQL Execution Failed: {e}")
+            self.logger.error(f"❌ [Schema] SQL Execution Failed: {e}")
             self.logger.error(f"Failed SQL: {sql}")
             raise e
 
@@ -370,11 +375,11 @@ class AstroDB:
         # 获取所有物理表和视图
         df_tables = self.con.execute("SHOW TABLES").df()
         if df_tables.empty:
-            self.logger.info("当前数据库为空。")
+            self.logger.info("📁 [Query] 当前数据库为空。")
             return
 
         self.logger.info(
-            f"📁 当前数据库资源清单 (共 {len(df_tables)} 个):\n{df_tables}"
+            f"📁 [Query] 当前数据库资源清单 (共 {len(df_tables)} 个):\n{df_tables}"
         )
         return df_tables
 
@@ -383,10 +388,10 @@ class AstroDB:
         try:
             schema = self.con.execute(f"DESCRIBE {table_name}").df()
             self.logger.info(
-                f"📊 表 {table_name} 的字段结构:\n{schema[['column_name', 'column_type']]}"
+                f"📊 [Query] 表 {table_name} 的字段结构:\n{schema[['column_name', 'column_type']]}"
             )
         except Exception as e:
-            self.logger.error(f"无法获取表 {table_name} 的结构: {e}")
+            self.logger.error(f"❌ [Query] 无法获取表 {table_name} 的结构: {e}")
 
     # def _setup_spatial_macros(self):
     #     """注册球面距离计算宏 (Haversine Formula)。"""
@@ -406,8 +411,8 @@ class AstroDB:
 
     def _setup_db_macros(self):
         """注册天文学相关的计算宏（空间距离与色余修正）。"""
-        self.logger.info("📐 正在注册空间计算宏: haversine_distance (单位: Degree)")
-        self.logger.info("✨ 正在注册色余与测光误差修正宏: calc_corrected_color_excess, calc_corrected_color_excess_sigma, calc_e_color")
+        self.logger.info("📐 [Schema] 正在注册空间计算宏: haversine_distance (单位: Degree)")
+        self.logger.info("✨ [Schema] 正在注册色余与测光误差修正宏: calc_corrected_color_excess, calc_corrected_color_excess_sigma, calc_e_color")
 
         sql = """
         -- 1. 球面距离计算宏 (Haversine Formula)
@@ -460,7 +465,7 @@ class AstroDB:
             count = result[0] if result else 0
             return count
         except Exception as e:
-            self.logger.error(f"无法获取 [{name}] 的计数: {e}")
+            self.logger.error(f"❌ [Query] 无法获取 [{name}] 的计数: {e}")
             return 0
 
     def table_exists(self, name):
@@ -501,17 +506,17 @@ class AstroDB:
         """删除物理表（如果存在）。"""
         try:
             self.con.execute(f"DROP TABLE IF EXISTS {name}")
-            self.logger.debug(f"已删除物理表: {name}")
+            self.logger.debug(f"✅ [Schema] 已删除物理表: {name}")
         except Exception as e:
-            self.logger.error(f"删除表 {name} 失败: {e}")
+            self.logger.error(f"❌ [Schema] 删除表 {name} 失败: {e}")
 
     def drop_view(self, name):
         """删除视图（如果存在）。"""
         try:
             self.con.execute(f"DROP VIEW IF EXISTS {name}")
-            self.logger.debug(f"已删除视图: {name}")
+            self.logger.debug(f"✅ [Schema] 已删除视图: {name}")
         except Exception as e:
-            self.logger.error(f"删除视图 {name} 失败: {e}")
+            self.logger.error(f"❌ [Schema] 删除视图 {name} 失败: {e}")
 
     def query_subset(self, table_name, where_clause=None):
         """查询子集并确保 ID 精度。"""
@@ -527,10 +532,10 @@ class AstroDB:
 
     def import_raw(self, target_cluster_id=None, force=False):
         if not self.data_manifest:
-            self.logger.warning("⚠️ 未检测到 Data Manifest。")
+            self.logger.warning("⚠️ [Startup] 未检测到 Data Manifest。")
             return
 
-        self.logger.info("🚀 开始引导 AstroDB 数据环境...")
+        self.logger.info(f"🚀 [Startup] 开始引导 AstroDB 数据环境 (星团: {target_cluster_id or 'ALL'})...")
 
         # 核心优化：提取当前任务相关的索引，过滤无关星团的加载
         target_indices = set()
@@ -554,7 +559,7 @@ class AstroDB:
             # [核心重构]：如果模式是 VIRTUAL，说明该项是一个逻辑视图（如种子集），
             # 它直接引用 base_idx 对应的 raw 表，不需要物理文件同步。
             if mode == "VIRTUAL":
-                self.logger.info(f"🌌 跳过虚拟同步项: {k} (将作为逻辑视图处理)")
+                self.logger.info(f"🌌 [Startup] 跳过虚拟同步项: {k} (将作为逻辑视图处理)")
                 continue
 
             t_raw = config.get("raw_table")  # 从 manifest 获取表名
@@ -572,23 +577,23 @@ class AstroDB:
             elif mode == "HYBRID" and not file_exists:
                 should_sync = True
             elif mode == "OFFLINE" and not file_exists:
-                self.logger.error(f"❌ 离线任务缺失物理文件: {k} (路径: {result_path})")
+                self.logger.error(f"❌ [Startup] 离线任务缺失物理文件: {k} (路径: {result_path})")
                 continue
 
             if should_sync:
-                self.logger.info(f"🔄 正在下载并转换数据: {k} -> {result_path}")
+                self.logger.info(f"🔄 [Network] 正在下载并转换数据: {k} -> {result_path.name}")
                 try:
                     self._execute_sync_task(config, result_path)
                     file_exists = True  # 同步成功后更新状态
                 except Exception as e:
-                    self.logger.error(f"❌ 同步 {k} 失败: {e}")
+                    self.logger.error(f"❌ [Network] 同步 {k} 失败: {e}")
                     continue
             else:
-                self.logger.info(f"⏭️  数据文件 {k}.parquet 已存在，跳过下载。")
+                self.logger.info(f"✅ [Local] 数据文件 {k}.parquet 已存在，跳过同步。")
 
             # 从 .parquet 中注册数据库
             if force or not table_exists:
-                self.logger.info(f"📋 正在注册数据库表: {t_raw}")
+                self.logger.info(f"📋 [Registry] 正在注册数据库表: {t_raw}")
                 calc_custom_cols = False
                 # str = f"raw_{target_cluster_id}_field".lower()
                 # self.logger.info(f"🔍 检查是否需要计算自定义列: {str} == {t_raw} ?")
@@ -596,9 +601,9 @@ class AstroDB:
                     calc_custom_cols = True    
                 self.register_table_from_file(t_raw, result_path, calc_custom_cols=calc_custom_cols)
             else:
-                self.logger.info(f"✅ 表 {t_raw} 已在内存中就绪，无需重新注册。")
+                self.logger.info(f"✅ [Registry] 表 {t_raw} 已在内存中就绪。")
 
-        self.logger.info("✨ AstroDB L1 原始数据环境导入完成。")
+        self.logger.info("✨ [Startup] AstroDB L1 原始数据环境导入完成。")
 
     def register_table_from_file(self, table_name, file_path, calc_custom_cols=False):
         """将 Parquet 文件物化为 DuckDB 物理表。"""
@@ -615,16 +620,16 @@ class AstroDB:
                     """
                 # 仅在首次注册时添加自定义列
                 self.con.execute(sql)
-                self.logger.debug(f"📦 已由sql物化物理表(含自定义计算列). SQL语句: {sql} ")
+                self.logger.debug(f"🧪 [Compute] 已物化物理表(含自定义列): {table_name}")
             else:
                 self.con.execute(
                     f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{abs_path}')"
                 )
             count = self.get_row_count(table_name)
-            self.logger.info(f"📦 已物化物理表: {table_name} (行数: {count})")
-            self.logger.info(f"📦 源文件: {abs_path}")
+            self.logger.info(f"📦 [Registry] 已物化物理表: {table_name} (行数: {count:,})")
+            self.logger.debug(f"📦 [Registry] 源文件: {abs_path}")
         except Exception as e:
-            self.logger.error(f"❌ 物化物理表 {table_name} 失败: {e}")
+            self.logger.error(f"❌ [Registry] 物化物理表 {table_name} 失败: {e}")
 
     def init_master_table(self, table_name, df_base):
         """初始化 Master 状态宽表。"""
@@ -654,7 +659,7 @@ class AstroDB:
         update_cols = [c for c in df_updates.columns if c != key_col and c in dest_cols]
 
         if not update_cols:
-            self.logger.info(f"⚠️ [Tag] {master_name} 没有匹配的列需要更新 (跳过)")
+            self.logger.info(f"⚠️ [Master] {master_name} 没有匹配的列需要更新 (跳过)")
             return
 
         temp_name = f"tmp_tag_{int(time.time())}_{random.randint(0, 1000)}"
@@ -670,6 +675,7 @@ class AstroDB:
         """
         try:
             self.execute(sql)
+            self.logger.info(f"✅ [Master] 成功回灌 {len(df_updates)} 条状态至 {master_name}")
         finally:
             self.con.unregister(temp_name)
 
@@ -691,14 +697,14 @@ class AstroDB:
                 raise ValueError("No SQL")
             target_ids = self.con.execute(id_sql).df()[id_col].tolist()
         except Exception:
-            self.logger.warning("⚠️ [SimbadProvider] 依赖源未就绪或未定义，将初始化空缓存表结构。")
+            self.logger.warning("⚠️ [Network] Simbad 依赖源未就绪或未定义，将初始化空缓存表。")
             return pd.DataFrame(columns=[id_col, "main_id", "ids"])
 
         formatted_ids = [f"{prefix}{idx}" for idx in target_ids]
         if not formatted_ids:
             return pd.DataFrame(columns=[id_col, "main_id", "ids"])
 
-        self.logger.info(f"正在从 SIMBAD 查询 {len(formatted_ids)} 个天体的别名...")
+        self.logger.info(f"📡 [Network] 正在从 SIMBAD 查询 {len(formatted_ids)} 个天体的别名...")
 
         Simbad.reset_votable_fields()
         Simbad.add_votable_fields("ids")
@@ -706,7 +712,7 @@ class AstroDB:
         result_table = Simbad.query_objects(formatted_ids)
 
         if result_table is None:
-            self.logger.warning("SIMBAD 未返回任何匹配数据。")
+            self.logger.warning("⚠️ [Network] SIMBAD 未返回任何匹配数据。")
             return pd.DataFrame(columns=[id_col, "ids"])
 
         df = result_table.to_pandas()
@@ -731,14 +737,14 @@ class AstroDB:
             pass
         else:
             ssl._create_default_https_context = _create_unverified_https_context
-            self.logger.debug("🌐 SIMBAD SSL 校验已绕过。")
+            self.logger.debug("🌐 [System] SIMBAD SSL 校验已绕过。")
 
     def query_simbad_target_info(self, gaia_dr3_id: str) -> dict:
         """
         查询指定天体的完整别名与元数据。
         """
         self._bypass_ssl_verification()
-        self.logger.info(f"🌐 正在从远端 CDS SIMBAD 检索单个天体: {gaia_dr3_id} ...")
+        self.logger.info(f"🌐 [Network] 正在从远端 CDS SIMBAD 检索单个天体: {gaia_dr3_id} ...")
 
         Simbad.reset_votable_fields()
         Simbad.add_votable_fields("ids")
@@ -756,7 +762,7 @@ class AstroDB:
 
         except Exception as e:
             self.logger.error(
-                f"❌ 从 SIMBAD 检索单星数据时发生网络或解析异常: {str(e)}"
+                f"❌ [Network] 从 SIMBAD 检索单星数据时发生网络或解析异常: {str(e)}"
             )
             return None
 
@@ -778,11 +784,11 @@ class AstroDB:
         if self.table_exists(cache_table_name):
             col_info = self.con.execute(f"PRAGMA table_info({cache_table_name})").df()
             if "parent" not in col_info["name"].values:
-                self.logger.warning(f"⚠️ 发现本地缓存表 `{cache_table_name}` 缺失 `parent` 字段，正在动态追加...")
+                self.logger.warning(f"🏗️ [Schema] 发现本地缓存表 `{cache_table_name}` 缺失 `parent` 字段，正在追加...")
                 try:
                     self.con.execute(f"ALTER TABLE {cache_table_name} ADD COLUMN parent VARCHAR;")
                 except Exception as ddl_err:
-                    self.logger.error(f"❌ 动态追加 parent 列失败: {str(ddl_err)}")
+                    self.logger.error(f"❌ [Schema] 动态追加 parent 列失败: {str(ddl_err)}")
 
         df_input = self._normalize_input_ids(source_ids)
         self.con.register("temp_sync_input", df_input)
@@ -827,14 +833,17 @@ class AstroDB:
         # 5. 执行网络同步
         df_online_results = pd.DataFrame(columns=["gaia_dr3_id", "main_id", "ids", "parent", "cache_hit"])
         if ids_to_fetch:
+            self.logger.info(f"📡 [Network] 检测到 {len(ids_to_fetch)} 个源需要在线同步/修复。")
             df_online_results = self._perform_online_sync(ids_to_fetch, cache_table_name, prefix, chunk_size)
             df_online_results["cache_hit"] = False
+        else:
+            self.logger.info("✅ [SimbadCache] 所有请求均在本地缓存命中。")
 
         # 6. 合并结果
         df_final_merged = pd.concat([df_valid_cached, df_online_results], ignore_index=True)
 
         self.logger.info(
-            f"🎯 [SimbadCache] 同步完成: "
+            f"🎯 [SimbadCache] 内存同步完成: "
             f"命中有效缓存 {len(df_valid_cached)} | "
             f"修复/新增同步 {len(df_online_results)} 颗"
         )
@@ -871,18 +880,18 @@ class AstroDB:
                         if source_file.exists():
                             os.remove(source_file)
                         shutil.move(str(temp_file), str(source_file))
-                        self.logger.info(f"💾 已同步更新 SIMBAD 原始数据源并保留备份: {source_file.name}")
+                        self.logger.info(f"💾 [Storage] 已同步更新 SIMBAD 原始数据源并保留备份: {source_file.name}")
                     else:
-                        self.logger.error(f"❌ 写入失败：临时文件 {temp_file} 未能生成。")
+                        self.logger.error(f"❌ [Storage] 写入失败：临时文件 {temp_file} 未能生成。")
 
                 except Exception as io_err:
-                    self.logger.error(f"❌ 同步到物理文件时发生错误: {str(io_err)}")
+                    self.logger.error(f"❌ [Storage] 同步到物理文件时发生错误: {str(io_err)}")
 
             # 2. 更新数仓快照
             try:
                 self.save_to_warehouse(cache_table_name, storage_type="snapshots", filename=cfg.IDX_IDS_SIMBAD)
             except Exception as e:
-                self.logger.error(f"❌ 更新仓库快照失败: {e}")
+                self.logger.error(f"❌ [Storage] 更新仓库快照失败: {e}")
 
         return df_final_merged
 
@@ -896,13 +905,13 @@ class AstroDB:
 
     def _perform_online_sync(self, ids_missing: list, table_name: str, prefix: str, chunk_size: int) -> pd.DataFrame:
         """[私有方法] 分批次从远程 SIMBAD 同步数据并回灌缓存。"""
-        self.logger.info(f"🌐 [SimbadSync] 正在从 CDS 增量抓取 {len(ids_missing)} 个源...")
+        self.logger.info(f"🌐 [Network] 正在从 CDS 增量抓取 {len(ids_missing)} 个源...")
         self._bypass_ssl_verification()
 
         online_records = []
         for i in range(0, len(ids_missing), chunk_size):
             if self._check_user_interrupt():
-                self.logger.warning("🛑 [SimbadSync] 接收到人工中断信号，正在保存已完成批次...")
+                self.logger.warning("🛑 [Network] 接收到人工中断信号，正在保存已完成批次...")
                 break
 
             chunk_ids = ids_missing[i : i + chunk_size]
@@ -912,7 +921,7 @@ class AstroDB:
                 df_batch = pd.DataFrame(batch_results)
                 self._save_local_cache_incremental(df_batch, table_name)
                 online_records.extend(batch_results)
-                self.logger.info(f"   ∟ 进度: {len(online_records)}/{len(ids_missing)}")
+                self.logger.info(f"   ∟ [Network] 进度: {len(online_records)}/{len(ids_missing)}")
 
             if i + chunk_size < len(ids_missing):
                 time.sleep(random.uniform(0.5, 1.5))
@@ -959,9 +968,9 @@ class AstroDB:
                                 # 提取所有父节点名称并用 | 分隔
                                 parent_list = [str(p['main_id']) for p in hierarchy]
                                 parent_val = " | ".join(parent_list)
-                                self.logger.info(f"🌟 [SimbadSync] 家谱查询成功 {main_id}: {parent_val}")
+                                self.logger.info(f"🌟 [Network] 家谱查询成功 {main_id}: {parent_val}")
                         except Exception as sub_e:
-                            self.logger.warning(f"⚠️ [SimbadSync] 家谱查询失败 {main_id}: {sub_e}")
+                            self.logger.warning(f"⚠️ [Network] 家谱查询失败 {main_id}: {sub_e}")
 
                     batch_results.append({
                         "gaia_dr3_id": gid,
@@ -977,7 +986,7 @@ class AstroDB:
                     batch_results.append({"gaia_dr3_id": str(mid), "main_id": "None", "ids": "None", "parent": "None"})
 
         except Exception as e:
-            self.logger.error(f"❌ [SimbadSync] 网络请求失败: {str(e)}")
+            self.logger.error(f"❌ [Network] 网络请求失败: {str(e)}")
 
         return batch_results
 
@@ -1076,13 +1085,13 @@ class AssetManager:
                     meta = json.load(f)
             except: meta = {}
 
-        self.logger.info("📦 正在执行资产手动备份轮转 (含 RAW 数据与内部数据库)...")
+        self.logger.info("📦 [Storage] 正在执行资产手动备份轮转 (含 RAW 数据与内部数据库)...")
 
         if path_b.exists(): shutil.rmtree(path_b)
         if path_a.exists():
             path_a.rename(path_b)
             meta['B'] = meta.get('A')
-            self.logger.info("  ∟ 已将原有 [备份A] 顺延至 [备份B]")
+            self.logger.info("  ∟ [Storage] 已将原有 [备份A] 顺延至 [备份B]")
 
         # 创建 A 目录并建立子结构
         path_a.mkdir(parents=True)
@@ -1092,7 +1101,7 @@ class AssetManager:
         if db_file.exists():
             shutil.copy2(db_file, path_a / "astrodb_internal.db")
             db_included = True
-            self.logger.info(f"  🗄️ 已同步备份内部数据库文件")
+            self.logger.info(f"  🗄️ [Storage] 已同步备份内部数据库文件")
         
         file_details, total_records = {}, 0
         # 使用内存连接，避免触发项目数据库初始化
@@ -1121,10 +1130,10 @@ class AssetManager:
                     
                     file_details[rel_name] = count
                     total_records += count
-                    self.logger.info(f"  📄 备份文件明细: {rel_name:<30} | 记录数: {count}")
+                    self.logger.info(f"  📄 [Storage] 备份文件明细: {rel_name:<30} | 记录数: {count:,}")
                 except Exception:
                     file_details[rel_name] = 0
-                    self.logger.info(f"  📄 备份文件明细: {rel_name:<30} | 记录数: [不可读取]")
+                    self.logger.info(f"  📄 [Storage] 备份文件明细: {rel_name:<30} | 记录数: [不可读取]")
 
         meta['A'] = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1139,7 +1148,7 @@ class AssetManager:
             json.dump(meta, f, indent=4, ensure_ascii=False)
         temp_meta.replace(meta_file)
 
-        self.logger.info(f"✅ 手动备份完成：[备份A] 已更新。总记录数(RAW): {total_records}")
+        self.logger.info(f"✅ [Storage] 手动备份完成：[备份A] 已更新。总记录数(RAW): {total_records:,}")
 
     def restore_backup_assets(self, target='A'):
         """从备份恢复数据。"""
@@ -1148,7 +1157,7 @@ class AssetManager:
         db_file = cfg.DATA_DIR / "warehouse" / "astrodb_internal.db"
 
         if not target_dir.exists():
-            self.logger.error(f"❌ 恢复失败：指定的 [{target_dir.name}] 不存在")
+            self.logger.error(f"❌ [Storage] 恢复失败：指定的 [{target_dir.name}] 不存在")
             return False
 
         # 增加二次确认
@@ -1159,7 +1168,7 @@ class AssetManager:
             print("🚫 恢复操作已取消。")
             return False
 
-        self.logger.warning(f"🔄 正在从 [{target_dir.name}] 强制覆盖恢复数据资产...")
+        self.logger.warning(f"🔄 [Storage] 正在从 [{target_dir.name}] 强制覆盖恢复数据资产...")
         
         # 兼容性恢复逻辑：判断备份中是否含有 'raw' 子目录
         if (target_dir / "raw").exists():
@@ -1170,11 +1179,11 @@ class AssetManager:
             if db_backup.exists():
                 db_file.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(db_backup, db_file)
-                self.logger.info(f"  ∟ 内部数据库文件恢复完成")
+                self.logger.info(f"  ∟ [Storage] 内部数据库文件恢复完成")
         else:
             # 处理旧版备份结构
             if raw_dir.exists(): shutil.rmtree(raw_dir)
             shutil.copytree(target_dir, raw_dir)
 
-        self.logger.info(f"✅ 数据恢复成功！来源: {target_dir.name}")
+        self.logger.info(f"✅ [Storage] 数据恢复成功！来源: {target_dir.name}")
         return True
