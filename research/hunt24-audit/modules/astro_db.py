@@ -304,9 +304,19 @@ class AstroDB:
         fname = filename if filename else table_or_view
         path = (sub_dir / f"{fname}.parquet").resolve()
 
-        # DuckDB 在 Windows 上也推荐使用 Posix 风格路径 (/)
-        self.con.execute(f"COPY {table_or_view} TO '{path.as_posix()}' (FORMAT PARQUET)")
-        self.logger.info(f"💾 已将资产 {table_or_view} 固化至: {path}")
+        try:
+            # 方式 A：如果数据量巨大，仍想用 COPY TO，请先 unlink 目标
+            if path.exists():
+                path.unlink()
+            
+            # 方式 B（推荐）：使用 Pandas/PyArrow 写入
+            df = self.query(f"SELECT * FROM {table_or_view}")
+            df.to_parquet(path, index=False)
+            
+            self.logger.info(f"💾 已将资产 {table_or_view} 固化至: {path}")
+        except Exception as e:
+            self.logger.error(f"❌ 固化资产 {table_or_view} 失败: {e}")
+            
         return path
 
     def export_table(self, table_name, filename=None, format="fits", export_dir=cfg.EXPORT_DIR):
@@ -759,7 +769,11 @@ class AstroDB:
     ) -> pd.DataFrame:
         """
         🚀 [核心接口] 跨网络与本地数据库同步 SIMBAD 缓存 (支持 Parent 自动补全)。
+        已针对 Windows 环境下的文件 IO 进行了健壮性加固。
         """
+        import shutil
+        import os
+
         # 1. 动态 DDL 升维防御 (确保 parent 列存在)
         if self.table_exists(cache_table_name):
             col_info = self.con.execute(f"PRAGMA table_info({cache_table_name})").df()
@@ -773,24 +787,24 @@ class AstroDB:
         df_input = self._normalize_input_ids(source_ids)
         self.con.register("temp_sync_input", df_input)
 
-        # 1. 创建缓存表（如果不存在，冷启动直接包含 parent 列）
+        # 2. 创建缓存表（如果不存在）
         self.execute(f"""
             CREATE TABLE IF NOT EXISTS {cache_table_name} (
                 gaia_dr3_id VARCHAR PRIMARY KEY,
                 main_id VARCHAR,
                 ids VARCHAR,
-                parent VARCHAR  -- 🌟 显式内嵌 parent 存储通道
+                parent VARCHAR
             )
         """)
 
-        # 2. 检查本地命中（🌟 显式将 c.parent 捞出来）
+        # 3. 检查本地命中情况
         df_cached = self.con.execute(f"""
             SELECT i.gaia_dr3_id, c.main_id, c.ids, c.parent
             FROM temp_sync_input i
             JOIN {cache_table_name} c ON i.gaia_dr3_id = c.gaia_dr3_id
         """).df()
 
-        # 识别需要补全 parent 的行 (为空、None 或字符串 'None')
+        # 识别需要补全 parent 的行
         mask_needs_repair = df_cached['parent'].isna() | \
                             (df_cached['parent'] == '') | \
                             (df_cached['parent'].str.lower() == 'none')
@@ -810,11 +824,9 @@ class AstroDB:
         
         self.con.unregister("temp_sync_input")
 
-        # 5. 执行网络同步 (必须确保 _perform_online_sync 内部逻辑支持 UPSERT)
+        # 5. 执行网络同步
         df_online_results = pd.DataFrame(columns=["gaia_dr3_id", "main_id", "ids", "parent", "cache_hit"])
         if ids_to_fetch:
-            # 在这里调用你更新后的逻辑，确保 _perform_online_sync 
-            # 会通过 Simbad.query_hierarchy 补全并覆盖写入本地库
             df_online_results = self._perform_online_sync(ids_to_fetch, cache_table_name, prefix, chunk_size)
             df_online_results["cache_hit"] = False
 
@@ -827,25 +839,50 @@ class AstroDB:
             f"修复/新增同步 {len(df_online_results)} 颗"
         )
 
-        # 7. 同步更新本地文件系统
+        # 7. 🌟 物理文件同步：加固后的文件保存逻辑
         if not df_online_results.empty or not df_valid_cached.empty:
             simbad_cfg = self.data_manifest.get(cfg.IDX_IDS_SIMBAD, {})
             rel_path = simbad_cfg.get("params", {}).get("file_pattern")
+            
             if rel_path:
                 source_file = self.dirs["raw"] / rel_path
-                if source_file.parent.exists():
-                    # 1. 备份当前有效的主文件
+                try:
+                    # 确保文件夹存在
+                    source_file.parent.mkdir(parents=True, exist_ok=True)
+
+                    # A. 备份当前旧文件
                     if source_file.exists():
                         self._rotate_backups(source_file)
 
-                    # 2. 写入临时文件
+                    # B. 生成临时文件 (使用 Pandas 写入，绕过 DuckDB COPY 限制)
                     temp_file = source_file.parent / f"{source_file.stem}_tmp{source_file.suffix}"
-                    self.con.execute(f"COPY {cache_table_name} TO '{temp_file.as_posix()}' (FORMAT PARQUET)")
-                    # 3. 成功后替换主文件
-                    temp_file.replace(source_file)
-                    self.logger.info(f"💾 已同步更新 SIMBAD 原始数据源并保留备份: {source_file.name}")
-            # 2. 更新数仓快照，确保下一次 import_raw 使用索引键名 ids_simbad 加载
-            self.save_to_warehouse(cache_table_name, storage_type="snapshots", filename=cfg.IDX_IDS_SIMBAD)
+                    
+                    # 清理可能残留的临时文件
+                    if temp_file.exists():
+                        os.remove(temp_file)
+
+                    # 从数据库拉取最新全量缓存
+                    df_all_cache = self.con.execute(f"SELECT * FROM {cache_table_name}").df()
+                    df_all_cache.to_parquet(temp_file, index=False)
+
+                    # C. 原子化替换文件
+                    if temp_file.exists():
+                        # 在 Windows 上，显式删除目标文件后再 rename 是最稳妥的
+                        if source_file.exists():
+                            os.remove(source_file)
+                        shutil.move(str(temp_file), str(source_file))
+                        self.logger.info(f"💾 已同步更新 SIMBAD 原始数据源并保留备份: {source_file.name}")
+                    else:
+                        self.logger.error(f"❌ 写入失败：临时文件 {temp_file} 未能生成。")
+
+                except Exception as io_err:
+                    self.logger.error(f"❌ 同步到物理文件时发生错误: {str(io_err)}")
+
+            # 2. 更新数仓快照
+            try:
+                self.save_to_warehouse(cache_table_name, storage_type="snapshots", filename=cfg.IDX_IDS_SIMBAD)
+            except Exception as e:
+                self.logger.error(f"❌ 更新仓库快照失败: {e}")
 
         return df_final_merged
 
