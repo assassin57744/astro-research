@@ -77,10 +77,6 @@ class StarCluster:
             self.logger.error(f"❌ 加载等龄线插值器失败: {e}")
             self.cmd_interpolator = None
 
-    # 修改或追加到现有的 modules/cluster.py 的 StarCluster 类中
-
-
-
     def _hydrate_from_config(self) -> bool:
         """从底座配置管理器中将最新的物理先验参数同步（Hydrate）到对象的内存属性中"""
         try:
@@ -88,25 +84,25 @@ class StarCluster:
             self.pmra_ref = self.cfg_mgr.get_param(self.id, "PMRA_REF")
             self.pmdec_ref = self.cfg_mgr.get_param(self.id, "PMDEC_REF")
             self.rv_ref = self.cfg_mgr.get_param(self.id, "RV_REF")
-            
+
             raw_uvw = self.cfg_mgr.get_param(self.id, "UVW_REF")
             self.uvw_ref = np.array(raw_uvw) if raw_uvw is not None else None
-            
+
             # 还可以同步色指数、弥散度等下游需要的矩阵前置
             self.pmra_disp = self.cfg_mgr.get_param(self.id, "PMRA_DISPERSION")
             self.pmdec_disp = self.cfg_mgr.get_param(self.id, "PMDEC_DISPERSION")
-            
+
             # 重新构建反演相关的协方差底座
             if self.pmra_disp and self.pmdec_disp:
                 self.inverse_covariance = self._load_pm_inverse_covariance()
-                
+
             # 触发下游等龄线 DNA 的更新
             self._setup_cmd_constraints()
             return self.plx_ref is not None
         except Exception as e:
             self.logger.error(f"❌ 参数装载并同步至内存状态时崩溃: {e}")
             return False
-        
+
     def load_params(self, param_source: str = "file") -> bool:
         """
         🚀 [富领域行为] 统一负责星团物理属性的装载或自适应重建。
@@ -122,7 +118,7 @@ class StarCluster:
             if not recon_res:
                 self.logger.warning("⚠️ 历史数据重建返回空结果，将降级加载静态或已有参数。")
                 return self._hydrate_from_config()
-                
+
             # 2. 重建成功后，刷新当前对象的内部物理状态属性
             self._hydrate_from_config()
             return True
