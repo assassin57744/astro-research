@@ -114,8 +114,8 @@ def dataProcess(
         KDE_vals = {}
         probs_all = []
         for _ in range(OL_runs):
-            logger.info("--------------------------------------------------------")
-            logger.info("OL run {}".format(_ + 1))
+            logger.debug("--------------------------------------------------------")
+            logger.debug("OL run {}".format(_ + 1))
             # The KDE_vals dictionary is updated after each OL run
             probs, KDE_vals = outer.loop(*OLargs, KDE_vals)
             probs_all.append(probs)
@@ -123,7 +123,7 @@ def dataProcess(
             p_dist = [
                 (np.mean(probs_all, 0) > _).sum() for _ in (0.5, 0.75, 0.9, 0.95, 0.99)
             ]
-            logger.info(
+            logger.debug(
                 "P>(.5, .75, .9, .95, .99): {}, {}, {}, {}, {}".format(*p_dist),
                 # file=prfl,
             )
