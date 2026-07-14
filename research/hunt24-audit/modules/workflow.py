@@ -5,7 +5,7 @@ from astroquery.simbad import Simbad  # pylint: disable=unused-import
 
 from utils.decorators import astro_checkpoint
 
-from modules.astro_db import AstroDB
+from modules.db import AstroDB
 from modules.pg_core import PriorGMM
 from modules.pg_core_ex import PriorGMMEx
 from modules.validator import UnifiedMemberValidator

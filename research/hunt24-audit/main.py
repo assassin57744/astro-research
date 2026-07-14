@@ -9,8 +9,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from modules.astro_db import AssetManager
-from modules.astro_workflow import AstroWorkflow
+from modules.db import AssetManager
+from modules.workflow import AstroWorkflow
 
 import config as cfg
 
