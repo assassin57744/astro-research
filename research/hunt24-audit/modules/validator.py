@@ -36,7 +36,7 @@ class UnifiedMemberValidator:
         mode (str): 动力学审计维度模式 (2d, 3d_v, 5d, 6d_p 等)。
     """
 
-    def __init__(self, cluster: StarCluster, mode="5d", db_instance=None, cache_dir=None):
+    def __init__(self, cluster: StarCluster, feature_space="5d", db_instance=None, cache_dir=None):
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
 
         cluster_id = cluster.id
@@ -44,7 +44,7 @@ class UnifiedMemberValidator:
             raise ValueError(f"❌ 星团 {cluster_id} 不在配置文件中！")
 
         self.cluster_id = cluster_id.upper()
-        self.mode = mode
+        self.feature_space = feature_space
         self.db = db_instance
 
         # 🎯 核心改变：实例化纯粹的天体物理实体类，由它承载原本凌乱的配置读取与插值计算
@@ -55,7 +55,7 @@ class UnifiedMemberValidator:
 
         # 为了兼容你原本的类属性命名习惯，保留以下别名映射
         self.cluster_name = CLUSTERS[cluster_id]["ID_NAME"]
-        self.config = CLUSTERS[cluster_id]
+        self._config = CLUSTERS[cluster_id]
 
         # 数据库持久化缓存配置
         self.cache_table = MANIFEST[IDX_IDS_SIMBAD]["raw_table"]
@@ -72,7 +72,7 @@ class UnifiedMemberValidator:
         """
         if not self.cluster_obj or not hasattr(self.cluster_obj, "cfg_mgr"):
             # 降级采用静态配置
-            return self.config.get(param_name, default)
+            return self._config.get(param_name, default)
 
         # 直接从底层容器获取，防止与实例属性读取形成死循环
         val = self.cluster_obj.cfg_mgr.get_param(self.cluster_id, param_name)
@@ -80,7 +80,7 @@ class UnifiedMemberValidator:
             return val
 
         # 降级采用静态配置
-        val = self.config.get(param_name, default)
+        val = self._config.get(param_name, default)
         if val is None:
             self.logger.warn(
                 f"⚠️ 星团 {self.cluster_name} 在动态配置和静态配置中均未找到参数 {param_name}。"
@@ -222,7 +222,7 @@ class UnifiedMemberValidator:
                 exc_info=True
             )
 
-    def run_full_audit_ex(self, v_target_detail: str) -> pd.DataFrame:
+    def run(self, v_target_detail: str) -> pd.DataFrame:
         """
         驱动多维度深度审计管线。
 
@@ -243,6 +243,11 @@ class UnifiedMemberValidator:
         # 1. 构建并执行 SQL 获取基础数据
         sql = self._build_audit_sql(v_target_detail)
         audit_matrix = self.db.execute(sql).df()
+        self.logger.info(f"🔍 [Validator] 获取到 {len(audit_matrix)} 条样本。")
+        self.logger.info(f"🔍 [Validator] 审计数据: \n{audit_matrix.head(5)}")
+        for cc in audit_matrix.columns:
+            self.logger.info(f"🔍 [Validator] 审计数据 columns : {cc}")
+
 
         # 🚀 【防御机制】如果数据集为空，直接初始化结构并提前退出，防止下游 KeyError
         if audit_matrix.empty:
@@ -382,7 +387,7 @@ class UnifiedMemberValidator:
             return audit_matrix
 
         # 1. 环境上下文初始化与全新卡方追溯列初始化（默认赋予 NaN 保证维度自适应）
-        dim_mode = self.mode
+        dim_mode = self.feature_space
         is_2d = dim_mode == "2d"
         is_physical_v = dim_mode in ["3d_v", "6d_p"]
         audit_matrix["cmd_residual"] = np.nan

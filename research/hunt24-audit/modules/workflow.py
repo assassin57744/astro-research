@@ -181,7 +181,7 @@ class AstroWorkflow:
                 ctx=ctx_cluster,
             )
 
-    def post_pgmm(self, t_main_results):
+    def _post_pgmm(self, t_main_results):
         """算法后处理流水线：生成成员子集视图并计算统计摘要。
 
         Args:
@@ -252,7 +252,7 @@ class AstroWorkflow:
             self.logger.info(f"❌ [Process] Error in post_pipeline: {str(e)}")
             return {"status": "error", "message": str(e)}
 
-    def prepare_audit_data(self, v_source, v_target):
+    def _prepare_audit_data(self, v_source, v_target):
         """预处理审计数据：执行算法候选者与审计目标之间的交叉匹配。
 
         Args:
@@ -353,7 +353,7 @@ class AstroWorkflow:
         self.logger.info(f"🔍 🎬 [Audit] 开始对 {target} 进行身份审计...")
 
         try:
-            v_audit_input = self.pre_audit(target)
+            v_audit_input = self._pre_audit(target)
             if not v_audit_input:
                 self.logger.error("❌ [Audit] 审计预处理失败，管线熔断。")
                 return None
@@ -362,14 +362,14 @@ class AstroWorkflow:
             #     cluster_id=self.target_cluster, db_instance=self.db, mode=self.feature_space
             # )
             validator = UnifiedMemberValidator(
-                cluster=self.cl, db_instance=self.db, mode=self.feature_space
+                cluster=self.cl, db_instance=self.db, feature_space=self.feature_space
             )
 
             self._warm_up_literature_cache(validator, v_audit_input)
 
-            audit_report_df = validator.run_full_audit_ex(v_audit_input)
+            audit_report_df = validator.run(v_audit_input)
 
-            # 🚀 [混合模式重构] 审计结果回灌 Master 表
+            # 🚀 审计结果回灌 Master 表
             self.logger.info(f"📥 [Audit] 正在将深度审计结果同步至 Master 表...")
             self.db.tag_master_table(self.t_master, audit_report_df)
 
@@ -464,7 +464,7 @@ class AstroWorkflow:
         )
         validator.sync_simbad_cache(ids_to_sync)
 
-    def pre_audit(self, v_target):
+    def _pre_audit(self, v_target):
         """审计前准备：补全物理参数。
 
         Args:
@@ -603,7 +603,7 @@ class AstroWorkflow:
 
     @astro_checkpoint(
         cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
-        force_refresh=True,
+        force_refresh=False,
     )
     def run_pgmm(self, ctx_cluster=None):
         """驱动核心精筛计算流水线：支持实验双轨制安全开关。
@@ -833,17 +833,18 @@ class AstroWorkflow:
         except Exception:
             self.logger.error("❌ [Workflow] 流水线在运行期间发生严重崩溃", exc_info=True)
             raise
-        # finally:
-        #     if self._owned_db:
-        #         self.db.close()
-        #         self.logger.info("🔒 [System] 数据库连接已安全释放。")
 
-    def _run_compute_pipeline(self, ctx_cluster: dict=None) -> dict | None:
+    def run(self) -> dict | None:
         """执行 GMM → 后处理 → 交叉审计 → 深度审计 → 导出 → 报告 计算阶段。
 
         假定数据导入、标准化和星团参数重建已由调用方完成。
         """
         try:
+            # 1,2/5 数据准备和星团参数重建
+            self.init_data()
+
+            ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
+            ctx_cluster["id"] = self.target_cluster
             # [3/5] GMM 成员识别
             self.logger.info(
                 f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.feature_space}, 算法: {self.algo})..."
@@ -853,7 +854,7 @@ class AstroWorkflow:
 
             # [4/5] 后处理
             self.logger.info("📊 [Workflow] [4/5] 正在合成分析宽表并提取候选成员视图...")
-            v_all = self.post_pgmm(t_result)
+            v_all = self._post_pgmm(t_result)
             if v_all.get("status") != "success":
                 self.logger.error(f"❌ [Workflow] 后处理流程失败: {v_all.get('message')}")
                 return None
@@ -866,7 +867,7 @@ class AstroWorkflow:
             target_aln_view = self.manifest[self.target_category]["aln_view"].format(
                 cluster=self.target_cluster.lower()
             )
-            audit_res = self.prepare_audit_data(v_all["v_candidates"], target_aln_view)
+            audit_res = self._prepare_audit_data(v_all["v_candidates"], target_aln_view)
 
             if audit_res.get("status") != "success":
                 self.logger.warning(
@@ -914,6 +915,7 @@ class AstroWorkflow:
         Returns:
             (v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref)
         """
+        self.logger.info(f"🔍 [Audit] 开始执行深度审计, 审计输入: {audit_res}")
         v_audit_pg_only = audit_res.get("v_audit_pg_only")
         v_audit_ref_only = audit_res.get("v_audit_ref_only")
         x_stats = audit_res.get("stats", {})
@@ -1053,7 +1055,7 @@ class AstroWorkflow:
             all_results = []
             for mode in valid_modes:
                 wf = AstroWorkflow(db, target_cluster_id, target_category, mode, algo)
-                summary = wf._run_compute_pipeline(ctx_cluster)
+                summary = wf.run(ctx_cluster)
                 if summary:
                     all_results.append(summary)
 
