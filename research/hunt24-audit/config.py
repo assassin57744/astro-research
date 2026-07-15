@@ -485,10 +485,10 @@ CLUSTERS = {
         "DISTANCE_MODULUS": 9.25,
         "EXT_AG": 0.05,  # 消光较低
         "E_BP_RP": 0.03,
-        "PLX_REF": 1.3587075000000002, "PMRA_REF": -4.362965, "PMDEC_REF": -1.351195,
+        "PLX_REF": 1.360, "PMRA_REF": -4.339, "PMDEC_REF": -1.381,  # simbad 数据
         "PMRA_DISPERSION": 0.13699214858888809,
         "PMDEC_DISPERSION" : 0.1400777533193619,
-        "RV_REF": 34.0,
+        "RV_REF": 23.37,    # simbad [0.12]
         "UVW_REF": np.array([-10.5, -20.2, -5.1]),
         "V_ERROR": 2.0,
         "RV_ERROR": 5.0,
