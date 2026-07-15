@@ -225,7 +225,10 @@ def main() -> None:
     else:
         # 🌟 动态解包传入所有参数
         wf = AstroWorkflow(db_instance=None, **workflow_params)
-        wf.run()
+        wf.init_data()
+        ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
+        ctx_cluster["id"] = target_cluster_id
+        wf._run_compute_pipeline(ctx_cluster)
 
 
 if __name__ == "__main__":
