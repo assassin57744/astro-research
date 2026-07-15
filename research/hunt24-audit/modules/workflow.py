@@ -51,6 +51,8 @@ class AstroWorkflow:
             self.db = db_instance
             self._owned_db = False
 
+        self.cl = None
+
         # 将所有额外参数存入 config 字典，方便后续逻辑调用
         self.config = kwargs 
 
@@ -73,7 +75,7 @@ class AstroWorkflow:
             algo=self.algo,
         )
 
-    def data_standardize(self, idx_data, cfg_data, manifest, ctx=None):
+    def _data_standardize(self, idx_data, cfg_data, manifest, ctx=None):
         """核心标准化调度算法。
 
         Args:
@@ -164,7 +166,7 @@ class AstroWorkflow:
 
         return df_target
 
-    def data_standardize_all(self, ref_tables, ctx_cluster):
+    def _data_standardize_all(self, ref_tables, ctx_cluster):
         """[批量调度] 执行参考星表的层级标准化过程（STD -> STX -> ALN）。
 
         Args:
@@ -174,7 +176,7 @@ class AstroWorkflow:
         total = len(ref_tables)
         for i, k in enumerate(ref_tables, 1):
             self.logger.info(f"📋 [Process] [{i}/{total}] 正在标准化参考星表: {k}")
-            self.data_standardize(
+            self._data_standardize(
                 idx_data=k,
                 cfg_data=MANIFEST[k],
                 manifest=self.manifest,
@@ -605,7 +607,7 @@ class AstroWorkflow:
         cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
         force_refresh=False,
     )
-    def run_pgmm(self, ctx_cluster=None):
+    def _run_pgmm(self, ctx_cluster=None):
         """驱动核心精筛计算流水线：支持实验双轨制安全开关。
 
 
@@ -785,7 +787,7 @@ class AstroWorkflow:
         # 🛡️ 【第二阶段双轨控制】：安全分流判定
         # =========================================================================
 
-    def init_data(self):
+    def _init_data(self):
         """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
         self.logger.info(f"🔄 [Workflow] 启动闭环工作流: {self.target_cluster} [{self.feature_space}]")
         self.logger.info(f"⚙️ [Workflow] 配置快照: Reconstruct={self.param_source}, Result={self.result_mode}")
@@ -813,7 +815,7 @@ class AstroWorkflow:
             # TODO: 重构未完成, 暂时从文件读取
             ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
             ctx_cluster["id"] = self.target_cluster
-            self.data_standardize_all(ref_tables, ctx_cluster)
+            self._data_standardize_all(ref_tables, ctx_cluster)
             self.logger.info("✅ [Workflow] 数据准备阶段完成。")
 
             # [2.5/5] 星团领域实体参数重建
@@ -841,7 +843,7 @@ class AstroWorkflow:
         """
         try:
             # 1,2/5 数据准备和星团参数重建
-            self.init_data()
+            self._init_data()
 
             ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
             ctx_cluster["id"] = self.target_cluster
@@ -849,7 +851,7 @@ class AstroWorkflow:
             self.logger.info(
                 f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.feature_space}, 算法: {self.algo})..."
             )
-            t_result = self.run_pgmm(ctx_cluster)
+            t_result = self._run_pgmm(ctx_cluster)
             self.logger.info(f"✨ [Workflow] 算法推论完成，结果表: {t_result}")
 
             # [4/5] 后处理
@@ -1040,7 +1042,7 @@ class AstroWorkflow:
             wf_setup = AstroWorkflow(
                 db, target_cluster_id, target_category, valid_modes[0], algo
             )
-            wf_setup.data_standardize_all(ref_tables, ctx_cluster)
+            wf_setup._data_standardize_all(ref_tables, ctx_cluster)
             logger.info("✅ [Workflow] 数据准备阶段完成（全模式共享）。")
 
             # 星团物理参数重建（所有模式共享）
