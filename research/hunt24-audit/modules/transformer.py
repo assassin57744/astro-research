@@ -184,7 +184,7 @@ class AstroTransformer:
         )
         return rv_final
 
-    def fit_transform(self, df: pd.DataFrame, mode: str) -> np.ndarray:
+    def fit_transform(self, df: pd.DataFrame, feature_space: str) -> np.ndarray:
         """
         核心物理转换网关。
         
@@ -200,9 +200,9 @@ class AstroTransformer:
         """
         start_time = time.time()
         total_stars = len(df)
-        mode = mode.lower()
+        feature_space = feature_space.lower()
 
-        self.logger.info(f"🚀 [AstroTransformer] 启动特征转换 | 模式: {mode.upper()} | 样本: {total_stars}")
+        self.logger.info(f"🚀 [AstroTransformer] 启动特征转换 | 模式: {feature_space.upper()} | 样本: {total_stars}")
 
         # --------------------------------==================--------------------------------
         # 阶段一：字段归一化与预检
@@ -237,16 +237,16 @@ class AstroTransformer:
         # --------------------------------==================--------------------------------
         # 阶段二：按 6 大特征相空间模式分流处理
         # --------------------------------==================--------------------------------
-        if mode == "3d":
+        if feature_space == "3d":
             res = df[["pmra", "pmdec", "plx"]].to_numpy()
 
-        elif mode == "2d":
+        elif feature_space == "2d":
             res = df[["pmra", "pmdec"]].to_numpy()
 
-        elif mode == "5d":
+        elif feature_space == "5d":
             res = df[["ra", "dec", "pmra", "pmdec", "plx"]].to_numpy()
 
-        elif mode == "6d_o":
+        elif feature_space == "6d_o":
             rv_processed = self._compute_expected_rv(df)
             res = np.column_stack(
                 (
@@ -255,7 +255,7 @@ class AstroTransformer:
                 )
             )
 
-        elif mode == "5d_h":
+        elif feature_space == "5d_h":
             sc = SkyCoord(
                 ra=df["ra"].to_numpy() * u.deg,
                 dec=df["dec"].to_numpy() * u.deg,
@@ -273,7 +273,7 @@ class AstroTransformer:
 
             res = np.column_stack((l, b, pm_l_cosb, pm_b, plx))
 
-        elif mode in ["3d_v", "6d_p"]:
+        elif feature_space in ["3d_v", "6d_p"]:
             rv_processed = self._compute_expected_rv(df)
 
             bad_plx_mask = df["plx"].to_numpy() <= 0.1
@@ -315,7 +315,7 @@ class AstroTransformer:
                 f"W [{w_vel.min():.2f}, {w_vel.max():.2f}] km/s"
             )
 
-            if mode == "3d_v":
+            if feature_space == "3d_v":
                 res = np.column_stack((u_vel, v_vel, w_vel))
             else:
                 x_pos = gal_cart.cartesian.x.value
@@ -324,12 +324,12 @@ class AstroTransformer:
                 res = np.column_stack((x_pos, y_pos, z_pos, u_vel, v_vel, w_vel))
 
             self.logger.debug(
-                f"✨ 最终特征矩阵构建完成 | 模式: '{mode}' | 矩阵形状: {res.shape}"
+                f"✨ 最终特征矩阵构建完成 | 模式: '{feature_space}' | 矩阵形状: {res.shape}"
             )
 
         else:
-            self.logger.error(f"❌ 特征工程无法识别未知的 dim_mode: '{mode}'")
-            raise ValueError(f"❌ 未知的特征维度模式 (dim_mode): '{mode}'。")
+            self.logger.error(f"❌ 特征工程无法识别未知的 dim_mode: '{feature_space}'")
+            raise ValueError(f"❌ 未知的特征维度模式 (dim_mode): '{feature_space}'。")
 
         elapsed_time = time.time() - start_time
         self.logger.info(f"✨ 特征矩阵构建成功 | Shape: {res.shape} | 耗时: {elapsed_time:.2f}s")

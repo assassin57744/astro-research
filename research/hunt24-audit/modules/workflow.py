@@ -59,7 +59,7 @@ class AstroWorkflow:
         self.target_category = kwargs.get("category", "hunt")
         self.feature_space = kwargs.get("mode", "5d")
         self.algo = kwargs.get("algo", "dbscan")
-        
+
         # 提取运行控制参数
         self.param_source = kwargs.get("reconstruct", "file")
         self.result_mode = kwargs.get("result", "brief")
@@ -107,7 +107,7 @@ class AstroWorkflow:
                 # 将修正后的上下文传给执行层
                 action_func(self.db, idx_data, cfg_data, self.manifest, local_ctx)
 
-    def _get_seeds(self, idx_data, src, manifest, ctx=None, required_features=None):
+    def _get_seeds(self, idx_data, src, manifest, required_features=None):
         """从指定数据源的标准视图中提取高质量种子星 (条件筛选基于不同星团的配置)。
 
         Args:
@@ -143,7 +143,7 @@ class AstroWorkflow:
         self.db.tag_master_table(self.t_master, df_tag)
         return df_seeds
 
-    def _get_target(self, idx_data, cfg_src, manifest, ctx=None):
+    def _get_target(self, idx_data, cfg_src, manifest):
         """获取并清洗目标天区数据。
 
         Args:
@@ -358,8 +358,11 @@ class AstroWorkflow:
                 self.logger.error("❌ [Audit] 审计预处理失败，管线熔断。")
                 return None
 
+            # validator = UnifiedMemberValidator(
+            #     cluster_id=self.target_cluster, db_instance=self.db, mode=self.feature_space
+            # )
             validator = UnifiedMemberValidator(
-                cluster_id=self.target_cluster, db_instance=self.db, mode=self.feature_space
+                cluster=self.cl, db_instance=self.db, mode=self.feature_space
             )
 
             self._warm_up_literature_cache(validator, v_audit_input)
@@ -509,14 +512,13 @@ class AstroWorkflow:
         return gmm_cfg, required_features
 
     def _transform_and_bridge_features(
-        self, df_raw: pd.DataFrame, ctx_cluster, mode: str, required_features: list[str]
+        self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str]
     ) -> pd.DataFrame:
         """[私有方法] 特征转换网关：将原始坐标转换为目标物理维度特征。
 
         Args:
             df_raw: 原始 DataFrame。
-            ctx_cluster: 星团上下文。
-            mode: 运行模式 (e.g., '3d', '6d_p')。
+            feature_space: 运行模式 (e.g., '3d', '6d_p')。
             required_features: 所需特征列名列表。
 
         Returns:
@@ -528,9 +530,12 @@ class AstroWorkflow:
             )
             return None
 
-        cluster_rv = ctx_cluster.get("RV_REF", None)
-        c_ra = ctx_cluster.get("CENTER_RA", None)
-        c_dec = ctx_cluster.get("CENTER_DEC", None)
+        # cluster_rv = ctx_cluster.get("RV_REF", None)
+        # c_ra = ctx_cluster.get("CENTER_RA", None)
+        # c_dec = ctx_cluster.get("CENTER_DEC", None)
+        cluster_rv = self.cl.get_param("RV_REF", None)
+        c_ra = self.cl.get_param("CENTER_RA", None)
+        c_dec = self.cl.get_param("CENTER_DEC", None)
         cluster_center = (
             (c_ra, c_dec) if (c_ra is not None and c_dec is not None) else None
         )
@@ -539,7 +544,7 @@ class AstroWorkflow:
             cluster_rv=cluster_rv, cluster_center_icrs=cluster_center
         )
         # TODO: transformer.ingest_external_rv_data(df_raw)
-        X_array = transformer.fit_transform(df_raw, mode=mode)
+        X_array = transformer.fit_transform(df_raw, feature_space=feature_space)
 
         if X_array.shape[1] != len(required_features):
             raise KeyError(f"Transformer 转换矩阵列数与配置不匹配！")
@@ -557,7 +562,7 @@ class AstroWorkflow:
         ]
         if existing_dup_cols:
             self.logger.info(
-                f"🔄 [Compute] 模式 [{mode}] 触发列名防重机制，从原始表中移除了已存在的列: {existing_dup_cols}"
+                f"🔄 [Compute] 模式 [{feature_space}] 触发列名防重机制，从原始表中移除了已存在的列: {existing_dup_cols}"
             )
             df_raw = df_raw.drop(columns=existing_dup_cols)
         df_extended = pd.concat([df_raw, df_features], axis=1)
@@ -600,7 +605,7 @@ class AstroWorkflow:
         cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
         force_refresh=True,
     )
-    def run_pgmm(self, ctx_cluster):
+    def run_pgmm(self, ctx_cluster=None):
         """驱动核心精筛计算流水线：支持实验双轨制安全开关。
 
 
@@ -627,7 +632,7 @@ class AstroWorkflow:
             idx_data=field_idx,
             cfg_src=MANIFEST[field_idx],
             manifest=self.manifest,
-            ctx=ctx_cluster,
+            # ctx=ctx_cluster,
         )
 
         # 3. 初始化 Master 状态大表
@@ -643,22 +648,23 @@ class AstroWorkflow:
             self.logger.warning("🔒 [Compute] [双轨分流] 当前处于稳定生产模式：统一执行 PriorGMM 老轨行为")
 
             # A. 通过传统黑盒方法获取外部物理种子表数据
-            seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
+            # seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
+            seed_idx = self.cl.get_param("SEED_IDX")
             df_seeds_raw = self._get_seeds(
                 idx_data=seed_idx,
                 src=MANIFEST[seed_idx],
                 manifest=self.manifest,
-                ctx=ctx_cluster,
+                # ctx=ctx_cluster,
                 required_features=required_features,
             )
 
             # B. 统一进行高维特征转换（新老共用原 workflow 的私有桥接方法）
-            current_mode = self.feature_space
+            current_fs = self.feature_space
             df_target_ext = self._transform_and_bridge_features(
-                df_target_raw, ctx_cluster, current_mode, required_features
+                df_target_raw, current_fs, required_features
             )
             df_seeds_ext = self._transform_and_bridge_features(
-                df_seeds_raw, ctx_cluster, current_mode, required_features
+                df_seeds_raw, current_fs, required_features
             )
 
             # C. 统一执行 NaN 缺损防御性清洗
@@ -678,16 +684,19 @@ class AstroWorkflow:
             # =========================================================================
             # 🚀 【实验新轨】：并线自适应无监督粗筛 Extractor + 多态策略工厂
             # =========================================================================
-            strategy_name = ctx_cluster.get(
-                "STRATEGY", GMM_CONFIG.get("default_strategy", "bayesian")
+            # strategy_name = ctx_cluster.get(
+            #     "STRATEGY", GMM_CONFIG.get("default_strategy", "bayesian")
+            # ).lower()
+            strategy_name = self.cl.get_param(
+                "STRATEGY", default=GMM_CONFIG.get("default_strategy", "bayesian")
             ).lower()
             self.logger.info(f"🚀 [Compute] [双轨分流] 已激活实验性多态管线。当前策略: [{strategy_name.upper()}]")
 
             # A. 靶场全量天区进行高维特征变换（如 ICRS 转换为 3D/5D/6D 等物理模式）
-            current_mode = self.feature_space
-            self.logger.info(f"⚡ [Compute] 正在转换特征空间为 [{current_mode.upper()}]...")
+            current_fs = self.feature_space
+            self.logger.info(f"⚡ [Compute] 正在转换特征空间为 [{current_fs.upper()}]...")
             df_target_ext = self._transform_and_bridge_features(
-                df_target_raw, ctx_cluster, current_mode, required_features
+                df_target_raw, current_fs, required_features
             )
 
             # B. 靶场全量天区执行 NaN 防御清洗，构建干净的多维矩阵底座
@@ -704,12 +713,12 @@ class AstroWorkflow:
                 idx_data=seed_idx,
                 src=MANIFEST[seed_idx],
                 manifest=self.manifest,
-                ctx=ctx_cluster,
+                # ctx=ctx_cluster,
                 required_features=required_features,
             )
 
             df_seeds_ext = self._transform_and_bridge_features(
-                df_seeds_raw, ctx_cluster, current_mode, required_features
+                df_seeds_raw, current_fs, required_features
             )
 
             df_seeds_purge = self._defensive_nan_purge(
@@ -730,7 +739,8 @@ class AstroWorkflow:
             self.logger.info(f"✅ [Compute] 种子星粗筛成功！共沉淀出 {len(df_seeds_final)} 颗高纯度核心种子星。")
 
             # D. 路由并动态装配具体的实验精筛解异策略
-            strategy_params = ctx_cluster.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
+            # strategy_params = ctx_cluster.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
+            strategy_params = self.cl.get_param("STRATEGY_PARAMS", {}).get(strategy_name, {})
             strategy_kwargs = {**strategy_params}
             strategy_kwargs.setdefault("spatial_cols", ["ra", "dec"])
             strategy_kwargs.setdefault("scale_col", "plx")
@@ -775,7 +785,7 @@ class AstroWorkflow:
         # 🛡️ 【第二阶段双轨控制】：安全分流判定
         # =========================================================================
 
-    def run(self):
+    def init_data(self):
         """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
         self.logger.info(f"🔄 [Workflow] 启动闭环工作流: {self.target_cluster} [{self.feature_space}]")
         self.logger.info(f"⚙️ [Workflow] 配置快照: Reconstruct={self.param_source}, Result={self.result_mode}")
@@ -786,11 +796,13 @@ class AstroWorkflow:
             self.db.import_raw(target_cluster=self.target_cluster, force=False)
 
             # [2/5] 数据对齐
-            ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
-            ctx_cluster["id"] = self.target_cluster
+            self.cl = StarCluster(self.target_cluster, db_instance=self.db, param_source=self.param_source)
+
             ref_tables = [
-                ctx_cluster["FIELD_IDX"],
-                ctx_cluster["SEED_IDX"],
+                # ctx_cluster["FIELD_IDX"],
+                # ctx_cluster["SEED_IDX"],
+                self.cl.get_param("FIELD_IDX"),
+                self.cl.get_param("SEED_IDX"),
                 self.target_category,
                 cfg.IDX_DR2IDX,
                 cfg.IDX_IDS_SIMBAD,
@@ -798,15 +810,18 @@ class AstroWorkflow:
             self.logger.info(
                 f"📐 [Workflow] [2/5] 正在执行数据对齐 ({self.target_cluster}, 特征空间: {self.feature_space})..."
             )
+            # TODO: 重构未完成, 暂时从文件读取
+            ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
+            ctx_cluster["id"] = self.target_cluster
             self.data_standardize_all(ref_tables, ctx_cluster)
             self.logger.info("✅ [Workflow] 数据准备阶段完成。")
 
             # [2.5/5] 星团领域实体参数重建
             self.logger.info(f"🌌 [Workflow] [2.5/5] 载入目标星团领域实体模型: {self.target_cluster}")
-            cl = StarCluster(self.target_cluster, db_instance=self.db)
-            success = cl.load_params(param_source=self.param_source)
+            
+            success = self.cl.load_or_reconstruct_parameters(param_source=self.param_source)#.load_params(param_source=self.param_source)
             self.logger.info(
-                f"✅ [Workflow] 星团领域模型物理状态就绪。当前反演距离: {1000.0 / cl.plx_ref:.1f} pc"
+                f"✅ [Workflow] 星团领域模型物理状态就绪。当前反演距离: {1000.0 / self.cl.get_param("PLX_REF"):.1f} pc"
             )
             if not success:
                 self.logger.error(
@@ -814,71 +829,80 @@ class AstroWorkflow:
                 )
                 return None
 
-            return self._run_compute_pipeline(ctx_cluster)
+            # return self._run_compute_pipeline(ctx_cluster)
         except Exception:
             self.logger.error("❌ [Workflow] 流水线在运行期间发生严重崩溃", exc_info=True)
             raise
-        finally:
-            if self._owned_db:
-                self.db.close()
-                self.logger.info("🔒 [System] 数据库连接已安全释放。")
+        # finally:
+        #     if self._owned_db:
+        #         self.db.close()
+        #         self.logger.info("🔒 [System] 数据库连接已安全释放。")
 
-    def _run_compute_pipeline(self, ctx_cluster: dict) -> dict | None:
+    def _run_compute_pipeline(self, ctx_cluster: dict=None) -> dict | None:
         """执行 GMM → 后处理 → 交叉审计 → 深度审计 → 导出 → 报告 计算阶段。
 
         假定数据导入、标准化和星团参数重建已由调用方完成。
         """
-        # [3/5] GMM 成员识别
-        self.logger.info(
-            f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.feature_space}, 算法: {self.algo})..."
-        )
-        t_result = self.run_pgmm(ctx_cluster)
-        self.logger.info(f"✨ [Workflow] 算法推论完成，结果表: {t_result}")
-
-        # [4/5] 后处理
-        self.logger.info("📊 [Workflow] [4/5] 正在合成分析宽表并提取候选成员视图...")
-        v_all = self.post_pgmm(t_result)
-        if v_all.get("status") != "success":
-            self.logger.error(f"❌ [Workflow] 后处理流程失败: {v_all.get('message')}")
-            return None
-        self.logger.info("✅ [Workflow] 数据处理流程结束，转入交叉审计阶段。")
-
-        # [5/5] 交叉审计
-        self.logger.info(
-            f"⚖️ [Workflow] [5/5] 执行多源文献交叉审计, 参考类别: {self.target_category}"
-        )
-        target_aln_view = self.manifest[self.target_category]["aln_view"].format(
-            cluster=self.target_cluster.lower()
-        )
-        audit_res = self.prepare_audit_data(v_all["v_candidates"], target_aln_view)
-
-        if audit_res.get("status") != "success":
-            self.logger.warning(
-                f"⚠️ [Workflow] 交叉比对审计未完全成功: {audit_res.get('message')}"
+        try:
+            # [3/5] GMM 成员识别
+            self.logger.info(
+                f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.feature_space}, 算法: {self.algo})..."
             )
-            # 即使审计不完整也尝试出报告
+            t_result = self.run_pgmm(ctx_cluster)
+            self.logger.info(f"✨ [Workflow] 算法推论完成，结果表: {t_result}")
+
+            # [4/5] 后处理
+            self.logger.info("📊 [Workflow] [4/5] 正在合成分析宽表并提取候选成员视图...")
+            v_all = self.post_pgmm(t_result)
+            if v_all.get("status") != "success":
+                self.logger.error(f"❌ [Workflow] 后处理流程失败: {v_all.get('message')}")
+                return None
+            self.logger.info("✅ [Workflow] 数据处理流程结束，转入交叉审计阶段。")
+
+            # [5/5] 交叉审计
+            self.logger.info(
+                f"⚖️ [Workflow] [5/5] 执行多源文献交叉审计, 参考类别: {self.target_category}"
+            )
+            target_aln_view = self.manifest[self.target_category]["aln_view"].format(
+                cluster=self.target_cluster.lower()
+            )
+            audit_res = self.prepare_audit_data(v_all["v_candidates"], target_aln_view)
+
+            if audit_res.get("status") != "success":
+                self.logger.warning(
+                    f"⚠️ [Workflow] 交叉比对审计未完全成功: {audit_res.get('message')}"
+                )
+                # 即使审计不完整也尝试出报告
+                return render_final_report(
+                    self.target_cluster, self.target_category, self.feature_space, self.algo,
+                    ctx_cluster, v_all, audit_res, {}, {}, self.logger,
+                )
+
+            self.logger.info(
+                f"✅ [Workflow] 交叉审计比对完成。"
+            )
+
+            # 深度审计
+            v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref = (
+                self._execute_deep_audits(audit_res)
+            )
+
+            # 导出
+            self._export_if_needed(audit_res, v_final_pg, v_final_ref, self.result_mode)
+
+            # 报告
             return render_final_report(
                 self.target_cluster, self.target_category, self.feature_space, self.algo,
-                ctx_cluster, v_all, audit_res, {}, {}, self.logger,
+                ctx_cluster, v_all, audit_res, deep_stats_pg, deep_stats_ref, self.logger,
             )
+        except Exception:
+            self.logger.error("❌ [Workflow] 流水线在运行期间发生严重崩溃", exc_info=True)
+            raise
 
-        self.logger.info(
-            f"✅ [Workflow] 交叉审计比对完成。"
-        )
-
-        # 深度审计
-        v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref = (
-            self._execute_deep_audits(audit_res)
-        )
-
-        # 导出
-        self._export_if_needed(audit_res, v_final_pg, v_final_ref, self.result_mode)
-
-        # 报告
-        return render_final_report(
-            self.target_cluster, self.target_category, self.feature_space, self.algo,
-            ctx_cluster, v_all, audit_res, deep_stats_pg, deep_stats_ref, self.logger,
-        )
+        finally:
+            if self._owned_db:
+                self.db.close()
+                self.logger.info("🔒 [System] 数据库连接已安全释放。")
 
     # =========================================================================
     # 深度审计
@@ -1020,7 +1044,7 @@ class AstroWorkflow:
             # 星团物理参数重建（所有模式共享）
             logger.info(f"🌌 [Workflow] 载入目标星团领域实体模型: {target_cluster_id}")
             cl = StarCluster(target_cluster_id, db_instance=db)
-            cl.load_params(param_source=reconstruct_mode)
+            cl.load_or_reconstruct_parameters(param_source=reconstruct_mode)#.load_params(param_source=reconstruct_mode)
             logger.info(
                 f"✅ [Workflow] 星团领域模型物理状态就绪。反演距离: {1000.0 / cl.plx_ref:.1f} pc"
             )

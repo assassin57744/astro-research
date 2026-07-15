@@ -13,12 +13,13 @@ class ClusterConfigManager:
     支持：内存缓存 -> DuckDB自适应表检索 -> config.py静态兜底 的三级级联查找。
     """
 
-    def __init__(self, db_instance=None):
+    def __init__(self, db_instance=None, param_source=None):
         self.logger = logging.getLogger("AstroPipeline.ConfigManager")
         self.db = db_instance
+        self.param_source = param_source
         self._runtime_cache = {}
 
-    def get_param(self, cluster_id: str, param_name: str):
+    def get_param(self, cluster_id: str, param_name: str, default=None):
         """核心物理参数级联检索接口"""
         cluster_id = cluster_id.upper()
         param_name = param_name.upper()
@@ -31,7 +32,7 @@ class ClusterConfigManager:
             return self._runtime_cache[cluster_id][param_name]
 
         # 层级 2：检索先前由 Refiner 提炼并安全落盘的 DuckDB 科学资产
-        if self.db:
+        if self.db and self.param_source == "db":
             try:
                 self._ensure_config_table_exists()
                 query_sql = f"""

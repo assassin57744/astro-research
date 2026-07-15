@@ -36,9 +36,10 @@ class UnifiedMemberValidator:
         mode (str): 动力学审计维度模式 (2d, 3d_v, 5d, 6d_p 等)。
     """
 
-    def __init__(self, cluster_id: str, mode="5d", db_instance=None, cache_dir=None):
+    def __init__(self, cluster: StarCluster, mode="5d", db_instance=None, cache_dir=None):
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
 
+        cluster_id = cluster.id
         if cluster_id not in CLUSTERS:
             raise ValueError(f"❌ 星团 {cluster_id} 不在配置文件中！")
 
@@ -47,9 +48,10 @@ class UnifiedMemberValidator:
         self.db = db_instance
 
         # 🎯 核心改变：实例化纯粹的天体物理实体类，由它承载原本凌乱的配置读取与插值计算
-        self.cluster_obj = StarCluster(
-            cluster_id=self.cluster_id, db_instance=db_instance
-        )
+        # self.cluster_obj = StarCluster(
+        #     cluster_id=self.cluster_id, db_instance=db_instance
+        # )
+        self.cluster_obj = cluster
 
         # 为了兼容你原本的类属性命名习惯，保留以下别名映射
         self.cluster_name = CLUSTERS[cluster_id]["ID_NAME"]

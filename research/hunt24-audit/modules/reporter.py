@@ -231,7 +231,7 @@ def render_final_report(
     report_lines = [
         "=" * 65,
         f"🏁 [管线执行最终报告 - {target_cluster_id}]",
-        f"  🔹 目标星团: {target_cluster_id} ({ctx_cluster['NAME']})",
+        f"  🔹 目标星团: {target_cluster_id} ({target_cluster_id})",
         f"  🔹 执行模式: {mode.upper()} -> 物理特征空间: {used_features}",
         f"  🔹 聚类算法: {algo.upper()}",
         f"  🔹 审计参考: {target_category}",
