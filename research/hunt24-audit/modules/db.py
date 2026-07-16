@@ -821,10 +821,8 @@ class AstroDB:
             JOIN {cache_table_name} c ON i.gaia_dr3_id = c.gaia_dr3_id
         """).df()
 
-        # 识别需要补全 parent 的行
-        mask_needs_repair = df_cached['parent'].isna() | \
-                            (df_cached['parent'] == '') | \
-                            (df_cached['parent'].str.lower() == 'none')
+        # 识别需要补全 parent 的行：仅 NULL 或空字符串为异常（"None" 表示已确认无数据）
+        mask_needs_repair = df_cached['parent'].isna() | (df_cached['parent'] == '')
         
         df_valid_cached = df_cached[~mask_needs_repair].copy()
         df_valid_cached["cache_hit"] = True

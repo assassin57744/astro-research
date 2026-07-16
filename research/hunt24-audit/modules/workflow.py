@@ -763,14 +763,12 @@ class AstroWorkflow:
             ).df()
             ids_to_sync = df_all["id"].tolist()
         else:
+            # 已在缓存表中的条目均为有效结果（含 parent="None" 即"SIMBAD 无数据"）
             sql_missing = f"""
                 SELECT DISTINCT CAST(v.id AS VARCHAR) as id
                 FROM {v_source} v
                 LEFT JOIN {cache_table} c ON CAST(v.id AS VARCHAR) = c.gaia_dr3_id
                 WHERE c.gaia_dr3_id IS NULL
-                   OR c.parent IS NULL
-                   OR TRIM(c.parent) = ''
-                   OR LOWER(TRIM(c.parent)) = 'none'
             """
             self.logger.info(f"🔍 [Audit] 正在检索 [{v_source}] 中缺失的文献缓存记录...")
             df_missing = self.db.con.execute(sql_missing).df()
