@@ -1,7 +1,8 @@
 import logging
+from dataclasses import dataclass, field
+from typing import Any
 
 import pandas as pd
-from astroquery.simbad import Simbad  # pylint: disable=unused-import
 
 from utils.decorators import astro_checkpoint
 
@@ -24,16 +25,52 @@ from config import (
 )
 
 
+# =============================================================================
+# 📦 运行上下文数据类（单次运行的不可变调度上下文）
+# =============================================================================
+
+@dataclass
+class RunContext:
+    """单次运行的不可变调度上下文。
+
+    只包含管线调度参数，不包含子模块细节。
+    扩展方式：通过 algo_params / audit_params / seed_params 字典自由注入新参数，
+    无需修改本数据类定义。新增参数类别时仅需增加一个命名空间 dict 字段。
+    """
+    cluster_id: str
+    category: str             # "hunt", "cg20", etc.
+    feature_space: str        # "2d", "5d", "6d_p", etc.
+    algorithm: str            # "dbscan", "hdbscan"
+    result_mode: str          # "brief" | "detailed"
+    param_source: str         # "file" | "db"
+
+    algo_params: dict = field(default_factory=dict)
+    audit_params: dict = field(default_factory=dict)
+    seed_params: dict = field(default_factory=dict)
+
+    star_cluster: Any = None
+    gmm_config: dict = field(default_factory=dict)
+    required_features: list = field(default_factory=list)
+    master_table: str = ""
+
+
+# =============================================================================
+# AstroWorkflow 主类
+# =============================================================================
+
 class AstroWorkflow:
     """天文数据处理工作流编排引擎。
 
-    该类作为流水线的核心调度器，负责编排数据库交互、特征转换、算法模型训练与推理、
-    以及基于文献的多维度自动化审计流程。
-
-    Attributes:
-        db (AstroDB): 绑定的数据库实例，用于执行 SQL 和管理视图。
-        logger (logging.Logger): 专属于工作流模块的日志记录器。
-        manifest (dict): 来源于数据库实例的数据配置清单。
+    方法层次：
+      - 一级 PUBLIC:  run() / run_batch()
+      - 二级 阶段调度: _init_run_context() / _execute_single_pipeline() /
+                     _prepare_shared_data() / _finalize_context() /
+                     _compute_members() / _post_process() /
+                     _audit_phase() / _export_phase() / _report_phase()
+      - 三级 功能单元: _standardize_ref_tables() / _load_and_transform_field() /
+                     _load_and_transform_seeds() / _run_stable_pipeline() /
+                     _run_experimental_pipeline() / _cross_match_with_literature() /
+                     _run_audit_pipeline() / 等
     """
 
     def __init__(self, db_instance: AstroDB | None = None, **kwargs):
@@ -41,8 +78,7 @@ class AstroWorkflow:
 
         Args:
             db_instance (AstroDB | None): 活跃的 AstroDB 数据库对象。
-                为 None 时自动创建新实例（工作流关闭时自动释放）。
-            kwargs: 可选的参数，用于传递星团 ID、目标类别、运行模式和算法。
+            kwargs: 可选参数（向后兼容旧版调用方式）。
         """
         if db_instance is None:
             self.db = AstroDB(manifest=cfg.MANIFEST)
@@ -51,49 +87,344 @@ class AstroWorkflow:
             self.db = db_instance
             self._owned_db = False
 
-        self.cl = None
-
-        # 将所有额外参数存入 config 字典，方便后续逻辑调用
-        self.config = kwargs 
-
-        # 基础属性赋值（带默认值保护）
-        self.target_cluster = kwargs.get("target_cluster")
-        self.target_category = kwargs.get("category", "hunt")
-        self.feature_space = kwargs.get("mode", "5d")
-        self.algo = kwargs.get("algo", "dbscan")
-
-        # 提取运行控制参数
-        self.param_source = kwargs.get("reconstruct", "file")
-        self.result_mode = kwargs.get("result", "brief")
-
+        self.config = kwargs
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(self.db, "data_manifest", {})
-        self.t_master = cfg.TMPL.T_MASTER.format(
-            cluster=self.target_cluster.lower(),
-            category=self.target_category,
-            feature_space=self.feature_space,
-            algo=self.algo,
+
+        # 兼容旧装饰器 astro_checkpoint 的临时属性
+        # (在 _execute_single_pipeline 中同步)
+        self.target_cluster = None
+        self.target_category = None
+        self.feature_space = None
+        self.algo = None
+        self.cl = None
+        self.t_master = None
+
+    # =========================================================================
+    # 🟢 一级：PUBLIC API
+    # =========================================================================
+
+    def run(self) -> dict | None:
+        """单模式入口（向后兼容，供程序化调用。CLI 路径使用 run_batch）。
+
+                从 self.config 中提取参数构建 RunContext，委托给
+                _execute_single_pipeline，并在 finally 中释放自有数据库连接。
+                """
+        ctx = self._init_run_context()
+        try:
+            return self._execute_single_pipeline(ctx)
+        except Exception:
+            self.logger.error("❌ [Workflow] 流水线崩溃", exc_info=True)
+            raise
+        finally:
+            if self._owned_db:
+                self.db.close()
+                self.logger.info("🔒 [System] 数据库连接已安全释放。")
+
+    def run_batch(
+        self,
+        clusters: list[str],
+        categories: list[str],
+        feature_spaces: list[str],
+        algorithms: list[str],
+        result_mode: str = "brief",
+        param_source: str = "file",
+        algo_params_override: dict | None = None,
+        audit_params_override: dict | None = None,
+        seed_params_override: dict | None = None,
+    ) -> list[dict]:
+        """🚀 批量多模式运行入口。
+
+        对 clusters × categories × feature_spaces × algorithms 笛卡尔积
+        of the each combination independently execute the complete pipeline, returns a summary results list.
+        同一个 cluster + category 的数据准备只执行一次。
+        """
+        results = []
+        total = len(clusters) * len(categories) * len(feature_spaces) * len(algorithms)
+        count = 0
+
+        for cluster_id in clusters:
+            for category in categories:
+                # ── 共享数据准备 ──
+                ctx_base = RunContext(
+                    cluster_id=cluster_id,
+                    category=category,
+                    feature_space="",
+                    algorithm="",
+                    result_mode=result_mode,
+                    param_source=param_source,
+                )
+                self.logger.info(f"📦 [Batch] 准备共享数据: {cluster_id}/{category}")
+                self._prepare_shared_data(ctx_base)
+
+                for fs in feature_spaces:
+                    for algo in algorithms:
+                        count += 1
+                        self.logger.info(
+                            f"⚡ [Batch] [{count}/{total}] "
+                            f"{cluster_id} / {category} / {fs} / {algo}"
+                        )
+                        ctx = RunContext(
+                            cluster_id=cluster_id,
+                            category=category,
+                            feature_space=fs,
+                            algorithm=algo,
+                            result_mode=result_mode,
+                            param_source=param_source,
+                            algo_params=(algo_params_override or {}).copy(),
+                            audit_params=(audit_params_override or {}).copy(),
+                            seed_params=(seed_params_override or {}).copy(),
+                        )
+                        ctx.star_cluster = ctx_base.star_cluster
+
+                        try:
+                            summary = self._execute_single_pipeline(
+                                ctx, skip_data_prep=True
+                            )
+                            if summary:
+                                results.append(summary)
+                        except Exception:
+                            self.logger.error(
+                                f"❌ [Batch] [{cluster_id}/{fs}/{algo}] 执行失败",
+                                exc_info=True,
+                            )
+
+                self._render_batch_summary(results)
+        return results
+
+    @staticmethod
+    def run_all_modes(
+        target_cluster_id: str,
+        target_category: str,
+        algo: str,
+        result_mode: str,
+        reconstruct_mode: str = "file",
+    ) -> None:
+        """循环所有特征空间模式（保留向后兼容，内部委托给 run_batch）。"""
+        valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
+        db = AstroDB(manifest=cfg.MANIFEST)
+        wf = AstroWorkflow(db_instance=db)
+        try:
+            wf.run_batch(
+                clusters=[target_cluster_id],
+                categories=[target_category],
+                feature_spaces=valid_modes,
+                algorithms=[algo],
+                result_mode=result_mode,
+                param_source=reconstruct_mode,
+            )
+        finally:
+            db.close()
+
+    # =========================================================================
+    # 🟡 二级：阶段调度器
+    # =========================================================================
+
+    def _init_run_context(
+        self,
+        cluster_id: str | None = None,
+        category: str | None = None,
+        feature_space: str | None = None,
+        algorithm: str | None = None,
+        result_mode: str | None = None,
+        param_source: str | None = None,
+        algo_params_override: dict | None = None,
+        audit_params_override: dict | None = None,
+        seed_params_override: dict | None = None,
+    ) -> RunContext:
+        """构造 RunContext，合并三层参数来源（优先级从低到高）：
+
+            1. config.py 全局默认值
+            2. CLUSTERS[cluster_id] 星团专属配置
+            3. 显式传入的 override 参数
+
+        若参数未显式传入，则从 self.config（旧版 kwargs）回退。
+        """
+        cid = cluster_id or self.config.get("target_cluster")
+        cat = category or self.config.get("category", "hunt")
+        fs = feature_space or self.config.get("mode", "5d")
+        alg = algorithm or self.config.get("algo", "dbscan")
+        res = result_mode or self.config.get("result", "brief")
+        ps = param_source or self.config.get("reconstruct", "file")
+
+        # ── 算法参数：三层合并 ──
+        algo_params = {
+            "eps": cfg.GMM_CONFIG.get("dbscan_eps", "auto"),
+            "min_samples": cfg.GMM_CONFIG.get("dbscan_min_samples", 100),
+            "strategy": cfg.GMM_CONFIG.get("default_strategy", "bayesian"),
+            "covariance_type": cfg.GMM_CONFIG.get("gmm_covariance_type", "full"),
+        }
+        cluster_cfg = cfg.CLUSTERS.get(cid, {})
+        strategy_name = cluster_cfg.get("STRATEGY", algo_params["strategy"])
+        strategy_params = (
+            cluster_cfg.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
         )
+        algo_params.update(strategy_params)
+        algo_params["strategy"] = strategy_name
+        if algo_params_override:
+            algo_params.update(algo_params_override)
+
+        # ── 审计参数 ──
+        audit_params = {
+            "ruwe_limit": cfg.AUDIT_RUWE_LIMIT,
+            "plx_residual_limit": cfg.AUDIT_PLX_RESIDUAL_LIMIT,
+            "mag_limit": cfg.AUDIT_MAG_LIMIT_HUNT24,
+            "skip_simbad": False,
+        }
+        if audit_params_override:
+            audit_params.update(audit_params_override)
+
+        # ── 种子参数 ──
+        seed_params = {
+            "radius_override": None,
+            "plx_lim_override": None,
+            "max_mag_override": None,
+        }
+        if seed_params_override:
+            seed_params.update(seed_params_override)
+
+        ctx = RunContext(
+            cluster_id=cid,
+            category=cat,
+            feature_space=fs,
+            algorithm=alg,
+            result_mode=res,
+            param_source=ps,
+            algo_params=algo_params,
+            audit_params=audit_params,
+            seed_params=seed_params,
+        )
+
+        # 同步到兼容旧代码的 self 属性（供 decorator / 审计方法使用）
+        self.target_cluster = cid
+        self.target_category = cat
+        self.feature_space = fs
+        self.algo = alg
+
+        return ctx
+
+    def _execute_single_pipeline(
+        self, ctx: RunContext, skip_data_prep: bool = False
+    ) -> dict | None:
+        """[核心调度器] 串联完整管线 6 个阶段。"""
+        # Phase 1: 数据准备
+        if not skip_data_prep:
+            self._prepare_shared_data(ctx)
+        self._finalize_context(ctx)
+
+        # 同步到兼容旧代码的 self 属性（供 decorator / 审计方法使用）
+        self.target_cluster = ctx.cluster_id
+        self.target_category = ctx.category
+        self.feature_space = ctx.feature_space
+        self.algo = ctx.algorithm
+
+        self.cl = ctx.star_cluster
+        self.t_master = ctx.master_table
+
+        # Phase 2: GMM 成员识别
+        self.logger.info(
+            f"🧠 [Phase 2] GMM 成员识别: {ctx.cluster_id} [{ctx.feature_space}]"
+        )
+        result_table = self._compute_members(ctx)
+        if not result_table:
+            self.logger.error("❌ [Phase 2] 成员识别失败")
+            return None
+
+        # Phase 3: 后处理
+        self.logger.info("📊 [Phase 3] 后处理...")
+        post_result = self._post_process(ctx, result_table)
+        if post_result.get("status") != "success":
+            self.logger.error(f"❌ [Phase 3] 后处理失败: {post_result.get('message')}")
+            return None
+
+        # Phase 4: 审计
+        self.logger.info(f"⚖️ [Phase 4] 交叉审计, 参考类别: {ctx.category}")
+        audit_result = self._audit_phase(ctx, post_result)
+
+        # Phase 5: 导出
+        self._export_phase(ctx, audit_result)
+
+        # Phase 6: 报告
+        return self._report_phase(ctx, post_result, audit_result)
+
+    def _prepare_shared_data(self, ctx: RunContext):
+        """执行可跨特征空间复用的数据准备：数据导入 + 星团实体 + 标准化。"""
+        self.logger.info(f"📦 [Phase 1] 数据准备: {ctx.cluster_id}")
+
+        self.db.import_raw(target_cluster=ctx.cluster_id, force=False)
+
+        ctx.star_cluster = StarCluster(
+            ctx.cluster_id, db_instance=self.db, param_source=ctx.param_source
+        )
+
+        # 🚀 必须在 load_or_reconstruct_parameters 之前执行标准化，
+        # 因为参数重建（config_manager）依赖 aln 视图（如 aln_hunt_m44）已存在。
+        self._standardize_ref_tables(ctx)
+
+        success = ctx.star_cluster.load_or_reconstruct_parameters(
+            param_source=ctx.param_source
+        )
+        if not success:
+            raise RuntimeError(f"无法初始化星团 {ctx.cluster_id} 的物理资产")
+        self.logger.info(
+            f"✅ 星团领域模型就绪。"
+            f"距离: {1000.0 / ctx.star_cluster.get_param('PLX_REF'):.1f} pc"
+        )
+
+        self.logger.info("✅ [Phase 1] 数据准备阶段完成。")
+
+    def _finalize_context(self, ctx: RunContext):
+        """填充依赖于特征空间/算法的上下文属性。"""
+        gmm_cfg = cfg.GMM_CONFIG.copy()
+        gmm_cfg["dim_mode"] = ctx.feature_space
+
+        fmap = gmm_cfg.get("feature_map", {})
+        if ctx.feature_space not in fmap:
+            raise ValueError(f"未知的特征空间: {ctx.feature_space}")
+
+        ctx.gmm_config = gmm_cfg
+        ctx.required_features = fmap[ctx.feature_space]
+        ctx.master_table = cfg.TMPL.T_MASTER.format(
+            cluster=ctx.cluster_id.lower(),
+            category=ctx.category,
+            feature_space=ctx.feature_space,
+            algo=ctx.algorithm,
+        )
+
+    # =========================================================================
+    # 🔵 三级：功能单元
+    # =========================================================================
+
+    # ── 数据标准化 ──
+
+    def _standardize_ref_tables(self, ctx: RunContext):
+        """标准化所有参考星表。"""
+        cl = ctx.star_cluster
+        ref_tables = [
+            cl.get_param("FIELD_IDX"),
+            cl.get_param("SEED_IDX"),
+            ctx.category,
+            cfg.IDX_DR2IDX,
+            cfg.IDX_IDS_SIMBAD,
+        ]
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+        cluster_cfg["id"] = ctx.cluster_id
+
+        for k in ref_tables:
+            self._data_standardize(
+                idx_data=k,
+                cfg_data=cfg.MANIFEST[k],
+                manifest=self.manifest,
+                ctx=cluster_cfg,
+            )
 
     def _data_standardize(self, idx_data, cfg_data, manifest, ctx=None):
-        """核心标准化调度算法。
-
-        Args:
-            idx_data (str): 数据源索引。
-            cfg_data (dict): 数据配置字典。
-            manifest (dict): 全局清单。
-            ctx (dict, optional): 包含星团几何信息的上下文。
-        """
+        """核心标准化调度算法（保留原有逻辑）。"""
         self.logger.info(f"🚀 [Process] 正在执行数据标准化, 当前源: {idx_data}")
 
-        # 🛡️ 核心重构：确保 CAT_NAME 的解析优先级
         local_ctx = ctx.copy() if ctx else {}
         cluster_id = local_ctx.get("id")
-
-        # 默认 CAT_NAME 使用星团的 ID_NAME 或 NAME
-        local_ctx.setdefault(
-            "CAT_NAME", local_ctx.get("ID_NAME", local_ctx.get("NAME"))
-        )
+        local_ctx.setdefault("CAT_NAME", local_ctx.get("ID_NAME", local_ctx.get("NAME")))
 
         if cluster_id:
             adapter = getattr(cfg, "CATALOG_NAMING_ADAPTER", {})
@@ -106,113 +437,231 @@ class AstroWorkflow:
             if layer in actions:
                 self.logger.debug(f"  ∟ [Process] 正在执行层级动作: {layer.upper()}")
                 action_func = actions[layer]
-                # 将修正后的上下文传给执行层
                 action_func(self.db, idx_data, cfg_data, self.manifest, local_ctx)
 
-    def _get_seeds(self, idx_data, src, manifest, required_features=None):
-        """从指定数据源的标准视图中提取高质量种子星 (条件筛选基于不同星团的配置)。
+    # ── 特征工程 ──
 
-        Args:
-            idx_data (str): 数据键。
-            src (dict): 配置字典。
-            required_features (list): 必须具备的物理特征列。
+    def _load_and_transform_field(self, ctx: RunContext) -> pd.DataFrame:
+        """加载靶场数据 → 特征转换 → NaN清洗。"""
+        field_idx = ctx.star_cluster.get_param("FIELD_IDX")
+        cfg_source = self.manifest[field_idx]
+        v_aln = cfg_source["aln_view"]
 
-        Returns:
-            pd.DataFrame: 种子星结果集。
-        """
+        df_raw = self.db.query(f"SELECT * FROM {v_aln}")
+        self.logger.info(f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗")
+
+        df_ext = self._transform_and_bridge_features(
+            df_raw, ctx.feature_space, ctx.required_features
+        )
+        return self._defensive_nan_purge(df_ext, ctx.required_features, label="Target_field")
+
+    def _load_and_transform_seeds(self, ctx: RunContext) -> pd.DataFrame:
+        """加载种子数据 → 特征转换 → NaN清洗。"""
+        seed_idx = ctx.star_cluster.get_param("SEED_IDX")
+        src = self.manifest[seed_idx]
         v_src = src["aln_view"]
-        query = f"SELECT * FROM {v_src}"
-        df_raw = self.db.query(query)
 
+        df_raw = self.db.query(f"SELECT * FROM {v_src}")
         self.logger.info(f"📋 [Process] 从视图 [{v_src}] 读取原始种子星: {len(df_raw)} 颗")
 
-        # 🚀 仅针对当前运行模式所需的特征执行 dropna
-        # 这样在 2D 模式下，即便视差 (plx) 缺失，只要自行 (pm) 还在，种子星就不会被丢弃。
-        if required_features:
-            # 🚀 [Bugfix] 仅对当前存在的特征执行清洗。
-            # 派生特征（如 l, b, U, V, W）此时尚未生成，
-            # 将在 Transformer 转换后的 _defensive_nan_purge 中处理
-            available_features = [f for f in required_features if f in df_raw.columns]
-            df_seeds = df_raw.dropna(subset=available_features).copy()
-        else:
-            df_seeds = df_raw.dropna().copy()
+        available_features = [f for f in ctx.required_features if f in df_raw.columns]
+        df_seeds = (
+            df_raw.dropna(subset=available_features).copy()
+            if available_features
+            else df_raw.dropna().copy()
+        )
+
+        df_tag = df_seeds[[cfg.STD_COLS["ID"]]].copy()
+        df_tag["seed_type"] = "raw_seed"
+        self.db.tag_master_table(ctx.master_table, df_tag)
 
         self.logger.info(f"✅ [Process] 种子星提取完成，有效样本: {len(df_seeds)} 颗")
 
-        # 🚀 初始化种子标签：先全部标记为 'raw_seed'
-        df_tag = df_seeds[[cfg.STD_COLS["ID"]]].copy()
-        df_tag["seed_type"] = "raw_seed"
-        self.db.tag_master_table(self.t_master, df_tag)
-        return df_seeds
-
-    def _get_target(self, idx_data, cfg_src, manifest):
-        """获取并清洗目标天区数据。
-
-        Args:
-            idx_data (str): 数据源索引。
-            cfg_src (dict): 数据源配置。
-
-        Returns:
-            pd.DataFrame: 有效的天体特征数据。
-        """
-        cfg_source = manifest[idx_data]
-        v_aln = cfg_source["aln_view"]
-
-        sql = f"SELECT * FROM {v_aln}"
-        df_target = self.db.query(sql)
-
-        raw_count = len(df_target)
-        self.logger.info(f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {raw_count} 颗")
-
-        return df_target
-
-    def _data_standardize_all(self, ref_tables, ctx_cluster):
-        """[批量调度] 执行参考星表的层级标准化过程（STD -> STX -> ALN）。
-
-        Args:
-            ref_tables (list[str]): 待处理的参考表键名列表。
-            ctx_cluster (dict): 当前星团上下文。
-        """
-        total = len(ref_tables)
-        for i, k in enumerate(ref_tables, 1):
-            self.logger.info(f"📋 [Process] [{i}/{total}] 正在标准化参考星表: {k}")
-            self._data_standardize(
-                idx_data=k,
-                cfg_data=MANIFEST[k],
-                manifest=self.manifest,
-                ctx=ctx_cluster,
-            )
-
-    def _post_pgmm(self, t_main_results):
-        """算法后处理流水线：生成成员子集视图并计算统计摘要。
-
-        Args:
-            t_main_results (str): 算法结果总表名称。
-        """
-        self.logger.info(
-            f"📊 [Process] [{self.target_cluster}] 启动后处理: 正在同步主表标签状态..."
+        df_ext = self._transform_and_bridge_features(
+            df_seeds, ctx.feature_space, ctx.required_features
         )
+        return self._defensive_nan_purge(df_ext, ctx.required_features, label="Seeds")
+
+    def _transform_and_bridge_features(
+        self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str]
+    ) -> pd.DataFrame:
+        """特征转换网关。"""
+        if df_raw is None:
+            self.logger.error("❌ [Compute] 输入的原始 DataFrame 为 None！")
+            return None
+
+        cl = self.cl
+        cluster_rv = cl.get_param("RV_REF", None)
+        c_ra = cl.get_param("CENTER_RA", None)
+        c_dec = cl.get_param("CENTER_DEC", None)
+        cluster_center = (
+            (c_ra, c_dec) if (c_ra is not None and c_dec is not None) else None
+        )
+
+        transformer = AstroTransformer(
+            cluster_rv=cluster_rv, cluster_center_icrs=cluster_center
+        )
+        X_array = transformer.fit_transform(df_raw, feature_space=feature_space)
+
+        if X_array.shape[1] != len(required_features):
+            raise KeyError(f"Transformer 转换矩阵列数与配置不匹配！")
+
+        cols_upper = [col.upper() for col in required_features]
+        cols_lower = [col.lower() for col in required_features]
+
+        df_features = pd.DataFrame(X_array, columns=required_features, index=df_raw.index)
+
+        dup_cols = [col for col in df_raw.columns if col in (cols_upper + cols_lower)]
+        if dup_cols:
+            self.logger.info(f"🔄 [Compute] 模式 [{feature_space}] 移除重复列: {dup_cols}")
+            df_raw = df_raw.drop(columns=dup_cols)
+        return pd.concat([df_raw, df_features], axis=1)
+
+    def _defensive_nan_purge(
+        self, df_extended: pd.DataFrame, required_features: list[str], label: str
+    ) -> pd.DataFrame:
+        """特征清洗。"""
+        if df_extended is None:
+            self.logger.error(f"❌ [Compute] [{label}] 数据为空！")
+            return pd.DataFrame()
+
+        initial_count = len(df_extended)
+        df_clean = df_extended.dropna(subset=required_features).copy()
+        dropped = initial_count - len(df_clean)
+
+        if dropped > 0:
+            self.logger.warning(
+                f"⚠️ [Compute] [防御性过滤 - {label}]: 剔除 {dropped} 颗, "
+                f"剩余 {len(df_clean)}。"
+            )
+        else:
+            self.logger.info(f"✅ [Compute] [数据预检 - {label}] 共计 {len(df_clean)} 颗。")
+        return df_clean
+
+    # ── GMM 成员识别 ──
+
+    @astro_checkpoint(
+        cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
+        force_refresh=True,
+    )
+    def _compute_members(self, ctx: RunContext) -> str | None:
+        """统一的成员识别调度器。"""
+        self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.required_features}")
+
+        df_target_final = self._load_and_transform_field(ctx)
+
+        # 🚀 必须先建表，再加载种子（_load_and_transform_seeds 内部会调用 tag_master_table 回灌标签）
+        self.db.init_master_table(ctx.master_table, df_target_final)
+        df_seeds_final = self._load_and_transform_seeds(ctx)
+
+        use_experimental = ctx.gmm_config.get("use_experimental", False)
+        if not use_experimental:
+            df_res = self._run_stable_pipeline(ctx, df_target_final, df_seeds_final)
+        else:
+            df_res = self._run_experimental_pipeline(ctx, df_target_final, df_seeds_final)
+
+        if df_res is None or df_res.empty:
+            raise ValueError("❌ [Compute] 算法内核异常：结果 DataFrame 为空！")
+
+        self.logger.info(f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。")
+        self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
+
+        updates = df_res[[cfg.STD_COLS["ID"], "prob"]].copy()
+        self.db.tag_master_table(ctx.master_table, updates)
+
+        return ctx.master_table
+
+    def _run_stable_pipeline(
+        self, ctx: RunContext, df_target_final: pd.DataFrame, df_seeds_final: pd.DataFrame
+    ) -> pd.DataFrame:
+        """稳定生产轨：使用传统 PriorGMM。"""
+        self.logger.warning("🔒 [Compute] 稳定生产模式：执行 PriorGMM 老轨行为")
+
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+        cluster_cfg["id"] = ctx.cluster_id
+
+        engine = PriorGMM(params=self, ctx_cluster=cluster_cfg)
+        engine.fit(df_target_final, df_seeds_final, ctx.required_features)
+        return engine.predict(df_target_final, ctx.required_features)
+
+    def _run_experimental_pipeline(
+        self, ctx: RunContext, df_target_final: pd.DataFrame, df_seeds_final: pd.DataFrame
+    ) -> pd.DataFrame:
+        """实验新轨：ClusterSeedExtractor + 多态策略工厂。"""
+        strategy_name = ctx.algo_params.get("strategy", "bayesian")
+        self.logger.info(f"🚀 [Compute] 实验性多态管线。策略: [{strategy_name.upper()}]")
+
+        self.logger.info("🧬 [Compute] 正在调度 ClusterSeedExtractor...")
+        from modules.seed_extractor import ClusterSeedExtractor
+
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+        cluster_cfg["id"] = ctx.cluster_id
+        extractor = ClusterSeedExtractor(cluster_profile=cluster_cfg)
+        df_seeds_refined = extractor.extract_seeds(
+            field_stars_df=df_seeds_final,
+            features=ctx.required_features,
+        )
+
+        if df_seeds_refined is None or df_seeds_refined.empty:
+            raise ValueError("❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！")
+        self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_refined)} 颗。")
+
+        strategy_params = (
+            cfg.CLUSTERS[ctx.cluster_id]
+            .get("STRATEGY_PARAMS", {})
+            .get(strategy_name, {})
+        )
+        strategy_kwargs = {**strategy_params}
+        strategy_kwargs.setdefault("spatial_cols", ["ra", "dec"])
+        strategy_kwargs.setdefault("scale_col", "plx")
+
+        for key in ("eps", "min_samples", "sigma_cutoff"):
+            if key in ctx.algo_params:
+                strategy_kwargs[key] = ctx.algo_params[key]
+
+        from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
+        from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
+        from modules.astro_membership.disambiguation.blind import BlindGmmDisambiguation
+
+        STRATEGY_CLASSES = {
+            "bayesian": BayesianGmmDisambiguation,
+            "threshold": ThresholdGmmDisambiguation,
+            "blind": BlindGmmDisambiguation,
+        }
+
+        if strategy_name not in STRATEGY_CLASSES:
+            raise ValueError(f"未知的策略类型 [{strategy_name}]")
+
+        engine_class = STRATEGY_CLASSES[strategy_name]
+        self.logger.info(f"✅ [Compute] 已路由至策略类 [{engine_class.__name__}]")
+        engine = engine_class(**strategy_kwargs)
+        return engine.fit_predict(df_target_final, df_seeds_refined, ctx.required_features)
+
+    # ── 后处理 ──
+
+    def _post_process(self, ctx: RunContext, t_main_results: str) -> dict:
+        """算法后处理流水线。"""
+        self.logger.info(f"📊 [Process] [{ctx.cluster_id}] 启动后处理...")
         try:
-            # 1. 动态增加成员分类标签列 (如果不存在)
             self.db.execute(
-                f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
+                f"ALTER TABLE {ctx.master_table} "
+                f"ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
             )
             self.db.execute(
-                f"ALTER TABLE {self.t_master} ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
-            )
-
-            # 2. 直接在 Master 表中执行状态标记
-            condi_golden = f"{STD_COLS['PROB']} >= {GOLDEN_SAMPLE_THRESHOLD}"
-            condi_candidates = f"{STD_COLS['PROB']} > {MEMBER_SAMPLE_THRESHOLD}"
-
-            self.db.execute(
-                f"UPDATE {self.t_master} SET is_golden = TRUE WHERE {condi_golden}"
-            )
-            self.db.execute(
-                f"UPDATE {self.t_master} SET is_candidate = TRUE WHERE {condi_candidates}"
+                f"ALTER TABLE {ctx.master_table} "
+                f"ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
             )
 
-            # 3. 统计摘要
+            condi_golden = f"{cfg.STD_COLS['PROB']} >= {cfg.GOLDEN_SAMPLE_THRESHOLD}"
+            condi_candidates = f"{cfg.STD_COLS['PROB']} > {cfg.MEMBER_SAMPLE_THRESHOLD}"
+
+            self.db.execute(
+                f"UPDATE {ctx.master_table} SET is_golden = TRUE WHERE {condi_golden}"
+            )
+            self.db.execute(
+                f"UPDATE {ctx.master_table} SET is_candidate = TRUE WHERE {condi_candidates}"
+            )
+
             stats_sql = f"""
                 SELECT 
                     count(*) FILTER (WHERE is_golden = TRUE) AS n_golden,
@@ -220,23 +669,23 @@ class AstroWorkflow:
                     count(*) FILTER (WHERE seed_type = 'raw_seed') AS n_seeds,
                     count(*) FILTER (WHERE density_status = 'core') AS n_seed_core,
                     count(*) FILTER (WHERE density_status = 'noise') AS n_seed_noise
-                FROM {self.t_master}
+                FROM {ctx.master_table}
             """
             stats = self.db.execute(stats_sql).fetchone()
             n_golden, n_candidates, n_seeds, n_seed_core, n_seed_noise = stats
 
             self.logger.info("=" * 60)
-            self.logger.info(f"📊 [Process] [{self.target_cluster}] Master 表后处理标签同步完成:")
+            self.logger.info(f"📊 [Process] [{ctx.cluster_id}] 后处理标签同步完成:")
             self.logger.info(f"  🔹 高置信金种子星 (is_golden): {n_golden} 颗")
             self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {n_candidates} 颗")
             self.logger.info(f"  🔹 原始输入种子星 (Seeds): {n_seeds} 颗")
             self.logger.info(f"  🔹 种子集核心样本 (Core): {n_seed_core} 颗")
             self.logger.info("=" * 60)
 
-            # 为后续步骤提供一个逻辑上的“候选者”入口视图
-            v_candidates = f"v_candidates_{self.target_cluster.lower()}"
+            v_candidates = f"v_candidates_{ctx.cluster_id.lower()}"
             self.db.register_view_from_sql(
-                v_candidates, f"SELECT * FROM {self.t_master} WHERE is_candidate = TRUE"
+                v_candidates,
+                f"SELECT * FROM {ctx.master_table} WHERE is_candidate = TRUE",
             )
 
             return {
@@ -251,73 +700,86 @@ class AstroWorkflow:
                 },
             }
         except Exception as e:
-            self.logger.info(f"❌ [Process] Error in post_pipeline: {str(e)}")
+            self.logger.error(f"❌ [Process] 后处理失败: {str(e)}")
             return {"status": "error", "message": str(e)}
 
-    def _prepare_audit_data(self, v_source, v_target):
-        """预处理审计数据：执行算法候选者与审计目标之间的交叉匹配。
+    # ── 审计 ──
 
-        Args:
-            v_source (str): 算法候选者视图名称。
-            v_target (str): 审计目标（文献星表）视图名称。
+    def _audit_phase(self, ctx: RunContext, post_result: dict) -> dict:
+        """审计阶段：交叉比对 + 深度审计。"""
+        target_aln_view = self.manifest[ctx.category]["aln_view"].format(
+            cluster=ctx.cluster_id.lower()
+        )
+        audit_res = self._cross_match_with_literature(
+            ctx, post_result["v_candidates"], target_aln_view
+        )
 
-        Returns:
-            dict: 包含审计子视图集 (audit_views) 及统计结果 (stats) 的字典。
-        """
+        if audit_res.get("status") != "success":
+            self.logger.warning(f"⚠️ [Audit] 交叉比对未完全成功: {audit_res.get('message')}")
+            return audit_res
+
+        self.logger.info("✅ [Audit] 交叉审计比对完成。")
+        deep_stats_pg, deep_stats_ref = self._execute_deep_audits(audit_res)
+        audit_res["deep_stats_pg"] = deep_stats_pg
+        audit_res["deep_stats_ref"] = deep_stats_ref
+        return audit_res
+
+    def _cross_match_with_literature(
+        self, ctx: RunContext, v_source: str, v_target: str
+    ) -> dict:
+        """交叉比对（保留原有逻辑）。"""
         if not self._verify_audit_target_exists(v_target):
-            self.logger.warning(f"⚠️ [Audit] 审计目标表 '{v_target}' 不存在，跳过交叉审计。")
-            return {
-                "status": "warning",
-                "message": f"审计目标表 '{v_target}' 不存在，无法执行交叉审计。",
-            }
+            self.logger.warning(f"⚠️ [Audit] 审计目标表 '{v_target}' 不存在。")
+            return {"status": "warning", "message": f"审计目标表 '{v_target}' 不存在"}
 
-        self.logger.info(f"⚡ [Audit] 发现审计目标表 '{v_target}'，开始交叉比对...")
+        self.logger.info(f"⚡ [Audit] 开始交叉比对: {v_target}")
 
-        # 🚀 [混合模式重构] 直接在 Master 表更新 x_match_tag
         col_x = cfg.MASTER_COLS["X_MATCH"]
         sql_cross = f"""
             SELECT 
                 COALESCE(m.id, h.id) as id,
                 CASE 
-                    WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} AND h.id IS NOT NULL THEN 'Matched'
-                    WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} AND h.id IS NULL     THEN 'PG Only'
-                    WHEN (m.id IS NULL OR m.prob <= {cfg.MEMBER_SAMPLE_THRESHOLD} OR m.prob IS NULL) 
-                        AND h.id IS NOT NULL THEN 'Ref Only'
+                    WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD}
+                         AND h.id IS NOT NULL THEN 'Matched'
+                    WHEN m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD}
+                         AND h.id IS NULL     THEN 'PG Only'
+                    WHEN (m.id IS NULL OR m.prob <= {cfg.MEMBER_SAMPLE_THRESHOLD}
+                         OR m.prob IS NULL)
+                         AND h.id IS NOT NULL THEN 'Ref Only'
                 END as {col_x}
-            FROM {self.t_master} m
+            FROM {ctx.master_table} m
             FULL OUTER JOIN {v_target} h ON m.id = h.id
             WHERE m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} OR h.id IS NOT NULL
         """
         df_x = self.db.query(sql_cross)
-        self.db.tag_master_table(self.t_master, df_x)
+        self.db.tag_master_table(ctx.master_table, df_x)
 
-        self.logger.info(f"✅ [Audit] 直接在 Master 表更新 x_match_tag 完成.")
-        self.logger.info(
-            f"🚀 [Audit] - Master 表记录总数: {self.db.get_row_count(self.t_master)}"
-        )
-        self.logger.info(f"🚀 [Audit] - Master 表更新记录总数: {df_x.shape[0]}")
+        self.logger.info(f"✅ [Audit] Master 表 x_match_tag 更新完成。")
 
-        # 为深度审计准备输入视图（PG Only 和 Ref Only）
-        v_audit_pg_only = f"v_tmp_audit_pg_only"
-        v_audit_ref_only = f"v_tmp_audit_ref_only"
+        v_audit_pg_only = "v_tmp_audit_pg_only"
+        v_audit_ref_only = "v_tmp_audit_ref_only"
         self.db.register_view_from_sql(
-            v_audit_pg_only, f"SELECT * FROM {self.t_master} WHERE {col_x} = 'PG Only'"
+            v_audit_pg_only,
+            f"SELECT * FROM {ctx.master_table} WHERE {col_x} = 'PG Only'",
         )
         self.db.register_view_from_sql(
             v_audit_ref_only,
-            f"SELECT * FROM {self.t_master} WHERE {col_x} = 'Ref Only'",
+            f"SELECT * FROM {ctx.master_table} WHERE {col_x} = 'Ref Only'",
         )
 
-        # 统计并日志
-        st_sql = f"SELECT {col_x}, count(*) FROM {self.t_master} WHERE {col_x} IS NOT NULL GROUP BY {col_x}"
+        st_sql = (
+            f"SELECT {col_x}, count(*) FROM {ctx.master_table} "
+            f"WHERE {col_x} IS NOT NULL GROUP BY {col_x}"
+        )
         stats_raw = self.db.execute(st_sql).fetchall()
         stats_cross = {row[0]: row[1] for row in stats_raw}
-        self.logger.info(f"=" * 60)
-        self.logger.info(f"📊 [Audit] [交叉比对结果统计]")
+
+        self.logger.info("=" * 60)
+        self.logger.info("📊 [Audit] [交叉比对结果统计]")
         self.logger.info(f"    Matched: {stats_cross.get('Matched', 0)}")
         self.logger.info(f"    PG Only: {stats_cross.get('PG Only', 0)}")
         self.logger.info(f"    Ref Only: {stats_cross.get('Ref Only', 0)}")
-        self.logger.info(f"=" * 60)
+        self.logger.info("=" * 60)
 
         return {
             "status": "success",
@@ -327,59 +789,69 @@ class AstroWorkflow:
         }
 
     def _verify_audit_target_exists(self, v_target: str) -> bool:
-        """检查审计目标表在数据库中是否存在。
-
-        Args:
-            v_target (str): 目标表名。
-
-        Returns:
-            bool: 存在则返回 True。
-        """
+        """检查审计目标表是否存在。"""
         if not self.db:
             return False
         sql = f"SELECT 1 FROM information_schema.tables WHERE table_name = '{v_target}'"
         return self.db.con.execute(sql).fetchone() is not None
 
-    def run_audit(self, target, audit_type="default"):
-        """驱动完整审计管线：涵盖数据补全、文献预热、物理校验与结果导出。
+    def _execute_deep_audits(self, audit_res: dict) -> tuple:
+        """对 PG Only / Ref Only 执行深度审计。"""
+        v_audit_pg = audit_res.get("v_audit_pg_only")
+        v_audit_ref = audit_res.get("v_audit_ref_only")
+        x_stats = audit_res.get("stats", {})
 
-        流程包含：数据预处理(补全特征)、文献缓存预热(SIMBAD批量查询)、深度物理核实以及结果落库。
+        deep_stats_pg = {}
+        if v_audit_pg and x_stats.get("PG Only", 0) > 0:
+            _, deep_stats_pg = self._run_deep_audit(v_audit_pg, "pg_only")
+        else:
+            self.logger.warning("⚠️ [Audit] 无 PG Only 候选，跳过深度审计。")
 
-        Args:
-            target (str): 待审计的目标视图名称（通常是算法发现的新源）。
-            audit_type (str): 审计类型标识 (例如 'pg_only' 或 'ref_only')，用于隔离输出视图。
+        deep_stats_ref = {}
+        if v_audit_ref and x_stats.get("Ref Only", 0) > 0:
+            _, deep_stats_ref = self._run_deep_audit(v_audit_ref, "ref_only")
+        else:
+            self.logger.warning("⚠️ [Audit] 无 Ref Only 候选，跳过深度审计。")
 
-        Returns:
-            str: 审计报告表名称。
-        """
+        return deep_stats_pg, deep_stats_ref
+
+    def _run_deep_audit(self, v_audit_view: str, audit_type: str) -> tuple:
+        """对单个候选视图执行深度审计。"""
+        v_result = self._run_audit_pipeline(target=v_audit_view, audit_type=audit_type)
+        if not v_result:
+            return None, {}
+
+        sql = (
+            f"SELECT audit_status, count(*) FROM {v_result} "
+            f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
+        )
+        stats = dict(self.db.con.execute(sql).fetchall())
+        return v_result, stats
+
+    def _run_audit_pipeline(self, target: str, audit_type: str = "default") -> str | None:
+        """驱动完整审计管线（原 run_audit 重命名）。"""
         self.logger.info(f"🔍 🎬 [Audit] 开始对 {target} 进行身份审计...")
 
         try:
             v_audit_input = self._pre_audit(target)
             if not v_audit_input:
-                self.logger.error("❌ [Audit] 审计预处理失败，管线熔断。")
+                self.logger.error("❌ [Audit] 审计预处理失败")
                 return None
 
-            # validator = UnifiedMemberValidator(
-            #     cluster_id=self.target_cluster, db_instance=self.db, mode=self.feature_space
-            # )
             validator = UnifiedMemberValidator(
-                cluster=self.cl, db_instance=self.db, feature_space=self.feature_space
+                cluster=self.cl,
+                db_instance=self.db,
+                feature_space=self.feature_space,
             )
 
             self._warm_up_literature_cache(validator, v_audit_input)
 
             audit_report_df = validator.run(v_audit_input)
 
-            # 🚀 审计结果回灌 Master 表
-            self.logger.info(f"📥 [Audit] 正在将深度审计结果同步至 Master 表...")
+            self.logger.info("📥 [Audit] 正在将深度审计结果同步至 Master 表...")
             self.db.tag_master_table(self.t_master, audit_report_df)
 
-            # 🚀 [混合模式] 审计完成后，返回 Master 表的一个逻辑视图作为“审计报告”
-            # 这样既不需要创建新物理表，又能保证返回的内容仅包含审计过的星源
             v_report = f"{self.t_master}_{audit_type}_audited_report"
-            # 这里的 WHERE 条件不仅判断 audit_status 不为空，还要限定对应交叉匹配类型的星源
-            # 从而保证 PG Only 的报告里只有 PG Only，Ref Only 的报告里只有 Ref Only
             col_x = cfg.MASTER_COLS["X_MATCH"]
             x_match_val = (
                 "PG Only"
@@ -388,61 +860,54 @@ class AstroWorkflow:
             )
 
             if x_match_val:
-                sql_filter = f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL AND {col_x} = '{x_match_val}'"
-            else:
                 sql_filter = (
-                    f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL"
+                    f"SELECT * FROM {self.t_master} "
+                    f"WHERE audit_status IS NOT NULL AND {col_x} = '{x_match_val}'"
                 )
+            else:
+                sql_filter = f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL"
 
             self.db.register_view_from_sql(v_report, sql_filter)
             return v_report
 
         except Exception as e:
-            self.logger.error(
-                f"❌ [Audit] 审计流程运行期间发生严重故障: {str(e)}", exc_info=True
-            )
+            self.logger.error(f"❌ [Audit] 审计流程故障: {str(e)}", exc_info=True)
             raise e
 
-    def _warm_up_literature_cache(self, validator: UnifiedMemberValidator, v_source):
-        """[私有方法] 提取视图中所有天体 ID 并触发文献缓存预热。
+    def _pre_audit(self, v_target: str) -> str | None:
+        """审计前准备：补全物理参数。"""
+        self.logger.info("🔧 [Audit] 正在准备审计数据视图...")
+        try:
+            field_idx = cfg.CLUSTERS[self.target_cluster]["FIELD_IDX"]
+            t_base = cfg.MANIFEST[field_idx]["stx_view"]
+            v_result = self.db.register_audit_input_view(v_target, t_base)
+            self.logger.info(f"✅ [Audit] 审计数据准备完成，输入视图: {v_result}")
+            return v_result
+        except Exception as e:
+            self.logger.error(f"❌ [Audit] 审计数据准备失败: {str(e)}")
+            return None
 
-        利用 DuckDB 的 ANTI JOIN 在数据库侧直接计算差集，仅提取本地缺失的 ID，
-        显著提升百万级数据下的预热效率。
-
-        Args:
-            validator (UnifiedMemberValidator): 验证器实例。
-            v_source (str): 包含待验证 ID 的视图名。
-        """
+    def _warm_up_literature_cache(self, validator: UnifiedMemberValidator, v_source: str):
+        """SIMBAD 文献缓存预热（保留原有逻辑）。"""
         cache_table = validator.cache_table
 
-        # 确保缓存表已经存在（若完全不存在则直接跳过，后续的 CREATE TABLE 会处理）
         res = self.db.con.execute(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = ?)",
             [cache_table.lower()],
         ).fetchone()
 
         if res and res[0]:
-            # 2. 检测并动态追加 parent 列
             col_info = self.db.con.execute(f"PRAGMA table_info({cache_table})").df()
             if "parent" not in col_info["name"].values:
                 self.logger.warning(
-                    f"⚠️ [Audit] 发现本地缓存表 `{cache_table}` 缺失 `parent` 字段，正在提前触发动态追加..."
+                    f"⚠️ [Audit] 缓存表 `{cache_table}` 缺失 `parent` 字段，正在动态追加..."
                 )
                 try:
-                    self.db.con.execute(
-                        f"ALTER TABLE {cache_table} ADD COLUMN parent VARCHAR;"
-                    )
-                    self.logger.info(
-                        f"✅ [Audit] 已成功为表 `{cache_table}` 补齐 `parent` 数据通道。"
-                    )
+                    self.db.con.execute(f"ALTER TABLE {cache_table} ADD COLUMN parent VARCHAR;")
+                    self.logger.info(f"✅ [Audit] 已为表 `{cache_table}` 补齐 `parent` 字段。")
                 except Exception as ddl_err:
                     self.logger.error(f"❌ [Audit] 动态追加 parent 列失败: {str(ddl_err)}")
 
-        # 找出在 v_source 中存在但 cache_table 中没有的 ID
-        # 🛠️ 【核心修改】将原本的 ANTI JOIN 转换为 LEFT JOIN + WHERE 条件
-        # 判定刷新条件：1. 本地缓存表压根没有这个 ID (c.gaia_dr3_id IS NULL)
-        #              2. 本地虽有这个 ID，但 parent 字段未被拉取或为占位符 (c.parent IS NULL OR c.parent = 'None')
-        # 找出本地缺失、或者 parent 字段为空白的记录
         sql_missing = f"""
             SELECT DISTINCT CAST(v.id AS VARCHAR) as id
             FROM {v_source} v
@@ -458,610 +923,87 @@ class AstroWorkflow:
         ids_to_sync = df_missing["id"].tolist()
 
         if not ids_to_sync:
-            self.logger.info("✅ [Audit] 缓存对齐完成：所有源均已在本地缓存中，跳过网络同步。")
+            self.logger.info("✅ [Audit] 缓存对齐完成：所有源均在本地缓存中。")
             return
 
-        self.logger.info(
-            f"🌐 [Network] 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热同步..."
-        )
+        self.logger.info(f"🌐 [Network] 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热同步...")
         validator.sync_simbad_cache(ids_to_sync)
 
-    def _pre_audit(self, v_target):
-        """审计前准备：补全物理参数。
-
-        Args:
-            v_target (str): 算法结果视图。
-
-        Returns:
-            str: 审计输入视图名。
-        """
-        self.logger.info(f"🔧 [Audit] 正在准备审计数据视图...")
-
-        try:
-            # 调用 DB 层提供的标准化审计输入视图构建接口
-            field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
-            t_base = MANIFEST[field_idx]["stx_view"]
-            v_result = self.db.register_audit_input_view(v_target, t_base)
-            self.logger.info(f"✅ [Audit] 审计数据准备完成，输入视图: {v_result}")
-            return v_result
-        except Exception as e:
-            self.logger.error(f"❌ [Audit] 审计数据准备失败: {str(e)}")
-            return None
-
-    def _parse_pipeline_config(self) -> tuple[dict, list[str]]:
-        """[私有方法] 原子拆解：解析 GMM 配置项与特征空间。
-
-        Returns:
-            tuple: (配置字典, 运行模式字符串, 特征列名列表)。
-        """
-        # 采用局部副本，防止污染全局配置
-        gmm_cfg = GMM_CONFIG.copy()
-        current_mode = self.feature_space
-        gmm_cfg["dim_mode"] = current_mode
-
-        feature_map = gmm_cfg.get("feature_map", {})
-        self.logger.debug(f"当前 GMM_CONFIG 中的 feature_map 配置:\n {feature_map}")
-
-        if current_mode not in feature_map:
-            raise ValueError(
-                f"未知的运行模式: {current_mode}，请核实 feature_map 配置。"
-            )
-
-        required_features = feature_map[current_mode]
-        self.logger.info(
-            f"🌌 [Config] 当前运行模式: [{current_mode}], 所需特征空间: {required_features}"
-        )
-        return gmm_cfg, required_features
-
-    def _transform_and_bridge_features(
-        self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str]
-    ) -> pd.DataFrame:
-        """[私有方法] 特征转换网关：将原始坐标转换为目标物理维度特征。
-
-        Args:
-            df_raw: 原始 DataFrame。
-            feature_space: 运行模式 (e.g., '3d', '6d_p')。
-            required_features: 所需特征列名列表。
-
-        Returns:
-            pd.DataFrame: 扩展后的 DataFrame。
-        """
-        if df_raw is None:
-            self.logger.error(
-                "❌ [Compute] 输入的原始 DataFrame 为 None，无法进行特征转换！"
-            )
-            return None
-
-        # cluster_rv = ctx_cluster.get("RV_REF", None)
-        # c_ra = ctx_cluster.get("CENTER_RA", None)
-        # c_dec = ctx_cluster.get("CENTER_DEC", None)
-        cluster_rv = self.cl.get_param("RV_REF", None)
-        c_ra = self.cl.get_param("CENTER_RA", None)
-        c_dec = self.cl.get_param("CENTER_DEC", None)
-        cluster_center = (
-            (c_ra, c_dec) if (c_ra is not None and c_dec is not None) else None
-        )
-
-        transformer = AstroTransformer(
-            cluster_rv=cluster_rv, cluster_center_icrs=cluster_center
-        )
-        # TODO: transformer.ingest_external_rv_data(df_raw)
-        X_array = transformer.fit_transform(df_raw, feature_space=feature_space)
-
-        if X_array.shape[1] != len(required_features):
-            raise KeyError(f"Transformer 转换矩阵列数与配置不匹配！")
-
-        cols_upper = [col.upper() for col in required_features]
-        cols_lower = [col.lower() for col in required_features]
-
-        # 提取转换后的特征矩阵 (在此之前不得删除原始列)
-        df_features = pd.DataFrame(
-            X_array, columns=required_features, index=df_raw.index
-        )
-
-        existing_dup_cols = [
-            col for col in df_raw.columns if col in (cols_upper + cols_lower)
-        ]
-        if existing_dup_cols:
-            self.logger.info(
-                f"🔄 [Compute] 模式 [{feature_space}] 触发列名防重机制，从原始表中移除了已存在的列: {existing_dup_cols}"
-            )
-            df_raw = df_raw.drop(columns=existing_dup_cols)
-        df_extended = pd.concat([df_raw, df_features], axis=1)
-        return df_extended
-
-    def _defensive_nan_purge(
-        self, df_extended: pd.DataFrame, required_features: list[str], label: str
-    ) -> pd.DataFrame:
-        """[私有方法] 原子拆解：特征清洗，剔除指定特征列中含 NaN 的记录。
-
-        Args:
-            df_extended: 特征转换后的 DataFrame。
-            required_features: 必须具备的特征列。
-            label: 用于日志记录的标签名。
-
-        Returns:
-            pd.DataFrame: 清洗后的纯净数据。
-        """
-        if df_extended is None:
-            self.logger.error(f"❌ [Compute] [{label}] 数据为空，无法进行无效值过滤。")
-            return pd.DataFrame()
-
-        initial_count = len(df_extended)
-
-        df_clean = df_extended.dropna(subset=required_features).copy()
-        dropped = initial_count - len(df_clean)
-
-        if dropped > 0:
-            self.logger.warning(
-                f"⚠️ [Compute] [防御性过滤 - {label}]: 剔除了 {dropped} 颗特征不完整(含NaN)的天体，"
-                f"剩余有效样本: {len(df_clean)}。"
-            )
-        else:
-            self.logger.info(
-                f"✅ [Compute] [数据预检 - {label}] 样本特征完备，共计 {len(df_clean)} 颗星。"
-            )
-        return df_clean
-
-    @astro_checkpoint(
-        cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
-        force_refresh=False,
-    )
-    def _run_pgmm(self, ctx_cluster=None):
-        """驱动核心精筛计算流水线：支持实验双轨制安全开关。
-
-
-        运行高斯混合模型（GMM）成员星判定管线。
-        
-        支持双轨控制：
-          - 稳定旧轨 (use_experimental=False): 维持老 PriorGMM 行为，依赖外部种子表。
-          - 实验新轨 (use_experimental=True): 启用 ClusterSeedExtractor 自适应无监督粗筛种子，
-            并无缝路由至多态精筛策略工厂（Bayesian / Threshold / Blind）。
-        Args:
-            ctx_cluster (dict): 星团上下文环境，包含星团专有的 Profile 参数。
-
-        Returns:
-            str: 算法结果在数据库中的固化总表名 (self.t_master)。
-        """
-        # 1. 确定运行模式与特征空间需求
-        # required_features = self._get_required_features()
-        _, required_features = self._parse_pipeline_config()
-        self.logger.info(f"📊 [Compute] 当前管线请求的特征空间: {required_features}")
-
-        # 2. 获取并提取全量靶场数据 (Target Field)
-        field_idx = CLUSTERS[self.target_cluster]["FIELD_IDX"]
-        df_target_raw = self._get_target(
-            idx_data=field_idx,
-            cfg_src=MANIFEST[field_idx],
-            manifest=self.manifest,
-            # ctx=ctx_cluster,
-        )
-
-        # 3. 初始化 Master 状态大表
-        self.db.init_master_table(self.t_master, df_target_raw)
-
-        # 获取实验性功能全局开关标志
-        use_experimental = GMM_CONFIG.get("use_experimental", False)
-
-        if not use_experimental:
-            # =========================================================================
-            # 🔒 【稳定旧轨】：100% 还原传统生产管线行为
-            # =========================================================================
-            self.logger.warning("🔒 [Compute] [双轨分流] 当前处于稳定生产模式：统一执行 PriorGMM 老轨行为")
-
-            # A. 通过传统黑盒方法获取外部物理种子表数据
-            # seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
-            seed_idx = self.cl.get_param("SEED_IDX")
-            df_seeds_raw = self._get_seeds(
-                idx_data=seed_idx,
-                src=MANIFEST[seed_idx],
-                manifest=self.manifest,
-                # ctx=ctx_cluster,
-                required_features=required_features,
-            )
-
-            # B. 统一进行高维特征转换（新老共用原 workflow 的私有桥接方法）
-            current_fs = self.feature_space
-            df_target_ext = self._transform_and_bridge_features(
-                df_target_raw, current_fs, required_features
-            )
-            df_seeds_ext = self._transform_and_bridge_features(
-                df_seeds_raw, current_fs, required_features
-            )
-
-            # C. 统一执行 NaN 缺损防御性清洗
-            df_target_final = self._defensive_nan_purge(
-                df_target_ext, required_features, label="Target_field"
-            )
-            df_seeds_purge = self._defensive_nan_purge(
-                df_seeds_ext, required_features, label="Seeds"
-            )
-
-            # D. 驱动原始老内核进行拟合与推演
-            engine = PriorGMM(params=self, ctx_cluster=ctx_cluster)
-            engine.fit(df_target_final, df_seeds_purge, required_features)
-            df_res = engine.predict(df_target_final, required_features)
-
-        else:
-            # =========================================================================
-            # 🚀 【实验新轨】：并线自适应无监督粗筛 Extractor + 多态策略工厂
-            # =========================================================================
-            # strategy_name = ctx_cluster.get(
-            #     "STRATEGY", GMM_CONFIG.get("default_strategy", "bayesian")
-            # ).lower()
-            strategy_name = self.cl.get_param(
-                "STRATEGY", default=GMM_CONFIG.get("default_strategy", "bayesian")
-            ).lower()
-            self.logger.info(f"🚀 [Compute] [双轨分流] 已激活实验性多态管线。当前策略: [{strategy_name.upper()}]")
-
-            # A. 靶场全量天区进行高维特征变换（如 ICRS 转换为 3D/5D/6D 等物理模式）
-            current_fs = self.feature_space
-            self.logger.info(f"⚡ [Compute] 正在转换特征空间为 [{current_fs.upper()}]...")
-            df_target_ext = self._transform_and_bridge_features(
-                df_target_raw, current_fs, required_features
-            )
-
-            # B. 靶场全量天区执行 NaN 防御清洗，构建干净的多维矩阵底座
-            df_target_final = self._defensive_nan_purge(
-                df_target_ext, required_features, label="Target_field"
-            )
-
-            # C. 🔌 正式唤醒重构的 ClusterSeedExtractor。自适应感知天区背景噪声并自动生成高纯度种子星
-            self.logger.info("🧬 [Compute] 正在调度 ClusterSeedExtractor 运行自适应粗筛提取种子星...")
-            from modules.seed_extractor import ClusterSeedExtractor
-
-            seed_idx = CLUSTERS[self.target_cluster]["SEED_IDX"]
-            df_seeds_raw = self._get_seeds(
-                idx_data=seed_idx,
-                src=MANIFEST[seed_idx],
-                manifest=self.manifest,
-                # ctx=ctx_cluster,
-                required_features=required_features,
-            )
-
-            df_seeds_ext = self._transform_and_bridge_features(
-                df_seeds_raw, current_fs, required_features
-            )
-
-            df_seeds_purge = self._defensive_nan_purge(
-                df_seeds_ext, required_features, label="Seeds"
-            )
-
-            # 严格按照构造函数契约传入当前星团的 Profile 配置字典
-            extractor = ClusterSeedExtractor(cluster_profile=ctx_cluster)
-            df_seeds_final = extractor.extract_seeds(
-                # field_stars_df=df_target_final,
-                field_stars_df=df_seeds_purge,
-                features=required_features
-            )
-
-            # 拦截提取异常，防止下游硬崩溃
-            if df_seeds_final is None or df_seeds_final.empty:
-                raise ValueError("❌ [Compute] 种子星粗筛危机：ClusterSeedExtractor 未能凝聚出任何有效种子星！")
-            self.logger.info(f"✅ [Compute] 种子星粗筛成功！共沉淀出 {len(df_seeds_final)} 颗高纯度核心种子星。")
-
-            # D. 路由并动态装配具体的实验精筛解异策略
-            # strategy_params = ctx_cluster.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
-            strategy_params = self.cl.get_param("STRATEGY_PARAMS", {}).get(strategy_name, {})
-            strategy_kwargs = {**strategy_params}
-            strategy_kwargs.setdefault("spatial_cols", ["ra", "dec"])
-            strategy_kwargs.setdefault("scale_col", "plx")
-
-            # 延迟动态导入，避免老模式运行未包含新模块时抛错
-            from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
-            from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
-            from modules.astro_membership.disambiguation.blind import BlindGmmDisambiguation
-
-            STRATEGY_CLASSES = {
-                "bayesian": BayesianGmmDisambiguation,
-                "threshold": ThresholdGmmDisambiguation,
-                "blind": BlindGmmDisambiguation,
-            }
-
-            if strategy_name not in STRATEGY_CLASSES:
-                raise ValueError(f"❌ [Compute] 实验程序错误: 未知的策略类型 [{strategy_name}]")
-            else:
-                self.logger.info(f"✅ [Compute] 已成功路由至策略类 [{STRATEGY_CLASSES[strategy_name].__name__}]")
-
-            # 实例化策略引擎并一键推演
-            engine = STRATEGY_CLASSES[strategy_name](**strategy_kwargs)
-            df_res = engine.fit_predict(df_target_final, df_seeds_final, required_features)
-
-        # =========================================================================
-        # 🤝 【统一安全回灌通道】：严格顺应底层只有 id 与 prob 的真实物理 Facts
-        # =========================================================================
-        if df_res is None or df_res.empty:
-            raise ValueError("❌ [Compute] 算法内核异常：策略返回或缓存读取的 DataFrame 为空！")
-        else:
-            self.logger.info(f"✅ [Compute] 算法内核计算完成，生成结果集共计 {len(df_res)} 颗天体。")
-
-        self.logger.info("📥 [Compute] 正在将精筛洗涤概率结果同步至 Master 表...")
-
-        # 严防硬编码臆造字段带来的 KeyError，新旧版本策略一律通过本通道安全同步
-        updates = df_res[[cfg.STD_COLS["ID"], "prob"]].copy()
-        self.db.tag_master_table(self.t_master, updates)
-
-        return self.t_master
-
-        # =========================================================================
-        # 🛡️ 【第二阶段双轨控制】：安全分流判定
-        # =========================================================================
-
-    def _init_data(self):
-        """一键驱动完整的端到端管线（单模式，对外的唯一核心接口）。"""
-        self.logger.info(f"🔄 [Workflow] 启动闭环工作流: {self.target_cluster} [{self.feature_space}]")
-        self.logger.info(f"⚙️ [Workflow] 配置快照: Reconstruct={self.param_source}, Result={self.result_mode}")
-
-        try:
-            # [1/5] 数据同步
-            self.logger.info("📦 [Workflow] [1/5] 正在同步物理数据源...")
-            self.db.import_raw(target_cluster=self.target_cluster, force=False)
-
-            # [2/5] 数据对齐
-            self.cl = StarCluster(self.target_cluster, db_instance=self.db, param_source=self.param_source)
-
-            ref_tables = [
-                # ctx_cluster["FIELD_IDX"],
-                # ctx_cluster["SEED_IDX"],
-                self.cl.get_param("FIELD_IDX"),
-                self.cl.get_param("SEED_IDX"),
-                self.target_category,
-                cfg.IDX_DR2IDX,
-                cfg.IDX_IDS_SIMBAD,
-            ]
-            self.logger.info(
-                f"📐 [Workflow] [2/5] 正在执行数据对齐 ({self.target_cluster}, 特征空间: {self.feature_space})..."
-            )
-            # TODO: 重构未完成, 暂时从文件读取
-            ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
-            ctx_cluster["id"] = self.target_cluster
-            self._data_standardize_all(ref_tables, ctx_cluster)
-            self.logger.info("✅ [Workflow] 数据准备阶段完成。")
-
-            # [2.5/5] 星团领域实体参数重建
-            self.logger.info(f"🌌 [Workflow] [2.5/5] 载入目标星团领域实体模型: {self.target_cluster}")
-            
-            success = self.cl.load_or_reconstruct_parameters(param_source=self.param_source)#.load_params(param_source=self.param_source)
-            self.logger.info(
-                f"✅ [Workflow] 星团领域模型物理状态就绪。当前反演距离: {1000.0 / self.cl.get_param("PLX_REF"):.1f} pc"
-            )
-            if not success:
-                self.logger.error(
-                    f"❌ [Workflow] 无法初始化星团 {self.target_cluster} 的物理资产，管线终止。"
-                )
-                return None
-
-            # return self._run_compute_pipeline(ctx_cluster)
-        except Exception:
-            self.logger.error("❌ [Workflow] 流水线在运行期间发生严重崩溃", exc_info=True)
-            raise
-
-    def run(self) -> dict | None:
-        """执行 GMM → 后处理 → 交叉审计 → 深度审计 → 导出 → 报告 计算阶段。
-
-        假定数据导入、标准化和星团参数重建已由调用方完成。
-        """
-        try:
-            # 1,2/5 数据准备和星团参数重建
-            self._init_data()
-
-            ctx_cluster = cfg.CLUSTERS[self.target_cluster].copy()
-            ctx_cluster["id"] = self.target_cluster
-            # [3/5] GMM 成员识别
-            self.logger.info(
-                f"🧠 [Workflow] [3/5] 启动 GMM 成员识别内核 (特征空间: {self.feature_space}, 算法: {self.algo})..."
-            )
-            t_result = self._run_pgmm(ctx_cluster)
-            self.logger.info(f"✨ [Workflow] 算法推论完成，结果表: {t_result}")
-
-            # [4/5] 后处理
-            self.logger.info("📊 [Workflow] [4/5] 正在合成分析宽表并提取候选成员视图...")
-            v_all = self._post_pgmm(t_result)
-            if v_all.get("status") != "success":
-                self.logger.error(f"❌ [Workflow] 后处理流程失败: {v_all.get('message')}")
-                return None
-            self.logger.info("✅ [Workflow] 数据处理流程结束，转入交叉审计阶段。")
-
-            # [5/5] 交叉审计
-            self.logger.info(
-                f"⚖️ [Workflow] [5/5] 执行多源文献交叉审计, 参考类别: {self.target_category}"
-            )
-            target_aln_view = self.manifest[self.target_category]["aln_view"].format(
-                cluster=self.target_cluster.lower()
-            )
-            audit_res = self._prepare_audit_data(v_all["v_candidates"], target_aln_view)
-
-            if audit_res.get("status") != "success":
-                self.logger.warning(
-                    f"⚠️ [Workflow] 交叉比对审计未完全成功: {audit_res.get('message')}"
-                )
-                # 即使审计不完整也尝试出报告
-                return render_final_report(
-                    self.target_cluster, self.target_category, self.feature_space, self.algo,
-                    ctx_cluster, v_all, audit_res, {}, {}, self.logger,
-                )
-
-            self.logger.info(
-                f"✅ [Workflow] 交叉审计比对完成。"
-            )
-
-            # 深度审计
-            v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref = (
-                self._execute_deep_audits(audit_res)
-            )
-
-            # 导出
-            self._export_if_needed(audit_res, v_final_pg, v_final_ref, self.result_mode)
-
-            # 报告
-            return render_final_report(
-                self.target_cluster, self.target_category, self.feature_space, self.algo,
-                ctx_cluster, v_all, audit_res, deep_stats_pg, deep_stats_ref, self.logger,
-            )
-        except Exception:
-            self.logger.error("❌ [Workflow] 流水线在运行期间发生严重崩溃", exc_info=True)
-            raise
-
-        finally:
-            if self._owned_db:
-                self.db.close()
-                self.logger.info("🔒 [System] 数据库连接已安全释放。")
-
-    # =========================================================================
-    # 深度审计
-    # =========================================================================
-
-    def _execute_deep_audits(self, audit_res: dict) -> tuple:
-        """对交叉比对产生的 PG Only / Ref Only 候选分别执行深度审计。
-
-        Returns:
-            (v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref)
-        """
-        self.logger.info(f"🔍 [Audit] 开始执行深度审计, 审计输入: {audit_res}")
-        v_audit_pg_only = audit_res.get("v_audit_pg_only")
-        v_audit_ref_only = audit_res.get("v_audit_ref_only")
-        x_stats = audit_res.get("stats", {})
-
-        # PG Only 深度审计
-        if not v_audit_pg_only or x_stats.get("PG Only", 0) == 0:
-            self.logger.warning("⚠️ [Audit] 未找到算法独有候选 (PG Only)，跳过 PG Only 深度审计。")
-            v_final_pg, deep_stats_pg = None, {}
-        else:
-            self.logger.info(f"🔍 [Audit] 准备对 PG Only 执行深度物理核实，目标: {v_audit_pg_only}")
-            v_final_pg, deep_stats_pg = self._run_deep_audit(
-                v_audit_pg_only, "pg_only"
-            )
-
-        # Ref Only 深度审计
-        if not v_audit_ref_only or x_stats.get("Ref Only", 0) == 0:
-            self.logger.warning(
-                "⚠️ [Audit] 未找到文献独有候选 (Ref Only)，跳过 Ref Only 深度审计。"
-            )
-            v_final_ref, deep_stats_ref = None, {}
-        else:
-            self.logger.info(f"🔍 [Audit] 准备对 Ref Only 执行深度物理核实，目标: {v_audit_ref_only}")
-            v_final_ref, deep_stats_ref = self._run_deep_audit(
-                v_audit_ref_only, "ref_only"
-            )
-
-        return v_final_pg, v_final_ref, deep_stats_pg, deep_stats_ref
-
-    def _run_deep_audit(self, v_audit_view: str, audit_type: str) -> tuple:
-        """对单个候选视图执行深度审计。
-
-        Returns:
-            (report_view_name | None, {audit_status: count})
-        """
-        v_result = self.run_audit(target=v_audit_view, audit_type=audit_type)
-        if not v_result:
-            return None, {}
-
-        sql = (
-            f"SELECT audit_status, count(*) FROM {v_result} "
-            f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
-        )
-        stats = dict(self.db.con.execute(sql).fetchall())
-        return v_result, stats
-
-    # =========================================================================
-    # 结果导出
-    # =========================================================================
-
-    def _export_if_needed(self, audit_res, v_final_pg, v_final_ref, result_mode):
-        """按需将管线产出物导出为 CSV/Parquet 文件。"""
-        if result_mode != "detailed":
-            self.logger.info("⏩ [Export] 跳过物理文件导出 (通过 CLI 参数禁用)。")
+    # ── 导出 ──
+
+    def _export_phase(self, ctx: RunContext, audit_result: dict):
+        """按需导出结果。"""
+        if ctx.result_mode != "detailed":
+            self.logger.info("⏩ [Export] 跳过物理文件导出。")
             return
 
-        self.logger.info("💾 [Export] 正在执行耗时的数据资产导出任务...")
+        self.logger.info("💾 [Export] 正在执行数据资产导出任务...")
 
         export_base = cfg.TMPL.FILE_EXPORT_BASE.format(
-            cluster=self.target_cluster,
-            category=self.target_category,
-            mode=self.feature_space,
-            algo=self.algo,
+            cluster=ctx.cluster_id,
+            category=ctx.category,
+            mode=ctx.feature_space,
+            algo=ctx.algorithm,
         )
 
-        self.db.export_table(self.t_master, export_dir=cfg.RESULTS_DIR)
+        self.db.export_table(ctx.master_table, export_dir=cfg.RESULTS_DIR)
 
-        if v_final_pg:
+        if audit_result.get("v_audit_pg_only"):
             self.db.export_table(
-                v_final_pg,
-                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(
-                    base=export_base + "_pg_only"
-                ),
+                audit_result["v_audit_pg_only"],
+                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(base=export_base + "_pg_only"),
                 format="csv",
                 export_dir=cfg.RESULTS_DIR,
             )
 
-        if v_final_ref:
+        if audit_result.get("v_audit_ref_only"):
             self.db.export_table(
-                v_final_ref,
-                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(
-                    base=export_base + "_ref_only"
-                ),
+                audit_result["v_audit_ref_only"],
+                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(base=export_base + "_ref_only"),
                 format="csv",
                 export_dir=cfg.RESULTS_DIR,
             )
 
         self.logger.info("✅ [Export] 结果导出完成。")
 
-    # =========================================================================
-    # 全模式批量运行
-    # =========================================================================
+    # ── 报告 ──
 
-    @staticmethod
-    def run_all_modes(
-        target_cluster_id: str,
-        target_category: str,
-        algo: str,
-        result_mode: str,
-        reconstruct_mode: str = "file",
-    ) -> None:
-        """循环所有特征空间模式，共享数据准备，产出汇总对比报告。"""
-        logger = logging.getLogger("AstroPipeline")
-        valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
-        db = AstroDB(manifest=cfg.MANIFEST)
+    def _report_phase(self, ctx: RunContext, post_result: dict, audit_result: dict) -> dict:
+        """生成最终报告并返回绩效摘要。"""
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+        cluster_cfg["id"] = ctx.cluster_id
 
-        # 星团上下文（所有模式共享）
-        ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
-        ctx_cluster["id"] = target_cluster_id
-        ref_tables = [
-            ctx_cluster["FIELD_IDX"],
-            ctx_cluster["SEED_IDX"],
-            target_category,
-            cfg.IDX_DR2IDX,
-            cfg.IDX_IDS_SIMBAD,
-        ]
+        return render_final_report(
+            ctx.cluster_id,
+            ctx.category,
+            ctx.feature_space,
+            ctx.algorithm,
+            cluster_cfg,
+            post_result,
+            audit_result,
+            audit_result.get("deep_stats_pg", {}),
+            audit_result.get("deep_stats_ref", {}),
+            self.logger,
+        )
 
-        try:
-            # --- 一次性数据准备（所有模式共享）---
-            logger.info("📦 [Workflow] 正在同步物理数据源...")
-            db.import_raw(target_cluster=target_cluster_id, force=False)
+    def _render_batch_summary(self, all_results: list[dict]):
+        """批量运行汇总报告。"""
+        if not all_results:
+            self.logger.warning("⚠️ 无有效结果，跳过汇总报告。")
+            return
 
-            wf_setup = AstroWorkflow(
-                db, target_cluster_id, target_category, valid_modes[0], algo
-            )
-            wf_setup._data_standardize_all(ref_tables, ctx_cluster)
-            logger.info("✅ [Workflow] 数据准备阶段完成（全模式共享）。")
+        from collections import defaultdict
 
-            # 星团物理参数重建（所有模式共享）
-            logger.info(f"🌌 [Workflow] 载入目标星团领域实体模型: {target_cluster_id}")
-            cl = StarCluster(target_cluster_id, db_instance=db)
-            cl.load_or_reconstruct_parameters(param_source=reconstruct_mode)#.load_params(param_source=reconstruct_mode)
-            logger.info(
-                f"✅ [Workflow] 星团领域模型物理状态就绪。反演距离: {1000.0 / cl.plx_ref:.1f} pc"
-            )
+        by_cluster = defaultdict(list)
+        for r in all_results:
+            by_cluster[r.get("cluster", "?")].append(r)
 
-            # --- 逐模式执行计算管线 ---
-            all_results = []
-            for mode in valid_modes:
-                wf = AstroWorkflow(db, target_cluster_id, target_category, mode, algo)
-                summary = wf.run(ctx_cluster)
-                if summary:
-                    all_results.append(summary)
+        for cluster_id, cluster_results in by_cluster.items():
+            cluster_results.sort(key=lambda x: (x.get("mode", ""), x.get("algo", "")))
+            render_all_modes_comparison(cluster_results, self.logger)
 
-            render_all_modes_comparison(all_results, logger)
-        finally:
-            db.close()
-            logger.info("🔒 [System] 数据库连接已安全释放。")
+        self.logger.info(
+            f"🏁 [Batch] 全量执行完成。共 {len(all_results)} 个组合产出有效结果。"
+        )
+
+

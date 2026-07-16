@@ -293,69 +293,69 @@ CLUSTERS = {
         },
         "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
     },
-    "Mel25": {
-        "FIELD_IDX": IDX_FIELD_CLUSTER_MEL25,
-        "SEED_IDX": IDX_FIELD_CLUSTER_MEL25_SEEDS,
-        "NAME": "Hyades",
-        "ID_NAME": "melotte_25",
-        "CAT_NAME": "Melotte_25",
-        "ISO_FILE": "hyades_650myr.dat",
-        "CENTER_RA": 66.75, "CENTER_DEC": 15.87, "RADIUS": 59.31,
-        "RA_MIN": 50.0, "RA_MAX": 85.0, "DEC_MIN": 0.0, "DEC_MAX": 32.0, "MAX_MAG": 21.0,
-        "CORE_RADIUS": 2.7,  # 单位：pc (约 8.8 光年)
-        "HALF_MASS_RADIUS": 4.1,  # 单位：pc
-        "half_light_radius": 3.1,  # 单位：pc (保持原有小写变量名)
-        "TIDAL_RADIUS": 10.0,  # 单位：pc (经典重力潮汐半径，外部流失星形成延展星流)
-        "DISTANCE_PC": 46.7,
-        "DISTANCE_MODULUS": 3.35,
-        "AV": 0.02,  # V波段尘埃消光 (位于本地泡内，尘埃消光极低，近乎为0)
-        "EXT_AG": 0.01,  # Gaia G波段消光
-        "E_BP_RP": 0.01,
-        "PLX_REF": 21.41, "PMRA_REF": 101.10, "PMDEC_REF": -28.50,
-        "RV_REF": 39.10,
-        "UVW_REF": np.array([-42.24, -19.11, -1.45]),
-        "V_ERROR": 3.0, # 毕宿星团极其靠近，投影效应导致的速度残差容忍度需放宽
-        "RV_ERROR": 5.0,
-        "KINE_SCORE_LIMIT": 2.0,
-        "PM_RADIUS": 12.0,  # 自行半径容忍度 (mas/yr)，离得太近导致自行发散严重
-        "PLX_ERROR": 2.5,  # 视差误差/弥散容忍度 (mas)
-        "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag) (主序带非常窄且干净)
-        "SEED_RADIUS": 8.0,
-        "SEED_PLX_LIM": 2.0,
-        "SEED_MAX_MAG": 16.0,
-        "SEED_MAX_RUWE": 1.2,
-    },
-    "Mel111": {
-        "FIELD_IDX": IDX_FIELD_CLUSTER_MEL111,
-        "SEED_IDX": IDX_FIELD_CLUSTER_MEL111_SEEDS,
-        "NAME": "ComaBer",
-        "ID_NAME": "melotte_111",
-        "CAT_NAME": "Melotte_111",
-        "ISO_FILE": "mel111_500myr.dat",
-        "CENTER_RA": 186.6, "CENTER_DEC": 26.1, "RADIUS": 42.61,
-        "RA_MIN": 175.0, "RA_MAX": 198.0, "DEC_MIN": 15.0, "DEC_MAX": 37.0, "MAX_MAG": 21.0,
-        "CORE_RADIUS": 1.5,  # 单位：pc
-        "HALF_MASS_RADIUS": 4.5,
-        "half_light_radius": 3.8,
-        "TIDAL_RADIUS": 15.0,  # 作为一个弥散星团，其动力学边界较宽
-        "DISTANCE_PC": 86.0,
-        "DISTANCE_MODULUS": 4.67,
-        "EXT_AG": 0.02,  # 高银纬天区，消光极低
-        "E_BP_RP": 0.01,
-        "PLX_REF": 11.60, "PMRA_REF": -12.11, "PMDEC_REF": -9.01,
-        "RV_REF": -1.0,
-        "UVW_REF": np.array([-1.7, -6.1, -1.3]),
-        "V_ERROR": 2.5,
-        "RV_ERROR": 5.0,
-        "KINE_SCORE_LIMIT": 2.0,
-        "PM_RADIUS": 5.0,  # 自行散布容忍度
-        "PLX_ERROR": 1.5,  # 视差绝对误差容忍度
-        "CMD_DEV": 0.6,
-        "SEED_RADIUS": 5.0,
-        "SEED_PLX_LIM": 1.5,
-        "SEED_MAX_MAG": 16.0,
-        "SEED_MAX_RUWE": 1.2,
-    },
+    # "Mel25": {
+    #     "FIELD_IDX": IDX_FIELD_CLUSTER_MEL25,
+    #     "SEED_IDX": IDX_FIELD_CLUSTER_MEL25_SEEDS,
+    #     "NAME": "Hyades",
+    #     "ID_NAME": "melotte_25",
+    #     "CAT_NAME": "Melotte_25",
+    #     "ISO_FILE": "hyades_650myr.dat",
+    #     "CENTER_RA": 66.75, "CENTER_DEC": 15.87, "RADIUS": 59.31,
+    #     "RA_MIN": 50.0, "RA_MAX": 85.0, "DEC_MIN": 0.0, "DEC_MAX": 32.0, "MAX_MAG": 21.0,
+    #     "CORE_RADIUS": 2.7,  # 单位：pc (约 8.8 光年)
+    #     "HALF_MASS_RADIUS": 4.1,  # 单位：pc
+    #     "half_light_radius": 3.1,  # 单位：pc (保持原有小写变量名)
+    #     "TIDAL_RADIUS": 10.0,  # 单位：pc (经典重力潮汐半径，外部流失星形成延展星流)
+    #     "DISTANCE_PC": 46.7,
+    #     "DISTANCE_MODULUS": 3.35,
+    #     "AV": 0.02,  # V波段尘埃消光 (位于本地泡内，尘埃消光极低，近乎为0)
+    #     "EXT_AG": 0.01,  # Gaia G波段消光
+    #     "E_BP_RP": 0.01,
+    #     "PLX_REF": 21.41, "PMRA_REF": 101.10, "PMDEC_REF": -28.50,
+    #     "RV_REF": 39.10,
+    #     "UVW_REF": np.array([-42.24, -19.11, -1.45]),
+    #     "V_ERROR": 3.0, # 毕宿星团极其靠近，投影效应导致的速度残差容忍度需放宽
+    #     "RV_ERROR": 5.0,
+    #     "KINE_SCORE_LIMIT": 2.0,
+    #     "PM_RADIUS": 12.0,  # 自行半径容忍度 (mas/yr)，离得太近导致自行发散严重
+    #     "PLX_ERROR": 2.5,  # 视差误差/弥散容忍度 (mas)
+    #     "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag) (主序带非常窄且干净)
+    #     "SEED_RADIUS": 8.0,
+    #     "SEED_PLX_LIM": 2.0,
+    #     "SEED_MAX_MAG": 16.0,
+    #     "SEED_MAX_RUWE": 1.2,
+    # },
+    # "Mel111": {
+    #     "FIELD_IDX": IDX_FIELD_CLUSTER_MEL111,
+    #     "SEED_IDX": IDX_FIELD_CLUSTER_MEL111_SEEDS,
+    #     "NAME": "ComaBer",
+    #     "ID_NAME": "melotte_111",
+    #     "CAT_NAME": "Melotte_111",
+    #     "ISO_FILE": "mel111_500myr.dat",
+    #     "CENTER_RA": 186.6, "CENTER_DEC": 26.1, "RADIUS": 42.61,
+    #     "RA_MIN": 175.0, "RA_MAX": 198.0, "DEC_MIN": 15.0, "DEC_MAX": 37.0, "MAX_MAG": 21.0,
+    #     "CORE_RADIUS": 1.5,  # 单位：pc
+    #     "HALF_MASS_RADIUS": 4.5,
+    #     "half_light_radius": 3.8,
+    #     "TIDAL_RADIUS": 15.0,  # 作为一个弥散星团，其动力学边界较宽
+    #     "DISTANCE_PC": 86.0,
+    #     "DISTANCE_MODULUS": 4.67,
+    #     "EXT_AG": 0.02,  # 高银纬天区，消光极低
+    #     "E_BP_RP": 0.01,
+    #     "PLX_REF": 11.60, "PMRA_REF": -12.11, "PMDEC_REF": -9.01,
+    #     "RV_REF": -1.0,
+    #     "UVW_REF": np.array([-1.7, -6.1, -1.3]),
+    #     "V_ERROR": 2.5,
+    #     "RV_ERROR": 5.0,
+    #     "KINE_SCORE_LIMIT": 2.0,
+    #     "PM_RADIUS": 5.0,  # 自行散布容忍度
+    #     "PLX_ERROR": 1.5,  # 视差绝对误差容忍度
+    #     "CMD_DEV": 0.6,
+    #     "SEED_RADIUS": 5.0,
+    #     "SEED_PLX_LIM": 1.5,
+    #     "SEED_MAX_MAG": 16.0,
+    #     "SEED_MAX_RUWE": 1.2,
+    # },
     "M67": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M67,
         "SEED_IDX": IDX_FIELD_CLUSTER_M67_SEEDS,
@@ -430,43 +430,43 @@ CLUSTERS = {
         "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
      
     },
-    "M13": {
-        "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
-        "SEED_IDX": IDX_FIELD_CLUSTER_M13_SEEDS,
-        "NAME": "M13",
-        "ID_NAME": "ngc_6205",
-        "CAT_NAME": "NGC_6205",
-        "ISO_FILE": "m13_12gyr.dat",
-        "DIM_MODE": "2d",
-        "CENTER_RA": 250.42, "CENTER_DEC": 36.46, "RADIUS": 3.28,
-        "RA_MIN": 248.0, "RA_MAX": 253.0, "DEC_MIN": 34.5, "DEC_MAX": 38.5, "MAX_MAG": 21.0,
-        "CORE_RADIUS": 1.3,  # 单位：pc (核心致密)
-        "HALF_MASS_RADIUS": 3.5,  # 单位：pc
-        "half_light_radius": 3.2,
-        "TIDAL_RADIUS": 43.0,  # 球状星团的潮汐半径通常较大
-        "DISTANCE_PC": 7100.0,
-        "DISTANCE_MODULUS": 14.25,
-        "EXT_AG": 0.04,
-        "E_BP_RP": 0.02,
-        "PLX_REF": 0.14, "PMRA_REF": -3.18, "PMDEC_REF": -2.57,
-        "RV_REF": -244.2,
-        "UVW_REF": np.array([58.0, -241.0, 10.0]),  # 银晕轨道的典型运动学
-        "V_ERROR": 10.0, # 球状星团内部速度弥散度极高
-        "RV_ERROR": 10.0,
-        "KINE_SCORE_LIMIT": 2.5,
-        "PM_RADIUS": 1.0,  # 远距离天体自行离散度极小
-        "PLX_ERROR": 0.1,  # 视差门限需非常严苛
-        "CMD_DEV": 0.4,  # 球状星团主序带极其狭窄
-        "SEED_RADIUS": 0.8, "SEED_PLX_LIM": 0.5,
-        "SEED_MAX_MAG": 20.5,
-        "SEED_MAX_RUWE": 1.4,
-        "SEED_PM_LIM": 2.0,
-        "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2,
-        # 🌟 核心算法路由策略集成
-        "DISAMBIGUATION_MODE": "blind_gmm",      # 球状星团，恒星资产丰厚，直接自适应盲跑
-        "SUBSTRUCTURE_MODE": "triple_comp",      # 精细解剖核心、前导尾与后随尾
-    },
+    # "M13": {
+    #     "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
+    #     "SEED_IDX": IDX_FIELD_CLUSTER_M13_SEEDS,
+    #     "NAME": "M13",
+    #     "ID_NAME": "ngc_6205",
+    #     "CAT_NAME": "NGC_6205",
+    #     "ISO_FILE": "m13_12gyr.dat",
+    #     "DIM_MODE": "2d",
+    #     "CENTER_RA": 250.42, "CENTER_DEC": 36.46, "RADIUS": 3.28,
+    #     "RA_MIN": 248.0, "RA_MAX": 253.0, "DEC_MIN": 34.5, "DEC_MAX": 38.5, "MAX_MAG": 21.0,
+    #     "CORE_RADIUS": 1.3,  # 单位：pc (核心致密)
+    #     "HALF_MASS_RADIUS": 3.5,  # 单位：pc
+    #     "half_light_radius": 3.2,
+    #     "TIDAL_RADIUS": 43.0,  # 球状星团的潮汐半径通常较大
+    #     "DISTANCE_PC": 7100.0,
+    #     "DISTANCE_MODULUS": 14.25,
+    #     "EXT_AG": 0.04,
+    #     "E_BP_RP": 0.02,
+    #     "PLX_REF": 0.14, "PMRA_REF": -3.18, "PMDEC_REF": -2.57,
+    #     "RV_REF": -244.2,
+    #     "UVW_REF": np.array([58.0, -241.0, 10.0]),  # 银晕轨道的典型运动学
+    #     "V_ERROR": 10.0, # 球状星团内部速度弥散度极高
+    #     "RV_ERROR": 10.0,
+    #     "KINE_SCORE_LIMIT": 2.5,
+    #     "PM_RADIUS": 1.0,  # 远距离天体自行离散度极小
+    #     "PLX_ERROR": 0.1,  # 视差门限需非常严苛
+    #     "CMD_DEV": 0.4,  # 球状星团主序带极其狭窄
+    #     "SEED_RADIUS": 0.8, "SEED_PLX_LIM": 0.5,
+    #     "SEED_MAX_MAG": 20.5,
+    #     "SEED_MAX_RUWE": 1.4,
+    #     "SEED_PM_LIM": 2.0,
+    #     "UPMASK_ITERATIONS": 20,
+    #     "UPMASK_MAX_CLUSTERS": 2,
+    #     # 🌟 核心算法路由策略集成
+    #     "DISAMBIGUATION_MODE": "blind_gmm",      # 球状星团，恒星资产丰厚，直接自适应盲跑
+    #     "SUBSTRUCTURE_MODE": "triple_comp",      # 精细解剖核心、前导尾与后随尾
+    # },
     "M41": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M41,
         "SEED_IDX": IDX_FIELD_CLUSTER_M41_SEEDS,

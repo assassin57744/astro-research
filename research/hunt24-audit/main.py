@@ -6,9 +6,9 @@
 import argparse
 import logging
 import sys
-import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from modules.db import AssetManager
 from modules.workflow import AstroWorkflow
@@ -54,6 +54,26 @@ def setup_logging(level: int = logging.INFO) -> None:
 # =============================================================================
 # CLI 参数解析
 # =============================================================================
+
+
+def _parse_key_value_pairs(raw: list[str]) -> dict[str, Any]:
+    """将 ['eps=0.3', 'strategy=bayesian'] 解析为 {'eps': 0.3, 'strategy': 'bayesian'}。"""
+    result: dict[str, Any] = {}
+    for item in raw:
+        if "=" not in item:
+            continue
+        k, v = item.split("=", 1)
+        low = v.lower()
+        if low in ("true", "false"):
+            result[k] = low == "true"
+        elif low in ("none", "auto"):
+            result[k] = low
+        else:
+            try:
+                result[k] = float(v) if "." in v else int(v)
+            except ValueError:
+                result[k] = v
+    return result
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,8 +133,31 @@ def parse_args() -> argparse.Namespace:
         help="配置来源: file (静态) 或 db (历史重建)",
     )
 
-    # 未来可以在这里随意添加新参数，Workflow 会自动吸收
-    # parser.add_argument("--new-feature", type=float, default=0.5)
+    # 🚀 扩展入口：算法/审计/种子参数覆盖
+    parser.add_argument(
+        "--algo-params",
+        type=str,
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="算法微调参数，例：--algo-params eps=0.5 strategy=threshold",
+    )
+    parser.add_argument(
+        "--audit-params",
+        type=str,
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="审计微调参数，例：--audit-params skip_simbad=true",
+    )
+    parser.add_argument(
+        "--seed-params",
+        type=str,
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="种子集微调参数，例：--seed-params radius_override=3.0",
+    )
 
     maint_group = parser.add_argument_group("资产维护命令 (Maintenance)")
     maint_group.add_argument(
@@ -205,30 +248,43 @@ def main() -> None:
         return
 
     # 2. 准备管线参数
-    target_cluster_id = _validate_cluster(args.cluster)
+    # target_cluster_id = _validate_cluster(args.cluster)
+    target_cluster_ids =args.cluster
 
-    # 🌟 [设计模式] 接口解耦方案：
-    # 将 args 命名空间转换为字典，并注入已校验的星团 ID。
-    # 这样 Workflow 的构造函数无需随着 CLI 参数的增加而修改。
-    workflow_params = vars(args).copy()
-    workflow_params["target_cluster"] = target_cluster_id
+    # 将键值对参数解析为 dict
+    algo_params = _parse_key_value_pairs(args.algo_params)
+    audit_params = _parse_key_value_pairs(args.audit_params)
+    seed_params = _parse_key_value_pairs(args.seed_params)
 
     logger.info(f"🚀 [Startup] 启动分析管道 - 审计目标: {args.category}")
-    logger.info(f"📊 [Startup] 运行模式: {args.mode} | 审计范围: {target_cluster_id} | 算法: {args.algo}")
+    logger.info(
+        f"📊 [Startup] 运行模式: {args.mode} | 审计范围: {target_cluster_ids} | 算法: {args.algo}"
+    )
 
+    # 确定特征空间列表
     if args.mode == "all":
-        # 暂不支持
-        logger.error("❌ [System] 暂不支持批量模式。")
-        raise NotImplementedError
-        # 批量模式也建议统一接受配置字典
-        # AstroWorkflow.run_all_modes(**workflow_params)
+        feature_spaces = list(cfg.GMM_CONFIG["feature_map"].keys())
     else:
-        # 🌟 动态解包传入所有参数
-        wf = AstroWorkflow(db_instance=None, **workflow_params)
-        # wf.init_data()
-        # ctx_cluster = cfg.CLUSTERS[target_cluster_id].copy()
-        # ctx_cluster["id"] = target_cluster_id
-        wf.run()
+        feature_spaces = [args.mode]
+
+    if args.cluster.lower() == "all":
+        target_cluster_ids = list(cfg.CLUSTERS.keys())
+    else:
+        target_cluster_ids = [args.cluster]
+
+    # 统一使用 run_batch（单模式也走同一代码路径）
+    wf = AstroWorkflow(db_instance=None)
+    wf.run_batch(
+        clusters=target_cluster_ids,
+        categories=[args.category],
+        feature_spaces=feature_spaces,
+        algorithms=[args.algo],
+        result_mode=args.result,
+        param_source=args.reconstruct,
+        algo_params_override=algo_params,
+        audit_params_override=audit_params,
+        seed_params_override=seed_params,
+    )
 
 
 if __name__ == "__main__":
@@ -240,3 +296,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"💥 [System] 发生未捕获的致命崩溃: {e}", exc_info=True)
         sys.exit(1)
+

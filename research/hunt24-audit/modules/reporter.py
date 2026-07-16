@@ -296,7 +296,7 @@ def render_all_modes_comparison(
 
     all_results.sort(key=lambda x: x["mode"])
 
-    logger.info("\n" + "═" * 125)
+    logger.info("═" * 125)
     logger.info(
         f" 🏆 [全模式算法绩效汇总对照表] - 目标星团: {all_results[0]['cluster']}"
     )

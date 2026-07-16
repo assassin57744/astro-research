@@ -244,3 +244,5 @@ research/hunt24-audit-backup/
 *.zip
 *.pdf
 
+*.backup
+
