@@ -737,45 +737,52 @@ class AstroWorkflow:
             return None
 
     def _warm_up_literature_cache(self, validator: UnifiedMemberValidator, v_source: str):
-        """SIMBAD 文献缓存预热（保留原有逻辑）。"""
-        cache_table = validator.cache_table
+        """SIMBAD 文献缓存预热。
 
-        res = self.db.con.execute(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = ?)",
-            [cache_table.lower()],
-        ).fetchone()
-
-        if res and res[0]:
-            col_info = self.db.con.execute(f"PRAGMA table_info({cache_table})").df()
-            if "parent" not in col_info["name"].values:
-                self.logger.warning(
-                    f"⚠️ [Audit] 缓存表 `{cache_table}` 缺失 `parent` 字段，正在动态追加..."
-                )
-                try:
-                    self.db.con.execute(f"ALTER TABLE {cache_table} ADD COLUMN parent VARCHAR;")
-                    self.logger.info(f"✅ [Audit] 已为表 `{cache_table}` 补齐 `parent` 字段。")
-                except Exception as ddl_err:
-                    self.logger.error(f"❌ [Audit] 动态追加 parent 列失败: {str(ddl_err)}")
-
-        sql_missing = f"""
-            SELECT DISTINCT CAST(v.id AS VARCHAR) as id
-            FROM {v_source} v
-            LEFT JOIN {cache_table} c ON CAST(v.id AS VARCHAR) = c.gaia_dr3_id
-            WHERE c.gaia_dr3_id IS NULL 
-               OR c.parent IS NULL 
-               OR TRIM(c.parent) = '' 
-               OR LOWER(TRIM(c.parent)) = 'none'
+        若本地缓存表尚不存在（首次运行），将所有候选 ID 一次性送入
+        sync_simbad_cache（内部负责建表 + 网络同步 + 持久化）。
         """
+        cache_table = validator.cache_table
+        table_exists = (
+            self.db.con.execute(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM information_schema.tables WHERE table_name = ?"
+                ")",
+                [cache_table.lower()],
+            ).fetchone()[0]
+            > 0
+        )
 
-        self.logger.info(f"🔍 [Audit] 正在检索 [{v_source}] 中缺失的文献缓存记录...")
-        df_missing = self.db.con.execute(sql_missing).df()
-        ids_to_sync = df_missing["id"].tolist()
+        if not table_exists:
+            self.logger.info(
+                f"🔍 [Audit] 本地 SIMBAD 缓存表 `{cache_table}` 不存在，"
+                f"将对 [{v_source}] 全量启动网络同步..."
+            )
+            df_all = self.db.con.execute(
+                f"SELECT DISTINCT CAST(id AS VARCHAR) as id FROM {v_source}"
+            ).df()
+            ids_to_sync = df_all["id"].tolist()
+        else:
+            sql_missing = f"""
+                SELECT DISTINCT CAST(v.id AS VARCHAR) as id
+                FROM {v_source} v
+                LEFT JOIN {cache_table} c ON CAST(v.id AS VARCHAR) = c.gaia_dr3_id
+                WHERE c.gaia_dr3_id IS NULL
+                   OR c.parent IS NULL
+                   OR TRIM(c.parent) = ''
+                   OR LOWER(TRIM(c.parent)) = 'none'
+            """
+            self.logger.info(f"🔍 [Audit] 正在检索 [{v_source}] 中缺失的文献缓存记录...")
+            df_missing = self.db.con.execute(sql_missing).df()
+            ids_to_sync = df_missing["id"].tolist()
 
         if not ids_to_sync:
             self.logger.info("✅ [Audit] 缓存对齐完成：所有源均在本地缓存中。")
             return
 
-        self.logger.info(f"🌐 [Network] 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热同步...")
+        self.logger.info(
+            f"🌐 [Network] 正在为 {len(ids_to_sync)} 个缺失源启动增量 SIMBAD 预热同步..."
+        )
         validator.sync_simbad_cache(ids_to_sync)
 
     # ── 导出 ──

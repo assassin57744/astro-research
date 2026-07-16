@@ -576,6 +576,12 @@ class AstroDB:
             if mode == "FORCE_REMOTE":
                 should_sync = True
             elif mode == "HYBRID" and not file_exists:
+                # 标记为 optional 的数据源（如 SIMBAD 缓存）首次缺失属正常
+                if params.get("optional"):
+                    self.logger.info(
+                        f"ℹ️ [Startup] 可选数据源 {k} 尚不存在，首次网络查询时将自动创建。"
+                    )
+                    continue
                 should_sync = True
             elif mode == "OFFLINE" and not file_exists:
                 self.logger.error(f"❌ [Startup] 离线任务缺失物理文件: {k} (路径: {result_path})")
