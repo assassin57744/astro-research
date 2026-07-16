@@ -537,21 +537,22 @@ class AstroDB:
 
         self.logger.info(f"🚀 [Startup] 开始引导 AstroDB 数据环境 (星团: {target_cluster or 'ALL'})...")
 
-        # 核心优化：提取当前任务相关的索引，过滤无关星团的加载
+        # ── 构建过滤白名单 ──
+        # 当指定 target_cluster 时，只处理以下 MANIFEST 条目：
+        #   1. 目标星团的 FIELD_IDX / SEED_IDX
+        #   2. 不属于任何活跃星团的共享条目（参考星表、桥接表等）
         target_indices = set()
-        other_clusters_indices = set()
+        all_active_cluster_indices = set()
         if target_cluster and target_cluster in cfg.CLUSTERS:
             target_indices.add(cfg.CLUSTERS[target_cluster].get("FIELD_IDX"))
             target_indices.add(cfg.CLUSTERS[target_cluster].get("SEED_IDX"))
-
-            for cid, cinfo in cfg.CLUSTERS.items():
-                if cid != target_cluster:
-                    other_clusters_indices.add(cinfo.get("FIELD_IDX"))
-                    other_clusters_indices.add(cinfo.get("SEED_IDX"))
+        for cid in cfg.CLUSTERS:
+            all_active_cluster_indices.add(cfg.CLUSTERS[cid].get("FIELD_IDX"))
+            all_active_cluster_indices.add(cfg.CLUSTERS[cid].get("SEED_IDX"))
 
         for k, config in self.data_manifest.items():
-            # 如果该项属于其他星团的数据源（且不是当前目标的必要项），则跳过
-            if k in other_clusters_indices and k not in target_indices:
+            # 指定了目标星团时：跳过属于其他活跃星团的数据源
+            if target_cluster and k in all_active_cluster_indices and k not in target_indices:
                 continue
 
             mode = config.get("sync_mode", "HYBRID")
@@ -586,7 +587,11 @@ class AstroDB:
                     self._execute_sync_task(config, result_path)
                     file_exists = True  # 同步成功后更新状态
                 except Exception as e:
-                    self.logger.error(f"❌ [Network] 同步 {k} 失败: {e}")
+                    # 指定了目标星团时，非目标条目的同步失败降级为 WARNING
+                    if target_cluster and k not in target_indices:
+                        self.logger.warning(f"⚠️ [Network] 非目标条目同步失败 (可忽略): {k} - {e}")
+                    else:
+                        self.logger.error(f"❌ [Network] 同步 {k} 失败: {e}")
                     continue
             else:
                 self.logger.info(f"✅ [Local] 数据文件 {k}.parquet 已存在，跳过同步。")

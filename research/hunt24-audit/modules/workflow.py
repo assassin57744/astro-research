@@ -8,21 +8,12 @@ from utils.decorators import astro_checkpoint
 
 from modules.db import AstroDB
 from modules.pg_core import PriorGMM
-from modules.pg_core_ex import PriorGMMEx
 from modules.validator import UnifiedMemberValidator
 from modules.transformer import AstroTransformer
 from modules.reporter import render_final_report, render_all_modes_comparison
 from modules.cluster import StarCluster
 
 import config as cfg
-from config import (
-    CLUSTERS,
-    MANIFEST,
-    GMM_CONFIG,
-    MEMBER_SAMPLE_THRESHOLD,
-    STD_COLS,
-    GOLDEN_SAMPLE_THRESHOLD,
-)
 
 
 # =============================================================================
@@ -62,10 +53,9 @@ class AstroWorkflow:
     """天文数据处理工作流编排引擎。
 
     方法层次：
-      - 一级 PUBLIC:  run() / run_batch()
-      - 二级 阶段调度: _init_run_context() / _execute_single_pipeline() /
-                     _prepare_shared_data() / _finalize_context() /
-                     _compute_members() / _post_process() /
+      - 一级 PUBLIC:  run()
+      - 二级 阶段调度: _execute_single_pipeline() / _prepare_shared_data() /
+                     _finalize_context() / _compute_members() / _post_process() /
                      _audit_phase() / _export_phase() / _report_phase()
       - 三级 功能单元: _standardize_ref_tables() / _load_and_transform_field() /
                      _load_and_transform_seeds() / _run_stable_pipeline() /
@@ -73,12 +63,11 @@ class AstroWorkflow:
                      _run_audit_pipeline() / 等
     """
 
-    def __init__(self, db_instance: AstroDB | None = None, **kwargs):
+    def __init__(self, db_instance: AstroDB | None = None):
         """初始化工作流实例。
 
         Args:
             db_instance (AstroDB | None): 活跃的 AstroDB 数据库对象。
-            kwargs: 可选参数（向后兼容旧版调用方式）。
         """
         if db_instance is None:
             self.db = AstroDB(manifest=cfg.MANIFEST)
@@ -87,18 +76,8 @@ class AstroWorkflow:
             self.db = db_instance
             self._owned_db = False
 
-        self.config = kwargs
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(self.db, "data_manifest", {})
-
-        # 兼容旧装饰器 astro_checkpoint 的临时属性
-        # (在 _execute_single_pipeline 中同步)
-        self.target_cluster = None
-        self.target_category = None
-        self.feature_space = None
-        self.algo = None
-        self.cl = None
-        self.t_master = None
 
     # =========================================================================
     # 🟢 一级：PUBLIC API
@@ -173,96 +152,13 @@ class AstroWorkflow:
                                 exc_info=True,
                             )
 
-                self._render_batch_summary(results)
+        self._render_batch_summary(results)
         return results
 
 
     # =========================================================================
     # 🟡 二级：阶段调度器
     # =========================================================================
-
-    def _init_run_context(
-        self,
-        cluster_id: str | None = None,
-        category: str | None = None,
-        feature_space: str | None = None,
-        algorithm: str | None = None,
-        result_mode: str | None = None,
-        param_source: str | None = None,
-        algo_params_override: dict | None = None,
-        audit_params_override: dict | None = None,
-        seed_params_override: dict | None = None,
-    ) -> RunContext:
-        """构造 RunContext，合并三层参数来源（优先级从低到高）：
-
-            1. config.py 全局默认值
-            2. CLUSTERS[cluster_id] 星团专属配置
-            3. 显式传入的 override 参数
-
-        若参数未显式传入，则从 self.config（旧版 kwargs）回退。
-        """
-        cid = cluster_id or self.config.get("target_cluster")
-        cat = category or self.config.get("category", "hunt")
-        fs = feature_space or self.config.get("mode", "5d")
-        alg = algorithm or self.config.get("algo", "dbscan")
-        res = result_mode or self.config.get("result", "brief")
-        ps = param_source or self.config.get("reconstruct", "file")
-
-        # ── 算法参数：三层合并 ──
-        algo_params = {
-            "eps": cfg.GMM_CONFIG.get("dbscan_eps", "auto"),
-            "min_samples": cfg.GMM_CONFIG.get("dbscan_min_samples", 100),
-            "strategy": cfg.GMM_CONFIG.get("default_strategy", "bayesian"),
-            "covariance_type": cfg.GMM_CONFIG.get("gmm_covariance_type", "full"),
-        }
-        cluster_cfg = cfg.CLUSTERS.get(cid, {})
-        strategy_name = cluster_cfg.get("STRATEGY", algo_params["strategy"])
-        strategy_params = (
-            cluster_cfg.get("STRATEGY_PARAMS", {}).get(strategy_name, {})
-        )
-        algo_params.update(strategy_params)
-        algo_params["strategy"] = strategy_name
-        if algo_params_override:
-            algo_params.update(algo_params_override)
-
-        # ── 审计参数 ──
-        audit_params = {
-            "ruwe_limit": cfg.AUDIT_RUWE_LIMIT,
-            "plx_residual_limit": cfg.AUDIT_PLX_RESIDUAL_LIMIT,
-            "mag_limit": cfg.AUDIT_MAG_LIMIT_HUNT24,
-            "skip_simbad": False,
-        }
-        if audit_params_override:
-            audit_params.update(audit_params_override)
-
-        # ── 种子参数 ──
-        seed_params = {
-            "radius_override": None,
-            "plx_lim_override": None,
-            "max_mag_override": None,
-        }
-        if seed_params_override:
-            seed_params.update(seed_params_override)
-
-        ctx = RunContext(
-            cluster_id=cid,
-            category=cat,
-            feature_space=fs,
-            algorithm=alg,
-            result_mode=res,
-            param_source=ps,
-            algo_params=algo_params,
-            audit_params=audit_params,
-            seed_params=seed_params,
-        )
-
-        # 同步到兼容旧代码的 self 属性（供 decorator / 审计方法使用）
-        self.target_cluster = cid
-        self.target_category = cat
-        self.feature_space = fs
-        self.algo = alg
-
-        return ctx
 
     def _execute_single_pipeline(
         self, ctx: RunContext, skip_data_prep: bool = False
@@ -272,15 +168,6 @@ class AstroWorkflow:
         if not skip_data_prep:
             self._prepare_shared_data(ctx)
         self._finalize_context(ctx)
-
-        # 同步到兼容旧代码的 self 属性（供 decorator / 审计方法使用）
-        self.target_cluster = ctx.cluster_id
-        self.target_category = ctx.category
-        self.feature_space = ctx.feature_space
-        self.algo = ctx.algorithm
-
-        self.cl = ctx.star_cluster
-        self.t_master = ctx.master_table
 
         # Phase 2: GMM 成员识别
         self.logger.info(
@@ -412,7 +299,7 @@ class AstroWorkflow:
         self.logger.info(f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗")
 
         df_ext = self._transform_and_bridge_features(
-            df_raw, ctx.feature_space, ctx.required_features
+            df_raw, ctx.feature_space, ctx.required_features, ctx.star_cluster
         )
         return self._defensive_nan_purge(df_ext, ctx.required_features, label="Target_field")
 
@@ -439,19 +326,20 @@ class AstroWorkflow:
         self.logger.info(f"✅ [Process] 种子星提取完成，有效样本: {len(df_seeds)} 颗")
 
         df_ext = self._transform_and_bridge_features(
-            df_seeds, ctx.feature_space, ctx.required_features
+            df_seeds, ctx.feature_space, ctx.required_features, ctx.star_cluster
         )
         return self._defensive_nan_purge(df_ext, ctx.required_features, label="Seeds")
 
     def _transform_and_bridge_features(
-        self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str]
+        self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str],
+        star_cluster: Any = None,
     ) -> pd.DataFrame:
         """特征转换网关。"""
         if df_raw is None:
             self.logger.error("❌ [Compute] 输入的原始 DataFrame 为 None！")
             return None
 
-        cl = self.cl
+        cl = star_cluster
         cluster_rv = cl.get_param("RV_REF", None)
         c_ra = cl.get_param("CENTER_RA", None)
         c_dec = cl.get_param("CENTER_DEC", None)
@@ -672,7 +560,7 @@ class AstroWorkflow:
             cluster=ctx.cluster_id.lower()
         )
         audit_res = self._cross_match_with_literature(
-            ctx, post_result["v_candidates"], target_aln_view
+            ctx, target_aln_view
         )
 
         if audit_res.get("status") != "success":
@@ -680,13 +568,13 @@ class AstroWorkflow:
             return audit_res
 
         self.logger.info("✅ [Audit] 交叉审计比对完成。")
-        deep_stats_pg, deep_stats_ref = self._execute_deep_audits(audit_res)
+        deep_stats_pg, deep_stats_ref = self._execute_deep_audits(ctx, audit_res)
         audit_res["deep_stats_pg"] = deep_stats_pg
         audit_res["deep_stats_ref"] = deep_stats_ref
         return audit_res
 
     def _cross_match_with_literature(
-        self, ctx: RunContext, v_source: str, v_target: str
+        self, ctx: RunContext, v_target: str
     ) -> dict:
         """交叉比对（保留原有逻辑）。"""
         if not self._verify_audit_target_exists(v_target):
@@ -717,8 +605,8 @@ class AstroWorkflow:
 
         self.logger.info(f"✅ [Audit] Master 表 x_match_tag 更新完成。")
 
-        v_audit_pg_only = "v_tmp_audit_pg_only"
-        v_audit_ref_only = "v_tmp_audit_ref_only"
+        v_audit_pg_only = f"v_tmp_audit_pg_only_{ctx.master_table}"
+        v_audit_ref_only = f"v_tmp_audit_ref_only_{ctx.master_table}"
         self.db.register_view_from_sql(
             v_audit_pg_only,
             f"SELECT * FROM {ctx.master_table} WHERE {col_x} = 'PG Only'",
@@ -756,7 +644,7 @@ class AstroWorkflow:
         sql = f"SELECT 1 FROM information_schema.tables WHERE table_name = '{v_target}'"
         return self.db.con.execute(sql).fetchone() is not None
 
-    def _execute_deep_audits(self, audit_res: dict) -> tuple:
+    def _execute_deep_audits(self, ctx: RunContext, audit_res: dict) -> tuple:
         """对 PG Only / Ref Only 执行深度审计。"""
         v_audit_pg = audit_res.get("v_audit_pg_only")
         v_audit_ref = audit_res.get("v_audit_ref_only")
@@ -764,21 +652,21 @@ class AstroWorkflow:
 
         deep_stats_pg = {}
         if v_audit_pg and x_stats.get("PG Only", 0) > 0:
-            _, deep_stats_pg = self._run_deep_audit(v_audit_pg, "pg_only")
+            _, deep_stats_pg = self._run_deep_audit(ctx, v_audit_pg, "pg_only")
         else:
             self.logger.warning("⚠️ [Audit] 无 PG Only 候选，跳过深度审计。")
 
         deep_stats_ref = {}
         if v_audit_ref and x_stats.get("Ref Only", 0) > 0:
-            _, deep_stats_ref = self._run_deep_audit(v_audit_ref, "ref_only")
+            _, deep_stats_ref = self._run_deep_audit(ctx, v_audit_ref, "ref_only")
         else:
             self.logger.warning("⚠️ [Audit] 无 Ref Only 候选，跳过深度审计。")
 
         return deep_stats_pg, deep_stats_ref
 
-    def _run_deep_audit(self, v_audit_view: str, audit_type: str) -> tuple:
+    def _run_deep_audit(self, ctx: RunContext, v_audit_view: str, audit_type: str) -> tuple:
         """对单个候选视图执行深度审计。"""
-        v_result = self._run_audit_pipeline(target=v_audit_view, audit_type=audit_type)
+        v_result = self._run_audit_pipeline(ctx, target=v_audit_view, audit_type=audit_type)
         if not v_result:
             return None, {}
 
@@ -789,20 +677,20 @@ class AstroWorkflow:
         stats = dict(self.db.con.execute(sql).fetchall())
         return v_result, stats
 
-    def _run_audit_pipeline(self, target: str, audit_type: str = "default") -> str | None:
+    def _run_audit_pipeline(self, ctx: RunContext, target: str, audit_type: str = "default") -> str | None:
         """驱动完整审计管线（原 run_audit 重命名）。"""
         self.logger.info(f"🔍 🎬 [Audit] 开始对 {target} 进行身份审计...")
 
         try:
-            v_audit_input = self._pre_audit(target)
+            v_audit_input = self._pre_audit(ctx, target)
             if not v_audit_input:
                 self.logger.error("❌ [Audit] 审计预处理失败")
                 return None
 
             validator = UnifiedMemberValidator(
-                cluster=self.cl,
+                cluster=ctx.star_cluster,
                 db_instance=self.db,
-                feature_space=self.feature_space,
+                feature_space=ctx.feature_space,
             )
 
             self._warm_up_literature_cache(validator, v_audit_input)
@@ -810,9 +698,9 @@ class AstroWorkflow:
             audit_report_df = validator.run(v_audit_input)
 
             self.logger.info("📥 [Audit] 正在将深度审计结果同步至 Master 表...")
-            self.db.tag_master_table(self.t_master, audit_report_df)
+            self.db.tag_master_table(ctx.master_table, audit_report_df)
 
-            v_report = f"{self.t_master}_{audit_type}_audited_report"
+            v_report = f"{ctx.master_table}_{audit_type}_audited_report"
             col_x = cfg.MASTER_COLS["X_MATCH"]
             x_match_val = (
                 "PG Only"
@@ -822,24 +710,24 @@ class AstroWorkflow:
 
             if x_match_val:
                 sql_filter = (
-                    f"SELECT * FROM {self.t_master} "
+                    f"SELECT * FROM {ctx.master_table} "
                     f"WHERE audit_status IS NOT NULL AND {col_x} = '{x_match_val}'"
                 )
             else:
-                sql_filter = f"SELECT * FROM {self.t_master} WHERE audit_status IS NOT NULL"
+                sql_filter = f"SELECT * FROM {ctx.master_table} WHERE audit_status IS NOT NULL"
 
             self.db.register_view_from_sql(v_report, sql_filter)
             return v_report
 
         except Exception as e:
             self.logger.error(f"❌ [Audit] 审计流程故障: {str(e)}", exc_info=True)
-            raise e
+            return None
 
-    def _pre_audit(self, v_target: str) -> str | None:
+    def _pre_audit(self, ctx: RunContext, v_target: str) -> str | None:
         """审计前准备：补全物理参数。"""
         self.logger.info("🔧 [Audit] 正在准备审计数据视图...")
         try:
-            field_idx = cfg.CLUSTERS[self.target_cluster]["FIELD_IDX"]
+            field_idx = cfg.CLUSTERS[ctx.cluster_id]["FIELD_IDX"]
             t_base = cfg.MANIFEST[field_idx]["stx_view"]
             v_result = self.db.register_audit_input_view(v_target, t_base)
             self.logger.info(f"✅ [Audit] 审计数据准备完成，输入视图: {v_result}")
