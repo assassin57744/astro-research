@@ -248,8 +248,18 @@ def main() -> None:
         return
 
     # 2. 准备管线参数
-    # target_cluster_id = _validate_cluster(args.cluster)
-    target_cluster_ids =args.cluster
+    target_cluster_ids = []
+    if args.cluster.lower() == "all":
+        target_cluster_ids = list(cfg.CLUSTERS.keys())
+    else:
+        target_cluster_id = _validate_cluster(args.cluster)
+        target_cluster_ids = [target_cluster_id]
+
+    # 确定特征空间列表
+    if args.mode == "all":
+        feature_spaces = list(cfg.GMM_CONFIG["feature_map"].keys())
+    else:
+        feature_spaces = [args.mode]
 
     # 将键值对参数解析为 dict
     algo_params = _parse_key_value_pairs(args.algo_params)
@@ -261,20 +271,12 @@ def main() -> None:
         f"📊 [Startup] 运行模式: {args.mode} | 审计范围: {target_cluster_ids} | 算法: {args.algo}"
     )
 
-    # 确定特征空间列表
-    if args.mode == "all":
-        feature_spaces = list(cfg.GMM_CONFIG["feature_map"].keys())
-    else:
-        feature_spaces = [args.mode]
 
-    if args.cluster.lower() == "all":
-        target_cluster_ids = list(cfg.CLUSTERS.keys())
-    else:
-        target_cluster_ids = [args.cluster]
+    
 
     # 统一使用 run_batch（单模式也走同一代码路径）
     wf = AstroWorkflow(db_instance=None)
-    wf.run_batch(
+    wf.run(
         clusters=target_cluster_ids,
         categories=[args.category],
         feature_spaces=feature_spaces,

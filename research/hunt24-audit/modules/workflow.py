@@ -104,24 +104,8 @@ class AstroWorkflow:
     # 🟢 一级：PUBLIC API
     # =========================================================================
 
-    def run(self) -> dict | None:
-        """单模式入口（向后兼容，供程序化调用。CLI 路径使用 run_batch）。
 
-                从 self.config 中提取参数构建 RunContext，委托给
-                _execute_single_pipeline，并在 finally 中释放自有数据库连接。
-                """
-        ctx = self._init_run_context()
-        try:
-            return self._execute_single_pipeline(ctx)
-        except Exception:
-            self.logger.error("❌ [Workflow] 流水线崩溃", exc_info=True)
-            raise
-        finally:
-            if self._owned_db:
-                self.db.close()
-                self.logger.info("🔒 [System] 数据库连接已安全释放。")
-
-    def run_batch(
+    def run(
         self,
         clusters: list[str],
         categories: list[str],
@@ -192,29 +176,6 @@ class AstroWorkflow:
                 self._render_batch_summary(results)
         return results
 
-    @staticmethod
-    def run_all_modes(
-        target_cluster_id: str,
-        target_category: str,
-        algo: str,
-        result_mode: str,
-        reconstruct_mode: str = "file",
-    ) -> None:
-        """循环所有特征空间模式（保留向后兼容，内部委托给 run_batch）。"""
-        valid_modes = list(cfg.GMM_CONFIG["feature_map"].keys())
-        db = AstroDB(manifest=cfg.MANIFEST)
-        wf = AstroWorkflow(db_instance=db)
-        try:
-            wf.run_batch(
-                clusters=[target_cluster_id],
-                categories=[target_category],
-                feature_spaces=valid_modes,
-                algorithms=[algo],
-                result_mode=result_mode,
-                param_source=reconstruct_mode,
-            )
-        finally:
-            db.close()
 
     # =========================================================================
     # 🟡 二级：阶段调度器
