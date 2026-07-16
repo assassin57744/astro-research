@@ -407,7 +407,7 @@ class AstroWorkflow:
             cfg.IDX_DR2IDX,
             cfg.IDX_IDS_SIMBAD,
         ]
-        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
 
         for k in ref_tables:
@@ -594,7 +594,7 @@ class AstroWorkflow:
         self.logger.info("🧬 [Compute] 正在调度 ClusterSeedExtractor...")
         from modules.seed_extractor import ClusterSeedExtractor
 
-        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
         extractor = ClusterSeedExtractor(cluster_profile=cluster_cfg)
         df_seeds_refined = extractor.extract_seeds(
@@ -607,7 +607,7 @@ class AstroWorkflow:
         self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_refined)} 颗。")
 
         strategy_params = (
-            cfg.CLUSTERS[ctx.cluster_id]
+            cfg.CLUSTERS[ctx.cluster_id.upper()]
             .get("STRATEGY_PARAMS", {})
             .get(strategy_name, {})
         )
@@ -970,7 +970,7 @@ class AstroWorkflow:
 
     def _report_phase(self, ctx: RunContext, post_result: dict, audit_result: dict) -> dict:
         """生成最终报告并返回绩效摘要。"""
-        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
 
         return render_final_report(
