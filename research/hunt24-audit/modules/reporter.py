@@ -67,7 +67,7 @@ def _format_pipeline_params(ctx_cluster: dict) -> list[str]:
 
 def _format_gmm_stats(p_stats: dict) -> list[str]:
     """格式化 GMM 算法发现阶段统计。"""
-    return [
+    lines = [
         "  [1] 算法发现阶段 (GMM Inference):",
         f"      - 原始输入种子数量 (Seeds): {p_stats.get('n_seeds', 0)}",
         f"      - 成员星候选总数: {p_stats.get('n_candidates', 0)}",
@@ -75,6 +75,14 @@ def _format_gmm_stats(p_stats: dict) -> list[str]:
         f"      - 种子集核心样本 (Core): {p_stats.get('n_seed_core', 0)}",
         f"      - 种子集噪声剔除 (Noise): {p_stats.get('n_seed_noise', 0)}",
     ]
+    # 种子管线各级过滤统计
+    if p_stats.get("raw_count"):
+        lines.append(f"      - 种子星 (aln视图原始): {p_stats['raw_count']}")
+    if p_stats.get("clean_count"):
+        lines.append(f"      - 种子星 (NaN清洗后):   {p_stats['clean_count']}")
+    if p_stats.get("refined_count"):
+        lines.append(f"      - 种子星 (DBSCAN精炼):  {p_stats['refined_count']}")
+    return lines
 
 
 def _format_cross_match_stats(a_stats: dict) -> list[str]:

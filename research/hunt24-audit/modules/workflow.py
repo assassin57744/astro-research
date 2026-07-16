@@ -43,6 +43,7 @@ class RunContext:
     gmm_config: dict = field(default_factory=dict)
     required_features: list = field(default_factory=list)
     master_table: str = ""
+    seed_stats: dict = field(default_factory=dict)  # raw_count / clean_count / refined_count
 
 
 # =============================================================================
@@ -310,6 +311,7 @@ class AstroWorkflow:
         v_src = src["aln_view"]
 
         df_raw = self.db.query(f"SELECT * FROM {v_src}")
+        ctx.seed_stats["raw_count"] = len(df_raw)
         self.logger.info(f"📋 [Process] 从视图 [{v_src}] 读取原始种子星: {len(df_raw)} 颗")
 
         available_features = [f for f in ctx.required_features if f in df_raw.columns]
@@ -328,7 +330,9 @@ class AstroWorkflow:
         df_ext = self._transform_and_bridge_features(
             df_seeds, ctx.feature_space, ctx.required_features, ctx.star_cluster
         )
-        return self._defensive_nan_purge(df_ext, ctx.required_features, label="Seeds")
+        df_clean = self._defensive_nan_purge(df_ext, ctx.required_features, label="Seeds")
+        ctx.seed_stats["clean_count"] = len(df_clean)
+        return df_clean
 
     def _transform_and_bridge_features(
         self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str],
@@ -453,6 +457,7 @@ class AstroWorkflow:
 
         if df_seeds_refined is None or df_seeds_refined.empty:
             raise ValueError("❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！")
+        ctx.seed_stats["refined_count"] = len(df_seeds_refined)
         self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_refined)} 颗。")
 
         strategy_params = (
@@ -546,6 +551,7 @@ class AstroWorkflow:
                     "n_seeds": n_seeds,
                     "n_seed_core": n_seed_core,
                     "n_seed_noise": n_seed_noise,
+                    **ctx.seed_stats,
                 },
             }
         except Exception as e:
