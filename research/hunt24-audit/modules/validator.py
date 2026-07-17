@@ -708,7 +708,10 @@ class UnifiedMemberValidator:
         for key in ["pm", "plx", "rv", "cmd"]:
             col = f"{key}_score"
             if key in penalties:
-                audit_matrix[col] = np.clip(penalties[key], 0, 2.5).fillna(fill_vals[key])
+                p = penalties[key]
+                if isinstance(p, np.ndarray):
+                    p = pd.Series(p, index=audit_matrix.index)
+                audit_matrix[col] = p.clip(0, 2.5).fillna(fill_vals[key])
             elif col not in audit_matrix.columns:
                 audit_matrix[col] = fill_vals[key]
 
