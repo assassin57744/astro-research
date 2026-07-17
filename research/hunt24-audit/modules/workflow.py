@@ -1,6 +1,5 @@
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 import pandas as pd
 
@@ -17,33 +16,51 @@ import config as cfg
 
 
 # =============================================================================
-# 📦 运行上下文数据类（单次运行的不可变调度上下文）
+# 📦 管线运行时状态（可变，在管线执行过程中逐步填充）
+# =============================================================================
+
+@dataclass
+class PipelineState:
+    """管线执行过程中逐步计算填充的可变状态。
+
+    与 RunContext 的不可变身份字段分离，避免"声称不可变却处处修改"的设计矛盾。
+    """
+    gmm_config: dict = field(default_factory=dict)
+    required_features: list = field(default_factory=list)
+    master_table: str = ""
+    seed_stats: dict = field(default_factory=dict)  # raw_count / clean_count / refined_count
+
+
+# =============================================================================
+# 📦 运行上下文数据类（单次运行的调度身份 + 可变状态引用）
 # =============================================================================
 
 @dataclass
 class RunContext:
-    """单次运行的不可变调度上下文。
+    """单次管线运行的调度上下文。
 
-    只包含管线调度参数，不包含子模块细节。
-    扩展方式：通过 algo_params / audit_params / seed_params 字典自由注入新参数，
-    无需修改本数据类定义。新增参数类别时仅需增加一个命名空间 dict 字段。
+    身份字段（构造时确定，运行中不变）:
+      - cluster_id, category, feature_space, algorithm, result_mode
+      - param_source: 参数来源（"file" | "db"），用于构造 StarCluster
+      - algo_params / audit_params / seed_params: 算法/审计/种子参数覆盖
+
+    可变状态:
+      - state: PipelineState，在管线各阶段逐步填充
+      - star_cluster: 星团领域实体（Phase 1 创建后赋值）
     """
     cluster_id: str
     category: str             # "hunt", "cg20", etc.
     feature_space: str        # "2d", "5d", "6d_p", etc.
     algorithm: str            # "dbscan", "hdbscan"
     result_mode: str          # "brief" | "detailed"
-    param_source: str         # "file" | "db"
+    param_source: str         # "file" | "db" — 用于构造 StarCluster，之后以 star_cluster.param_source 为准
 
     algo_params: dict = field(default_factory=dict)
     audit_params: dict = field(default_factory=dict)
     seed_params: dict = field(default_factory=dict)
 
-    star_cluster: Any = None
-    gmm_config: dict = field(default_factory=dict)
-    required_features: list = field(default_factory=list)
-    master_table: str = ""
-    seed_stats: dict = field(default_factory=dict)  # raw_count / clean_count / refined_count
+    star_cluster: StarCluster | None = None
+    state: PipelineState = field(default_factory=PipelineState)
 
 
 # =============================================================================
@@ -210,9 +227,7 @@ class AstroWorkflow:
         # 因为参数重建（config_manager）依赖 aln 视图（如 aln_hunt_m44）已存在。
         self._standardize_ref_tables(ctx)
 
-        success = ctx.star_cluster.load_or_reconstruct_parameters(
-            param_source=ctx.param_source
-        )
+        success = ctx.star_cluster.load_or_reconstruct_parameters()
         if not success:
             raise RuntimeError(f"无法初始化星团 {ctx.cluster_id} 的物理资产")
         self.logger.info(
@@ -231,9 +246,9 @@ class AstroWorkflow:
         if ctx.feature_space not in fmap:
             raise ValueError(f"未知的特征空间: {ctx.feature_space}")
 
-        ctx.gmm_config = gmm_cfg
-        ctx.required_features = fmap[ctx.feature_space]
-        ctx.master_table = cfg.TMPL.T_MASTER.format(
+        ctx.state.gmm_config = gmm_cfg
+        ctx.state.required_features = fmap[ctx.feature_space]
+        ctx.state.master_table = cfg.TMPL.T_MASTER.format(
             cluster=ctx.cluster_id.lower(),
             category=ctx.category,
             feature_space=ctx.feature_space,
@@ -300,9 +315,9 @@ class AstroWorkflow:
         self.logger.info(f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗")
 
         df_ext = self._transform_and_bridge_features(
-            df_raw, ctx.feature_space, ctx.required_features, ctx.star_cluster
+            df_raw, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
         )
-        return self._defensive_nan_purge(df_ext, ctx.required_features, label="Target_field")
+        return self._defensive_nan_purge(df_ext, ctx.state.required_features, label="Target_field")
 
     def _load_and_transform_seeds(self, ctx: RunContext) -> pd.DataFrame:
         """加载种子数据 → 特征转换 → NaN清洗。"""
@@ -311,10 +326,10 @@ class AstroWorkflow:
         v_src = src["aln_view"]
 
         df_raw = self.db.query(f"SELECT * FROM {v_src}")
-        ctx.seed_stats["raw_count"] = len(df_raw)
+        ctx.state.seed_stats["raw_count"] = len(df_raw)
         self.logger.info(f"📋 [Process] 从视图 [{v_src}] 读取原始种子星: {len(df_raw)} 颗")
 
-        available_features = [f for f in ctx.required_features if f in df_raw.columns]
+        available_features = [f for f in ctx.state.required_features if f in df_raw.columns]
         df_seeds = (
             df_raw.dropna(subset=available_features).copy()
             if available_features
@@ -323,20 +338,20 @@ class AstroWorkflow:
 
         df_tag = df_seeds[[cfg.STD_COLS["ID"]]].copy()
         df_tag["seed_type"] = "raw_seed"
-        self.db.tag_master_table(ctx.master_table, df_tag)
+        self.db.tag_master_table(ctx.state.master_table, df_tag)
 
         self.logger.info(f"✅ [Process] 种子星提取完成，有效样本: {len(df_seeds)} 颗")
 
         df_ext = self._transform_and_bridge_features(
-            df_seeds, ctx.feature_space, ctx.required_features, ctx.star_cluster
+            df_seeds, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
         )
-        df_clean = self._defensive_nan_purge(df_ext, ctx.required_features, label="Seeds")
-        ctx.seed_stats["clean_count"] = len(df_clean)
+        df_clean = self._defensive_nan_purge(df_ext, ctx.state.required_features, label="Seeds")
+        ctx.state.seed_stats["clean_count"] = len(df_clean)
         return df_clean
 
     def _transform_and_bridge_features(
         self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str],
-        star_cluster: Any = None,
+        star_cluster: StarCluster | None = None,
     ) -> pd.DataFrame:
         """特征转换网关。"""
         if df_raw is None:
@@ -399,15 +414,15 @@ class AstroWorkflow:
     )
     def _compute_members(self, ctx: RunContext) -> str | None:
         """统一的成员识别调度器。"""
-        self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.required_features}")
+        self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}")
 
         df_target_final = self._load_and_transform_field(ctx)
 
         # 🚀 必须先建表，再加载种子（_load_and_transform_seeds 内部会调用 tag_master_table 回灌标签）
-        self.db.init_master_table(ctx.master_table, df_target_final)
+        self.db.init_master_table(ctx.state.master_table, df_target_final)
         df_seeds_final = self._load_and_transform_seeds(ctx)
 
-        use_experimental = ctx.gmm_config.get("use_experimental", False)
+        use_experimental = ctx.state.gmm_config.get("use_experimental", False)
         if not use_experimental:
             df_res = self._run_stable_pipeline(ctx, df_target_final, df_seeds_final)
         else:
@@ -420,9 +435,9 @@ class AstroWorkflow:
         self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
 
         updates = df_res[[cfg.STD_COLS["ID"], "prob"]].copy()
-        self.db.tag_master_table(ctx.master_table, updates)
+        self.db.tag_master_table(ctx.state.master_table, updates)
 
-        return ctx.master_table
+        return ctx.state.master_table
 
     def _run_stable_pipeline(
         self, ctx: RunContext, df_target_final: pd.DataFrame, df_seeds_final: pd.DataFrame
@@ -434,8 +449,8 @@ class AstroWorkflow:
         cluster_cfg["id"] = ctx.cluster_id
 
         engine = PriorGMM(params=self, ctx_cluster=cluster_cfg)
-        engine.fit(df_target_final, df_seeds_final, ctx.required_features)
-        return engine.predict(df_target_final, ctx.required_features)
+        engine.fit(df_target_final, df_seeds_final, ctx.state.required_features)
+        return engine.predict(df_target_final, ctx.state.required_features)
 
     def _run_experimental_pipeline(
         self, ctx: RunContext, df_target_final: pd.DataFrame, df_seeds_final: pd.DataFrame
@@ -452,12 +467,12 @@ class AstroWorkflow:
         extractor = ClusterSeedExtractor(cluster_profile=cluster_cfg)
         df_seeds_refined = extractor.extract_seeds(
             field_stars_df=df_seeds_final,
-            features=ctx.required_features,
+            features=ctx.state.required_features,
         )
 
         if df_seeds_refined is None or df_seeds_refined.empty:
             raise ValueError("❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！")
-        ctx.seed_stats["refined_count"] = len(df_seeds_refined)
+        ctx.state.seed_stats["refined_count"] = len(df_seeds_refined)
         self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_refined)} 颗。")
 
         strategy_params = (
@@ -489,7 +504,7 @@ class AstroWorkflow:
         engine_class = STRATEGY_CLASSES[strategy_name]
         self.logger.info(f"✅ [Compute] 已路由至策略类 [{engine_class.__name__}]")
         engine = engine_class(**strategy_kwargs)
-        return engine.fit_predict(df_target_final, df_seeds_refined, ctx.required_features)
+        return engine.fit_predict(df_target_final, df_seeds_refined, ctx.state.required_features)
 
     # ── 后处理 ──
 
@@ -498,11 +513,11 @@ class AstroWorkflow:
         self.logger.info(f"📊 [Process] [{ctx.cluster_id}] 启动后处理...")
         try:
             self.db.execute(
-                f"ALTER TABLE {ctx.master_table} "
+                f"ALTER TABLE {ctx.state.master_table} "
                 f"ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
             )
             self.db.execute(
-                f"ALTER TABLE {ctx.master_table} "
+                f"ALTER TABLE {ctx.state.master_table} "
                 f"ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
             )
 
@@ -510,10 +525,10 @@ class AstroWorkflow:
             condi_candidates = f"{cfg.STD_COLS['PROB']} > {cfg.MEMBER_SAMPLE_THRESHOLD}"
 
             self.db.execute(
-                f"UPDATE {ctx.master_table} SET is_golden = TRUE WHERE {condi_golden}"
+                f"UPDATE {ctx.state.master_table} SET is_golden = TRUE WHERE {condi_golden}"
             )
             self.db.execute(
-                f"UPDATE {ctx.master_table} SET is_candidate = TRUE WHERE {condi_candidates}"
+                f"UPDATE {ctx.state.master_table} SET is_candidate = TRUE WHERE {condi_candidates}"
             )
 
             stats_sql = f"""
@@ -523,7 +538,7 @@ class AstroWorkflow:
                     count(*) FILTER (WHERE seed_type = 'raw_seed') AS n_seeds,
                     count(*) FILTER (WHERE density_status = 'core') AS n_seed_core,
                     count(*) FILTER (WHERE density_status = 'noise') AS n_seed_noise
-                FROM {ctx.master_table}
+                FROM {ctx.state.master_table}
             """
             stats = self.db.execute(stats_sql).fetchone()
             n_golden, n_candidates, n_seeds, n_seed_core, n_seed_noise = stats
@@ -539,7 +554,7 @@ class AstroWorkflow:
             v_candidates = f"v_candidates_{ctx.cluster_id.lower()}"
             self.db.register_view_from_sql(
                 v_candidates,
-                f"SELECT * FROM {ctx.master_table} WHERE is_candidate = TRUE",
+                f"SELECT * FROM {ctx.state.master_table} WHERE is_candidate = TRUE",
             )
 
             return {
@@ -551,7 +566,7 @@ class AstroWorkflow:
                     "n_seeds": n_seeds,
                     "n_seed_core": n_seed_core,
                     "n_seed_noise": n_seed_noise,
-                    **ctx.seed_stats,
+                    **ctx.state.seed_stats,
                 },
             }
         except Exception as e:
@@ -602,28 +617,28 @@ class AstroWorkflow:
                          OR m.prob IS NULL)
                          AND h.id IS NOT NULL THEN 'Ref Only'
                 END as {col_x}
-            FROM {ctx.master_table} m
+            FROM {ctx.state.master_table} m
             FULL OUTER JOIN {v_target} h ON m.id = h.id
             WHERE m.prob > {cfg.MEMBER_SAMPLE_THRESHOLD} OR h.id IS NOT NULL
         """
         df_x = self.db.query(sql_cross)
-        self.db.tag_master_table(ctx.master_table, df_x)
+        self.db.tag_master_table(ctx.state.master_table, df_x)
 
         self.logger.info(f"✅ [Audit] Master 表 x_match_tag 更新完成。")
 
-        v_audit_pg_only = f"v_tmp_audit_pg_only_{ctx.master_table}"
-        v_audit_ref_only = f"v_tmp_audit_ref_only_{ctx.master_table}"
+        v_audit_pg_only = f"v_tmp_audit_pg_only_{ctx.state.master_table}"
+        v_audit_ref_only = f"v_tmp_audit_ref_only_{ctx.state.master_table}"
         self.db.register_view_from_sql(
             v_audit_pg_only,
-            f"SELECT * FROM {ctx.master_table} WHERE {col_x} = 'PG Only'",
+            f"SELECT * FROM {ctx.state.master_table} WHERE {col_x} = 'PG Only'",
         )
         self.db.register_view_from_sql(
             v_audit_ref_only,
-            f"SELECT * FROM {ctx.master_table} WHERE {col_x} = 'Ref Only'",
+            f"SELECT * FROM {ctx.state.master_table} WHERE {col_x} = 'Ref Only'",
         )
 
         st_sql = (
-            f"SELECT {col_x}, count(*) FROM {ctx.master_table} "
+            f"SELECT {col_x}, count(*) FROM {ctx.state.master_table} "
             f"WHERE {col_x} IS NOT NULL GROUP BY {col_x}"
         )
         stats_raw = self.db.execute(st_sql).fetchall()
@@ -704,9 +719,9 @@ class AstroWorkflow:
             audit_report_df = validator.run(v_audit_input)
 
             self.logger.info("📥 [Audit] 正在将深度审计结果同步至 Master 表...")
-            self.db.tag_master_table(ctx.master_table, audit_report_df)
+            self.db.tag_master_table(ctx.state.master_table, audit_report_df)
 
-            v_report = f"{ctx.master_table}_{audit_type}_audited_report"
+            v_report = f"{ctx.state.master_table}_{audit_type}_audited_report"
             col_x = cfg.MASTER_COLS["X_MATCH"]
             x_match_val = (
                 "PG Only"
@@ -716,11 +731,11 @@ class AstroWorkflow:
 
             if x_match_val:
                 sql_filter = (
-                    f"SELECT * FROM {ctx.master_table} "
+                    f"SELECT * FROM {ctx.state.master_table} "
                     f"WHERE audit_status IS NOT NULL AND {col_x} = '{x_match_val}'"
                 )
             else:
-                sql_filter = f"SELECT * FROM {ctx.master_table} WHERE audit_status IS NOT NULL"
+                sql_filter = f"SELECT * FROM {ctx.state.master_table} WHERE audit_status IS NOT NULL"
 
             self.db.register_view_from_sql(v_report, sql_filter)
             return v_report
@@ -806,7 +821,7 @@ class AstroWorkflow:
             algo=ctx.algorithm,
         )
 
-        self.db.export_table(ctx.master_table, export_dir=cfg.RESULTS_DIR)
+        self.db.export_table(ctx.state.master_table, export_dir=cfg.RESULTS_DIR)
 
         if audit_result.get("v_audit_pg_only"):
             self.db.export_table(

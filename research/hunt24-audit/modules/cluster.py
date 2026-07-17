@@ -75,25 +75,21 @@ class StarCluster:
             self.logger.error(f"❌ [Physical] 参数装载并同步至内存状态时崩溃: {e}", exc_info=True)
             return False
 
-    def load_or_reconstruct_parameters(self, param_source: str = "file") -> bool:
+    def load_or_reconstruct_parameters(self) -> bool:
         """
         🚀 [富领域行为] 统一负责星团物理属性的装载或自适应重建。
-        
-        Args:
-            mode: "db" 代表启动高精度物理资产反演引擎进行重建；
-                  "file" 代表从静态配置文件直接加载。
+
+        根据 self.param_source 决定参数来源：
+          - "db":   启动高精度物理资产反演引擎，从数据库重建参数
+          - "file": 直接从 config.py 静态配置加载
         """
-        if param_source == "db":
+        if self.param_source == "db":
             self.logger.info(f"🧬 [Domain] 触发 [{self.id}] 相空间物理参数的自适应反演与自我重建...")
-            # 让实体对象自己调用底座去重建自己
             recon_res = self.cfg_mgr.reconstruct_cl_params_from_db(self.id)
             if not recon_res:
                 self.logger.warning("⚠️ [Domain] 历史数据重建失败，将降级加载静态参数。")
-            
-            # 重建完成后，必须刷新当前对象的内部物理状态
             return self._hydrate_from_config()
         else:
-            # 常规模式，直接同步配置
             return self._hydrate_from_config()
 
     # =====================================================================

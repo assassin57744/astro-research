@@ -20,19 +20,36 @@ class ClusterConfigManager:
         self._runtime_cache = {}
 
     def get_param(self, cluster_id: str, param_name: str, default=None):
-        """核心物理参数级联检索接口"""
+        """核心物理参数级联检索接口。
+
+        检索策略由 param_source 决定：
+          - "file": 直接从 config.py 静态配置读取（跳过缓存和 DB，避免跨模式污染）
+          - "db":   三级级联——内存缓存 → DuckDB 科学资产表 → config.py 静态兜底
+        """
         cluster_id = cluster_id.upper()
         param_name = param_name.upper()
 
-        # 层级 1：检查内存运行时缓存
+        # ── "file" 模式：直接读取静态配置，不经过缓存/DB ──
+        if self.param_source == "file":
+            if hasattr(cfg, "CLUSTERS") and cluster_id in cfg.CLUSTERS:
+                static_cluster_cfg = cfg.CLUSTERS[cluster_id]
+                if param_name in static_cluster_cfg:
+                    return static_cluster_cfg[param_name]
+            self.logger.error(
+                f"❌ [ConfigError] 静态配置中未找到 {cluster_id}.{param_name}"
+            )
+            return default
+
+        # ── "db" 模式：三级级联 ──
+        # 层级 1：内存运行时缓存
         if (
             cluster_id in self._runtime_cache
             and param_name in self._runtime_cache[cluster_id]
         ):
             return self._runtime_cache[cluster_id][param_name]
 
-        # 层级 2：检索先前由 Refiner 提炼并安全落盘的 DuckDB 科学资产
-        if self.db and self.param_source == "db":
+        # 层级 2：DuckDB 科学资产表
+        if self.db:
             try:
                 self._ensure_config_table_exists()
                 query_sql = f"""
@@ -50,9 +67,8 @@ class ClusterConfigManager:
                 self.logger.debug(
                     f"🛈 资产表未命中或检索失败，转向静态配置降级。原因: {e}"
                 )
-                pass
 
-        # 层级 3：平滑降级到项目根目录下的静态 config.py
+        # 层级 3：静态 config.py 兜底
         if hasattr(cfg, "CLUSTERS") and cluster_id in cfg.CLUSTERS:
             static_cluster_cfg = cfg.CLUSTERS[cluster_id]
             if param_name in static_cluster_cfg:
