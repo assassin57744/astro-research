@@ -13,38 +13,38 @@ import config as cfg
 # =============================================================================
 
 
-def _format_algo_params(algo: str) -> list[str]:
-    """格式化 GMM 算法参数配置块。"""
+def _format_algo_params(algo: str, gmm_config: dict) -> list[str]:
+    """格式化 GMM 算法参数配置块（使用实际运行时的配置，非全局默认值）。"""
     lines = ["  [算法参数配置]"]
     if algo == "dbscan":
-        lines.append(f"      - DBSCAN eps: {cfg.GMM_CONFIG.get('dbscan_eps', 'N/A')}")
+        lines.append(f"      - DBSCAN eps: {gmm_config.get('dbscan_eps', 'N/A')}")
         lines.append(
-            f"      - DBSCAN min_samples: {cfg.GMM_CONFIG.get('dbscan_min_samples', 'N/A')}"
+            f"      - DBSCAN min_samples: {gmm_config.get('dbscan_min_samples', 'N/A')}"
         )
     elif algo == "hdbscan":
         lines.append(
-            f"      - HDBSCAN min_cluster_size: {cfg.GMM_CONFIG.get('hdbscan_min_cluster_size', 'N/A')}"
+            f"      - HDBSCAN min_cluster_size: {gmm_config.get('hdbscan_min_cluster_size', 'N/A')}"
         )
         lines.append(
-            f"      - HDBSCAN min_samples: {cfg.GMM_CONFIG.get('hdbscan_min_samples', 'N/A')}"
+            f"      - HDBSCAN min_samples: {gmm_config.get('hdbscan_min_samples', 'N/A')}"
         )
         lines.append(
-            f"      - HDBSCAN cluster_selection_epsilon: {cfg.GMM_CONFIG.get('hdbscan_cluster_selection_epsilon', 'N/A')}"
+            f"      - HDBSCAN cluster_selection_epsilon: {gmm_config.get('hdbscan_cluster_selection_epsilon', 'N/A')}"
         )
     lines.append(
-        f"      - GMM covariance_type: {cfg.GMM_CONFIG.get('gmm_covariance_type', 'N/A')}"
+        f"      - GMM covariance_type: {gmm_config.get('gmm_covariance_type', 'N/A')}"
     )
-    lines.append(f"      - GMM max_iter: {cfg.GMM_CONFIG.get('max_iter', 'N/A')}")
-    lines.append(f"      - GMM tol: {cfg.GMM_CONFIG.get('tol', 'N/A')}")
+    lines.append(f"      - GMM max_iter: {gmm_config.get('max_iter', 'N/A')}")
+    lines.append(f"      - GMM tol: {gmm_config.get('tol', 'N/A')}")
     lines.append(
-        f"      - use_experimental: {cfg.GMM_CONFIG.get('use_experimental', 'N/A')}"
+        f"      - use_experimental: {gmm_config.get('use_experimental', 'N/A')}"
     )
     lines.append(
-        f"      - enable_subsampling: {cfg.GMM_CONFIG.get('enable_subsampling', 'N/A')}"
+        f"      - enable_subsampling: {gmm_config.get('enable_subsampling', 'N/A')}"
     )
-    if cfg.GMM_CONFIG.get("enable_subsampling"):
+    if gmm_config.get("enable_subsampling"):
         lines.append(
-            f"      - subsampling_limit: {cfg.GMM_CONFIG.get('subsampling_limit', 'N/A')}"
+            f"      - subsampling_limit: {gmm_config.get('subsampling_limit', 'N/A')}"
         )
     return lines
 
@@ -227,6 +227,7 @@ def render_final_report(
     mode: str,
     algo: str,
     ctx_cluster: dict,
+    gmm_config: dict,
     v_all_audit_data: dict,
     audit_res: dict,
     deep_stats_pg: dict,
@@ -235,10 +236,14 @@ def render_final_report(
 ) -> dict:
     """构建、打印并持久化管线最终执行报告。
 
+    Args:
+        gmm_config: 实际运行时使用的 GMM 配置（含 dim_mode 等运行时覆盖）。
+            ── 注意：feature_map 也必须从中读取，确保与 ctx.state.required_features 一致。
+
     Returns:
         build_summary() 产出的绩效摘要 dict。
     """
-    used_features = cfg.GMM_CONFIG["feature_map"].get(mode, [])
+    used_features = gmm_config["feature_map"].get(mode, [])
 
     report_lines = [
         "=" * 65,
@@ -251,7 +256,7 @@ def render_final_report(
     ]
 
     # 算法参数 + 管线筛选参数
-    report_lines += _format_algo_params(algo)
+    report_lines += _format_algo_params(algo, gmm_config)
     report_lines.append("-" * 65)
     report_lines += _format_pipeline_params(ctx_cluster)
     report_lines.append("-" * 65)
@@ -308,19 +313,19 @@ def render_all_modes_comparison(
 
     all_results.sort(key=lambda x: x["mode"])
 
-    logger.info("═" * 155)
+    logger.info("═" * 158)
     logger.info(
         f" 🏆 [全模式算法绩效汇总对照表] - 目标星团: {all_results[0]['cluster']}"
     )
-    logger.info("-" * 155)
+    logger.info("-" * 158)
 
     header = (
         f"{'MODE':<8} | {'ALGO':<8} | {'SEEDS_RAW':<10} | {'SEEDS_CLN':<10} | {'SEEDS_REF':<10} | "
         f"{'CANDIDATES':<12} | {'GOLDEN':<10} | {'MATCHED':<10} | "
-        f"{'PG ONLY':<10} | {'RECALL':<12} | {'NEW DISCOVERY':<15} | {'PRECISION'}"
+        f"{'PG ONLY':<10} | {'RECALL':<12} | {'NEW DISCOVERY':<15} | {'PRECISION':<10}"
     )
     logger.info(header)
-    logger.info("-" * 155)
+    logger.info("-" * 158)
 
     for res in all_results:
         line = (
@@ -332,7 +337,7 @@ def render_all_modes_comparison(
         )
         logger.info(line)
 
-    logger.info("═" * 155)
+    logger.info("═" * 158)
     logger.info(
         " 💡 注: RECALL 基于文献已知成员的找回率; PRECISION 基于算法独有源通过物理深度审计的比例。\n"
     )

@@ -854,6 +854,7 @@ class AstroWorkflow:
             ctx.feature_space,
             ctx.algorithm,
             cluster_cfg,
+            ctx.state.gmm_config,
             post_result,
             audit_result,
             audit_result.get("deep_stats_pg", {}),

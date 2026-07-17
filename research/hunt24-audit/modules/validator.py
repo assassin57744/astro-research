@@ -243,10 +243,10 @@ class UnifiedMemberValidator:
         # 1. 构建并执行 SQL 获取基础数据
         sql = self._build_audit_sql(v_target_detail)
         audit_matrix = self.db.execute(sql).df()
-        self.logger.info(f"🔍 [Validator] 获取到 {len(audit_matrix)} 条样本。")
-        self.logger.info(f"🔍 [Validator] 审计数据: \n{audit_matrix.head(5)}")
+        self.logger.debug(f"🔍 [Validator] 获取到 {len(audit_matrix)} 条样本。")
+        self.logger.debug(f"🔍 [Validator] 审计数据: \n{audit_matrix.head(5)}")
         for cc in audit_matrix.columns:
-            self.logger.info(f"🔍 [Validator] 审计数据 columns : {cc}")
+            self.logger.debug(f"🔍 [Validator] 审计数据 columns : {cc}")
 
 
         # 🚀 【防御机制】如果数据集为空，直接初始化结构并提前退出，防止下游 KeyError
@@ -370,247 +370,375 @@ class UnifiedMemberValidator:
         """
 
     def _audit_physical_consistency(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
-        """[联合物理一致性审计 - 显式卡方多列输出版] 
-        
-        🎯 终极全参数融合范式：
-        将 2D自行/3D速度、视差、视向速度 以及 测光CMD 全部融合成一个统一的综合卡方统计量(Total $\ chi^2$)，
-        并基于动态总自由度(Total DoF)执行严格的卡方独立性检验与概率过滤。
-        同时，将各个子维度的卡方值显式记录在最终输出的矩阵中。
+        """[策略分发器] 根据 VALIDATION_STRATEGY 路由到对应的物理验证算法。
+
+        三种策略:
+          - "chi2_upmask"       (默认): 卡方检验 + pyUPMASK CMD,         p ≥ 0.50
+          - "chi2_cmd_residual" (实验A): 卡方检验 + 等龄线插值残差 CMD,  p ≥ 0.05
+          - "weighted_penalty"  (实验B): 启发式加权惩罚分（修正后 backup 版本）
         """
-        import sys
-        import numpy as np
-        import pandas as pd
-        from scipy.stats import chi2  # 🚀 引入 Scipy 核心卡方分布检验引擎
-        import config as cfg
+        from scipy.stats import chi2
 
         if audit_matrix.empty:
             return audit_matrix
 
-        # 1. 环境上下文初始化与全新卡方追溯列初始化（默认赋予 NaN 保证维度自适应）
+        # ── 共享：上下文初始化 ──
         dim_mode = self.feature_space
         is_2d = dim_mode == "2d"
         is_physical_v = dim_mode in ["3d_v", "6d_p"]
-        audit_matrix["cmd_residual"] = np.nan
-        
-        # 🧪 【新规字段】初始化子维度卡方列
-        audit_matrix["kine_chi2"] = np.nan   # 动力学卡方（2D自行马氏距离或3D速度卡方）
-        audit_matrix["plx_chi2"] = np.nan    # 视差卡方
-        audit_matrix["rv_chi2"] = np.nan     # 视向速度卡方
-        audit_matrix["cmd_chi2"] = np.nan    # 测光演化/UPMASK 空间卡方
 
-        # 提前过滤 NaN 核心数据
+        audit_matrix["cmd_residual"] = np.nan
+        audit_matrix["kine_chi2"]  = np.nan
+        audit_matrix["plx_chi2"]   = np.nan
+        audit_matrix["rv_chi2"]    = np.nan
+        audit_matrix["cmd_chi2"]   = np.nan
+
+        # ── 共享：NaN 核心数据过滤 ──
         required_cols = ["ra", "dec", "pmra", "pmdec"]
         if not is_2d:
             required_cols.append("plx")
-        existing_req_cols = [c for c in required_cols if c in audit_matrix.columns]
-        nan_mask = audit_matrix[existing_req_cols].isna().any(axis=1)
+        existing_req = [c for c in required_cols if c in audit_matrix.columns]
+        nan_mask = audit_matrix[existing_req].isna().any(axis=1)
         if nan_mask.any():
-            self.logger.warning(f"⚠️ [PhysAudit] 自动强制剔除 {nan_mask.sum()} 行包含关键字段 NaN 的样本。")
+            self.logger.warning(
+                f"⚠️ [PhysAudit] 自动强制剔除 {nan_mask.sum()} 行包含关键字段 NaN 的样本。"
+            )
             audit_matrix = audit_matrix[~nan_mask].copy()
 
-        self.logger.info(f"🔍 [PhysAudit] 启动全参数融合卡方检验。总样本数: {len(audit_matrix)}, 维度模式: {dim_mode}")
+        self.logger.info(
+            f"🔍 [PhysAudit] 启动物理一致性审计。样本: {len(audit_matrix)}, "
+            f"维度: {dim_mode}"
+        )
 
-        # 初始化总卡方值(Total Chi2)与总自由度(Total DoF)
+        # ── 策略路由 ──
+        strategy = getattr(cfg, "VALIDATION_STRATEGY", "chi2_upmask")
+        self.logger.info(f"🔬 [PhysAudit] 验证策略: {strategy}")
+
+        if strategy == "weighted_penalty":
+            audit_matrix = self._phys_audit_weighted_penalty(
+                audit_matrix, is_2d, is_physical_v
+            )
+            audit_matrix["pm_score"] = audit_matrix.get("pm_score", 0.0)
+            self._log_phys_audit_stats(audit_matrix)
+            return audit_matrix
+
+        # ── chi2 系列策略：共享运动学 / 视差 / RV 卡方 ──
         audit_matrix["total_integrated_chi2"] = 0.0
         audit_matrix["total_dof"] = 0
 
-        # =====================================================================
-        # 维度 1：动力学空间 (3D速度或2D自行)
-        # =====================================================================
+        self._compute_kine_chi2(audit_matrix, is_2d, is_physical_v)
+        self._compute_plx_chi2(audit_matrix, is_2d)
+        self._compute_rv_chi2(audit_matrix)
+
+        # ── CMD 维度 + 决策 ──
+        if strategy == "chi2_cmd_residual":
+            self._cmd_interpolator_residual(audit_matrix)
+            audit_matrix = self._decide_chi2(audit_matrix, p_threshold=0.05)
+        else:  # "chi2_upmask" (default)
+            self._cmd_upmask(audit_matrix)
+            audit_matrix = self._decide_chi2(audit_matrix, p_threshold=0.50)
+
+        # ── 共享：向后兼容字段 ──
+        dof_safe = audit_matrix["total_dof"].clip(lower=1)
+        audit_matrix["weighted_penalty"] = audit_matrix["total_integrated_chi2"] / dof_safe
+        audit_matrix["pm_score"] = audit_matrix["total_integrated_chi2"]
+
+        self._log_phys_audit_stats(audit_matrix)
+        if "id_str" in audit_matrix.columns:
+            audit_matrix.drop(columns=["id_str"], inplace=True)
+
+        # ── (保留) DuckDB 自动落盘桩 ──
+        try:
+            if hasattr(self, "db") and self.db is not None:
+                self.logger.info(
+                    "💾 [PhysAudit] 检测到活跃 DuckDB 连接（落盘桩，当前为 no-op）。"
+                )
+        except Exception as db_err:
+            self.logger.error(f"❌ [PhysAudit] DuckDB 落盘失败: {db_err}")
+        return audit_matrix
+
+    # =========================================================================
+    # chi2 共享维度计算
+    # =========================================================================
+
+    def _compute_kine_chi2(self, audit_matrix, is_2d, is_physical_v):
+        """计算动力学卡方（3D 速度 或 2D 自行马氏距离）。"""
         if is_physical_v and all(c in audit_matrix.columns for c in ["u", "v", "w"]):
             uvw_ref = self.get_param("UVW_REF")
             u_res = audit_matrix["u"] - uvw_ref[0]
             v_res = audit_matrix["v"] - uvw_ref[1]
             w_res = audit_matrix["w"] - uvw_ref[2]
-            u_error = self.get_param("U_ERROR")
-            v_error = self.get_param("V_ERROR")
-            w_error = self.get_param("W_ERROR")
-
-            # 3D 速度卡方 (DoF = 3)
-            kine_chi2 = (u_res / u_error)**2 + (v_res / v_error)**2 + (w_res / w_error)**2
-            audit_matrix["kine_chi2"] = kine_chi2  # 📥 写入最终表
-            audit_matrix["total_integrated_chi2"] += kine_chi2
-            audit_matrix["total_dof"] += 3
+            kine = (u_res / self.get_param("U_ERROR")) ** 2 \
+                 + (v_res / self.get_param("V_ERROR")) ** 2 \
+                 + (w_res / self.get_param("W_ERROR")) ** 2
+            dof = 3
         else:
-            # 2D 自行马氏卡方距离 (DoF = 2)
             pmra_ref = self.get_param("PMRA_REF")
             pmdec_ref = self.get_param("PMDEC_REF")
             pm_res = audit_matrix[["pmra", "pmdec"]].values - np.array([pmra_ref, pmdec_ref])
             pm_inv_cov = self.cluster_obj.pm_inv_cov
-            
-            pm_chi2 = np.einsum('ni,ij,nj->n', pm_res, pm_inv_cov, pm_res)
-            audit_matrix["kine_chi2"] = pm_chi2  # 📥 写入最终表
-            audit_matrix["total_integrated_chi2"] += pm_chi2
-            audit_matrix["total_dof"] += 2
+            kine = np.einsum("ni,ij,nj->n", pm_res, pm_inv_cov, pm_res)
+            dof = 2
 
-        # =====================================================================
-        # 维度 2：视差空间 (DoF = 1)
-        # =====================================================================
-        if not is_2d:
-            plx_error = self.get_param("PLX_ERROR", 1.0)
-            plx_chi2 = (audit_matrix["plx_residual"] / plx_error)**2
-            audit_matrix["plx_chi2"] = plx_chi2  # 📥 写入最终表
-            audit_matrix["total_integrated_chi2"] += plx_chi2
-            audit_matrix["total_dof"] += 1
+        audit_matrix["kine_chi2"] = kine
+        audit_matrix["total_integrated_chi2"] += kine
+        audit_matrix["total_dof"] += dof
 
-        # =====================================================================
-        # 维度 3：视向速度空间 (动态激活, DoF = 1)
-        # =====================================================================
-        if "rv" in audit_matrix.columns:
-            rv_err = self.get_param("RV_ERROR", 5.0)
-            rv_ref = self.get_param("RV_REF", 0.0)
-            has_rv_mask = audit_matrix["rv"].notna()
-            if has_rv_mask.any():
-                rv_chi2 = ((audit_matrix.loc[has_rv_mask, "rv"] - rv_ref) / rv_err)**2
-                audit_matrix.loc[has_rv_mask, "rv_chi2"] = rv_chi2  # 📥 仅对有 RV 观测的行写入
-                audit_matrix.loc[has_rv_mask, "total_integrated_chi2"] += rv_chi2
-                audit_matrix.loc[has_rv_mask, "total_dof"] += 1
+    def _compute_plx_chi2(self, audit_matrix, is_2d):
+        """计算视差卡方 (DoF=1)。"""
+        if is_2d:
+            return
+        plx_err = self.get_param("PLX_ERROR", 1.0)
+        plx_chi2 = (audit_matrix["plx_residual"] / plx_err) ** 2
+        audit_matrix["plx_chi2"] = plx_chi2
+        audit_matrix["total_integrated_chi2"] += plx_chi2
+        audit_matrix["total_dof"] += 1
 
-        # =====================================================================
-        # 维度 4：测光演化 CMD 空间 (DoF = 2) - 【外部星表注入与多轨概率分类版】
-        # =====================================================================
-        if all(c in audit_matrix.columns for c in ["ra", "dec", "color", "mag"]):
-            audit_matrix["upmask_prob"] = 0.0
-            upmask_cols = ["ra", "dec", "color", "mag"]
-            
-            # 1. 从外部注入已知恒星 CSV 库
-            
-            # ext_csv_path = Path(f"D:/git/astro-research/research/hunt24-audit/data/raw/gaia_archive/"f"{self.cluster_id.lower()}_pyUPMASK.csv")
-            ext_csv_path = Path(cfg.GAIA_INPUT_DIR) /  f"{self.cluster_id.lower()}_pyUPMASK.csv"
-            self.logger.info(f"📥 [PhysAudit] 尝试加载外部星表: {ext_csv_path}")
-            ext_gaia_ids = set()
-            
-            if ext_csv_path.exists():
-                try:
-                    ext_df = pd.read_csv(ext_csv_path)
-                    id_col = next((c for c in ext_df.columns if 'source' in c.lower()), None)
-                    if id_col:
-                        ext_gaia_ids = set(ext_df[id_col].dropna().astype(str).unique())
-                        self.logger.info(f"📥 [PhysAudit] 成功导入外部星表，共加载 {len(ext_gaia_ids)} 颗基准恒星。")
-                    else:
-                        self.logger.warning("⚠️ [PhysAudit] 外部 CSV 文件未找到包含 'id' 关键字的列。")
-                except Exception as csv_err:
-                    self.logger.error(f"❌ [PhysAudit] 加载外部星表失败: {str(csv_err)}")
-            else:
-                self.logger.warning(f"⚠️ [PhysAudit] 未找到外部星表文件: {ext_csv_path}。")
+    def _compute_rv_chi2(self, audit_matrix):
+        """计算视向速度卡方 (DoF=1)，仅对有 RV 观测的行生效。"""
+        if "rv" not in audit_matrix.columns:
+            return
+        rv_err = self.get_param("RV_ERROR", 5.0)
+        rv_ref = self.get_param("RV_REF", 0.0)
+        has_rv = audit_matrix["rv"].notna()
+        if not has_rv.any():
+            return
+        rv_chi2 = ((audit_matrix.loc[has_rv, "rv"] - rv_ref) / rv_err) ** 2
+        audit_matrix.loc[has_rv, "rv_chi2"] = rv_chi2
+        audit_matrix.loc[has_rv, "total_integrated_chi2"] += rv_chi2.values
+        audit_matrix.loc[has_rv, "total_dof"] += 1
 
-            # 生成内外星表的布尔掩码
-            audit_matrix['id_str'] = audit_matrix['id'].astype(str)
-            is_in_external = audit_matrix['id_str'].isin(ext_gaia_ids)
+    # =========================================================================
+    # CMD 子策略
+    # =========================================================================
 
-            # 2. 🎯 核心过滤：剔除缺失测光数据的样本
-            valid_cmd_mask = audit_matrix[upmask_cols].notna().all(axis=1)
-            
-            if valid_cmd_mask.any():
-                valid_df = audit_matrix[valid_cmd_mask].copy()
-                valid_indices = valid_df.index
-                
-                # 动态加载 pyUPMASK
-                # pyupmask_dir = r"D:/git/astro-research/research/hunt24-audit/modules/pyUPMASK"
-                # if pyupmask_dir not in sys.path: sys.path.append(pyupmask_dir)
-                # import modules.pyUPMASK as upmask_mod
+    def _cmd_upmask(self, audit_matrix):
+        """CMD 维度：pyUPMASK 聚类概率 → χ² (现有默认策略)。"""
+        if not all(c in audit_matrix.columns for c in ["ra", "dec", "color", "mag"]):
+            return
 
-                n_iterations = int(self.get_param("UPMASK_ITERATIONS", 20))
-                max_clusters = int(self.get_param("UPMASK_MAX_CLUSTERS", 5))
+        audit_matrix["upmask_prob"] = 0.0
+        upmask_cols = ["ra", "dec", "color", "mag"]
 
-                probs_all = upmask_mod.dataProcess(
-                    ID=valid_indices.values, 
-                    xy=valid_df[["ra", "dec"]].values,
-                    data=valid_df[["color", "mag"]].values,
-                    data_err=valid_df[["color_err", "mag_err"]].values,
-                    verbose=0, 
-                    OL_runs=n_iterations, 
-                    parallel_flag=False, 
-                    parallel_procs=1,
-                    resampleFlag=True, 
-                    PCAflag=False, 
-                    PCAdims=2, 
-                    GUMM_flag=False, 
-                    GUMM_perc=None,
-                    KDEP_flag=False, 
-                    IL_runs=5, 
-                    N_membs=10, 
-                    N_cl_max=max_clusters,
-                    clust_method='KMeans', 
-                    clRjctMethod='rkfunc', 
-                    C_thresh=0.05, 
-                    cl_method_pars={}
-                )
-                
-                upmask_prob = np.mean(probs_all, axis=0) if len(probs_all) > 1 else probs_all[0]
-                audit_matrix.loc[valid_indices, "upmask_prob"] = upmask_prob
-                
-                # 计算全量样本的卡方残差
-                cmd_chi2 = -2.0 * np.log(upmask_prob + 1e-10)
-                
-                if "color_excess" in audit_matrix.columns and "color_excess_sigma" in audit_matrix.columns:
-                    outlier_mask = np.abs(audit_matrix["color_excess"]) > (5.0 * audit_matrix["color_excess_sigma"])
-                    sub_outlier = outlier_mask[valid_cmd_mask]
-                    cmd_chi2[sub_outlier] += 1.0
+        # 加载外部星表
+        ext_csv_path = Path(cfg.GAIA_INPUT_DIR) / f"{self.cluster_id.lower()}_pyUPMASK.csv"
+        self.logger.info(f"📥 [PhysAudit] 尝试加载外部星表: {ext_csv_path}")
+        ext_gaia_ids = set()
+        if ext_csv_path.exists():
+            try:
+                ext_df = pd.read_csv(ext_csv_path)
+                id_col = next((c for c in ext_df.columns if "source" in c.lower()), None)
+                if id_col:
+                    ext_gaia_ids = set(ext_df[id_col].dropna().astype(str).unique())
+                    self.logger.info(
+                        f"📥 [PhysAudit] 外部星表加载成功: {len(ext_gaia_ids)} 颗基准星。"
+                    )
+            except Exception as e:
+                self.logger.error(f"❌ [PhysAudit] 外部星表加载失败: {e}")
 
-                # 保存原有的测光残差值以便后续追溯
-                # TODO: 考虑将 cmd_residual 与 cmd_chi2 分开存储，避免混淆
-                audit_matrix.loc[valid_cmd_mask, "cmd_residual"] = cmd_chi2
-                audit_matrix.loc[valid_cmd_mask, "cmd_chi2"] = cmd_chi2  # 📥 写入新规卡方列
+        audit_matrix["id_str"] = audit_matrix["id"].astype(str)
+        is_in_external = audit_matrix["id_str"].isin(ext_gaia_ids)
 
-                # 🎯 【关键微调】：构建仅属于管线侧且测光完整的掩码 (PG Only & Valid CMD)
-                pg_only_valid_mask = (~is_in_external) & valid_cmd_mask
-                
-                if pg_only_valid_mask.any():
-                    # 仅让 pg_only 的恒星累加测光卡方值
-                    audit_matrix.loc[pg_only_valid_mask, "total_integrated_chi2"] += audit_matrix.loc[pg_only_valid_mask, "cmd_residual"]
-                    # 仅让 pg_only 的恒星 DoF 增加 1
-                    audit_matrix.loc[pg_only_valid_mask, "total_dof"] += 1
-                    
-        # =====================================================================
-        # 5. 统一卡方假设检验决策
-        # =====================================================================
-        audit_matrix["global_cluster_probability"] = chi2.sf(
-            audit_matrix["total_integrated_chi2"], 
-            audit_matrix["total_dof"]
+        valid_cmd = audit_matrix[upmask_cols].notna().all(axis=1)
+        if not valid_cmd.any():
+            return
+
+        valid_df = audit_matrix[valid_cmd].copy()
+        valid_idx = valid_df.index
+        n_iter = int(self.get_param("UPMASK_ITERATIONS", 20))
+        max_cl = int(self.get_param("UPMASK_MAX_CLUSTERS", 5))
+
+        probs_all = upmask_mod.dataProcess(
+            ID=valid_idx.values,
+            xy=valid_df[["ra", "dec"]].values,
+            data=valid_df[["color", "mag"]].values,
+            data_err=valid_df[["color_err", "mag_err"]].values,
+            verbose=0, OL_runs=n_iter, parallel_flag=False, parallel_procs=1,
+            resampleFlag=True, PCAflag=False, PCAdims=2,
+            GUMM_flag=False, GUMM_perc=None, KDEP_flag=False,
+            IL_runs=5, N_membs=10, N_cl_max=max_cl,
+            clust_method="KMeans", clRjctMethod="rkfunc",
+            C_thresh=0.05, cl_method_pars={},
+        )
+        upmask_prob = np.mean(probs_all, axis=0) if len(probs_all) > 1 else probs_all[0]
+        audit_matrix.loc[valid_idx, "upmask_prob"] = upmask_prob
+
+        cmd_chi2 = -2.0 * np.log(upmask_prob + 1e-10)
+        if "color_excess" in audit_matrix.columns and "color_excess_sigma" in audit_matrix.columns:
+            outlier = np.abs(audit_matrix["color_excess"]) > (5.0 * audit_matrix["color_excess_sigma"])
+            cmd_chi2[outlier[valid_cmd].values] += 1.0
+
+        audit_matrix.loc[valid_idx, "cmd_residual"] = cmd_chi2
+        audit_matrix.loc[valid_idx, "cmd_chi2"] = cmd_chi2
+
+        # 仅 PG Only 星累加 CMD 卡方
+        pg_only_valid = (~is_in_external) & valid_cmd
+        if pg_only_valid.any():
+            audit_matrix.loc[pg_only_valid, "total_integrated_chi2"] += audit_matrix.loc[pg_only_valid, "cmd_residual"]
+            audit_matrix.loc[pg_only_valid, "total_dof"] += 1
+
+    def _cmd_interpolator_residual(self, audit_matrix):
+        """CMD 维度：等龄线插值残差 → χ² (实验策略 A)。
+
+        使用 StarCluster 的 cmd_interpolator，与 backup 版等价但输出为 χ² 形式。
+        修复了 backup 版 BP/RP 缺距离模数的 bug（已在 _setup_physical_constraints 中修正）。
+        """
+        if not all(c in audit_matrix.columns for c in ["color", "mag"]):
+            return
+
+        cmd_interp = self.cluster_obj.cmd_interpolator
+        c_min, c_max = self.cluster_obj.cmd_color_bounds
+
+        if cmd_interp is None:
+            self.logger.warning("⚠️ [PhysAudit] cmd_interpolator 未就绪，跳过 CMD 卡方。")
+            return
+
+        raw_res = audit_matrix["mag"].values - cmd_interp(audit_matrix["color"].values)
+        # 非对称修正：联星方向（负残差）权重减半；超出色指数范围 ×1.5
+        cmd_res = np.where(raw_res < 0, -raw_res * 0.5, raw_res)
+        out_mask = (audit_matrix["color"] < c_min) | (audit_matrix["color"] > c_max)
+        cmd_res[out_mask] *= 1.5
+
+        cmd_dev = self.get_param("CMD_DEV", 0.8)
+        cmd_chi2 = (cmd_res / cmd_dev) ** 2  # (residual/σ)² → χ² 形式
+
+        audit_matrix["cmd_residual"] = cmd_res
+        audit_matrix["cmd_chi2"] = cmd_chi2
+        audit_matrix["total_integrated_chi2"] += cmd_chi2
+        audit_matrix["total_dof"] += 1  # DoF=1 for CMD interpolator
+
+        self.logger.info(
+            f"  ⚡ [PhysAudit] CMD 插值残差 χ² 完成。CMD_DEV={cmd_dev} mag, "
+            f"平均残差: {cmd_res.mean():.3f} mag, 平均 χ²: {cmd_chi2.mean():.3f}"
         )
 
-        # 核心筛选：卡掉整体属于星团概率 < 0.50 的恒星
-        audit_matrix["is_phys_consistent"] = audit_matrix["global_cluster_probability"] >= 0.50
+    # =========================================================================
+    # chi2 统一决策
+    # =========================================================================
 
-        # 6. 详细统计报告输出
-        self.logger.info("📊 [全参数融合卡方检验报告]:")
+    def _decide_chi2(self, audit_matrix, p_threshold=0.50):
+        """统一卡方假设检验决策。"""
+        from scipy.stats import chi2
+
+        dof_safe = audit_matrix["total_dof"].clip(lower=1)
+        audit_matrix["global_cluster_probability"] = chi2.sf(
+            audit_matrix["total_integrated_chi2"], dof_safe
+        )
+        audit_matrix["is_phys_consistent"] = (
+            audit_matrix["global_cluster_probability"] >= p_threshold
+        )
+
+        self.logger.info(f"📊 [卡方检验报告] p 阈值 = {p_threshold}:")
         for dof in sorted(audit_matrix["total_dof"].unique()):
             dof_mask = audit_matrix["total_dof"] == dof
-            if not dof_mask.any(): continue
-            
-            chi2_cutoff = chi2.ppf(0.50, dof)
+            if not dof_mask.any():
+                continue
+            chi2_cutoff = chi2.ppf(p_threshold, max(int(dof), 1))
             passed = (dof_mask & audit_matrix["is_phys_consistent"]).sum()
             total = dof_mask.sum()
-            
             self.logger.info(
-                f"  -> 融合总自由度 DoF = {dof}: 临界卡方阈值 = {chi2_cutoff:.3f}, 通过率 = {passed}/{total} ({passed/total*100:.1f}%)"
+                f"  -> DoF={int(dof)}: χ²临界={chi2_cutoff:.3f}, "
+                f"通过={passed}/{total} ({passed/total*100:.1f}%)"
             )
+        return audit_matrix
 
-        # 为保证向下兼容，保留旧评分字段的填充
-        audit_matrix["weighted_penalty"] = audit_matrix["total_integrated_chi2"] / audit_matrix["total_dof"]
-        audit_matrix["pm_score"] = audit_matrix["total_integrated_chi2"] 
+    # =========================================================================
+    # 实验策略 B：启发式加权惩罚分（修正 backup 版 bug）
+    # =========================================================================
 
-        self._log_phys_audit_stats(audit_matrix)
-        
-        # 清理临时列
-        if 'id_str' in audit_matrix.columns:
-            audit_matrix.drop(columns=['id_str'], inplace=True)
+    def _phys_audit_weighted_penalty(self, audit_matrix, is_2d, is_physical_v):
+        """启发式加权惩罚分验证（修正 backup 版）。
 
-        # =====================================================================
-        # 📥 【新规自动化落盘】保持与原管线一致的 DuckDB 持久化逻辑
-        # =====================================================================
-        try:
-            if hasattr(self, 'db') and self.db is not None:
-                self.logger.info("💾 [PhysAudit] 检测到活跃的 DuckDB 连接，正在同步包含新卡方参数的数据...")
-                
-                # 🎯 修复：直接让 DuckDB 嗅探当前作用域下的 Python 变量名 audit_matrix
-                # self.db.execute("CREATE OR REPLACE TABLE master_m45_hunt_5d_dbscan AS SELECT * FROM audit_matrix")
-                # self.db.tag_master_table()
-                
-                self.logger.info("💾 [PhysAudit] ✅ 成功！新卡方参数已无损同步至表 [master_m45_hunt_5d_dbscan]。")        
-        except Exception as db_err:
-            self.logger.error(f"❌ [PhysAudit] 自动写入 DuckDB 失败，报错原因: {str(db_err)}")
+        与 backup 版的核心差异：
+          - 运动学改为马氏距离（修复了 backup 未使用 pm_corr 的问题）
+          - CMD 使用已修正距离模数的 StarCluster.cmd_interpolator
+          - 其余维度与 backup 逻辑一致
+        """
+        penalties: dict = {}
+        audit_matrix["cmd_residual"] = np.nan
+
+        # ── A. 动力学 ──
+        if is_physical_v and all(c in audit_matrix.columns for c in ["u", "v", "w"]):
+            v_ref = self.get_param("UVW_REF", np.zeros(3))
+            u_res = audit_matrix["u"] - v_ref[0]
+            v_res = audit_matrix["v"] - v_ref[1]
+            w_res = audit_matrix["w"] - v_ref[2]
+            penalties["pm"] = np.sqrt(
+                (u_res / self.get_param("U_ERROR", 2.5)) ** 2
+                + (v_res / self.get_param("V_ERROR", 1.8)) ** 2
+                + (w_res / self.get_param("W_ERROR", 1.2)) ** 2
+            )
+        else:
+            pmra_disp = self.get_param("PMRA_DISPERSION", 3.0)
+            pmdec_disp = self.get_param("PMDEC_DISPERSION", 3.0)
+            penalties["pm"] = np.sqrt(
+                (audit_matrix["pmra_residual"] / pmra_disp) ** 2
+                + (audit_matrix["pmdec_residual"] / pmdec_disp) ** 2
+            )
+        audit_matrix["pm_score"] = penalties["pm"]
+
+        # ── B. 视差 (仅 3D+) ──
+        if not is_2d:
+            plx_err = self.get_param("PLX_ERROR", 0.5)
+            penalties["plx"] = audit_matrix["plx_residual"] / plx_err
+
+        # ── C. 视向速度 ──
+        if "rv" in audit_matrix.columns:
+            rv_ref = self.get_param("RV_REF", 0.0)
+            rv_err = self.get_param("RV_ERROR", 5.0)
+            rv_res = (audit_matrix["rv"] - rv_ref).abs()
+            penalties["rv"] = rv_res / rv_err
+
+        # ── D. CMD (使用已修正距离模数的 StarCluster 插值器) ──
+        if self.cluster_obj.cmd_interpolator is not None \
+           and all(c in audit_matrix.columns for c in ["color", "mag"]):
+            raw_res = audit_matrix["mag"].values - self.cluster_obj.cmd_interpolator(
+                audit_matrix["color"].values
+            )
+            cmd_res = np.where(raw_res < 0, -raw_res * 0.5, raw_res)
+            c_min, c_max = self.cluster_obj.cmd_color_bounds
+            out_mask = (audit_matrix["color"] < c_min) | (audit_matrix["color"] > c_max)
+            cmd_res[out_mask] *= 1.5
+            audit_matrix["cmd_residual"] = np.abs(cmd_res)
+            cmd_dev = self.get_param("CMD_DEV", 0.8)
+            penalties["cmd"] = np.abs(cmd_res) / cmd_dev
+
+        # ── 归一化 + 硬门槛 ──
+        fill_vals = {"pm": 2.5, "plx": 2.5, "rv": 1.0, "cmd": 2.5}
+        for key in ["pm", "plx", "rv", "cmd"]:
+            col = f"{key}_score"
+            if key in penalties:
+                audit_matrix[col] = np.clip(penalties[key], 0, 2.5).fillna(fill_vals[key])
+            elif col not in audit_matrix.columns:
+                audit_matrix[col] = fill_vals[key]
+
+        kine_limit = self.get_param("KINE_SCORE_LIMIT", 2.0)
+        kine_valid = audit_matrix["pm_score"] < kine_limit
+        if not is_2d:
+            kine_valid &= audit_matrix["plx_score"] < kine_limit
+        if "rv" in audit_matrix.columns:
+            kine_valid &= audit_matrix["rv"].isna() | (audit_matrix["rv_score"] < kine_limit)
+
+        # ── 加权融合 ──
+        base_w = cfg.PHYS_VERIFY_WEIGHTS.copy()
+        if "rv" in penalties:
+            base_w["rv"] = 0.2
+        active = [k for k in ["pm", "plx", "rv", "cmd"] if k in penalties or k == "pm"]
+        w = {k: base_w[k] for k in active if k in base_w}
+        w_sum = sum(w.values())
+        w = {k: v / w_sum for k, v in w.items()}
+
+        audit_matrix["weighted_penalty"] = sum(
+            audit_matrix[f"{k}_score"] * w[k] for k in w
+        )
+        score_valid = audit_matrix["weighted_penalty"] < cfg.PHYS_VERIFY_PENALTY_LIMIT
+        audit_matrix["is_phys_consistent"] = kine_valid & score_valid
+
+        self.logger.info(
+            f"  ⚡ [WeightedPenalty] 动力学硬门槛={kine_limit}, "
+            f"加权阈值={cfg.PHYS_VERIFY_PENALTY_LIMIT}, "
+            f"通过={audit_matrix['is_phys_consistent'].sum()}/{len(audit_matrix)}"
+        )
         return audit_matrix
 
     def _log_phys_audit_stats(self, df):

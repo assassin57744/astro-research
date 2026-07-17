@@ -53,6 +53,12 @@ PHYS_LIT_PM_LIMIT = 1.5
 PHYS_LIT_CMD_LIMIT = 3.0
 REDDENING_RATIO_BP_RP = 0.52  # E(BP-RP) / A_G 比例系数 (基于 Gaia DR3 经验红化律)
 
+# 物理验证策略选择 (Physical Validation Strategy)
+#   "chi2_upmask"       — 默认：卡方假设检验 + pyUPMASK 聚类 CMD, p ≥ 0.50
+#   "chi2_cmd_residual" — 实验 A：卡方假设检验 + 等龄线插值残差 CMD, p ≥ 0.05
+#   "weighted_penalty"  — 实验 B：启发式加权惩罚分（修正 BP/RP 距离模数 bug 后的 backup 版本）
+VALIDATION_STRATEGY = "chi2_upmask"
+
 
 # =================================================================
 # 3. 命名规范、模板与适配器 (Naming & Adapters)
