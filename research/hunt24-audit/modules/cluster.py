@@ -121,16 +121,23 @@ class StarCluster:
             return np.eye(2)
 
     def _setup_cmd_constraints(self):
-        """解析理论模型文件，应用距离模数平移并构建 CMD 插值器"""
+        """解析理论模型文件，应用距离模数平移并构建 CMD 插值器。
+
+        从 validator._setup_physical_constraints 迁移合并而来，作为星团
+        物理模型的唯一权威构建入口。
+        """
         iso_file = getattr(self, "iso_file", None)
         if not iso_file:
             self.logger.warning(f"⚠️ [Model] 未配置 ISO_FILE，跳过测光演化模型构建。")
             return
 
-        # 路径解析：支持绝对路径及 data/raw/oapd 相对路径
+        # 路径解析：优先使用 DB 的 raw 目录，否则降级为 config.DATA_DIR
         iso_path = Path(iso_file)
         if not iso_path.is_absolute():
-            iso_path = cfg.DATA_DIR / "raw" / "oapd" / iso_file
+            if self.db is not None:
+                iso_path = self.db.dirs["raw"] / "oapd" / iso_file
+            else:
+                iso_path = cfg.DATA_DIR / "raw" / "oapd" / iso_file
 
         if not iso_path.exists():
             self.logger.error(f"❌ [Model] 找不到等龄线模型文件: {iso_path}")
@@ -138,29 +145,60 @@ class StarCluster:
 
         self.logger.info(f"🧬 [Model] 正在解析等龄线模型: {iso_path.name}")
         try:
-            # 1. 稳健读取：提取注释行末尾作为表头
-            with open(iso_path, "r") as f:
-                header_line = ""
+            # 1. 稳健读取：提取最后一行包含 Gaia 波段名的注释作为表头
+            col_names = None
+            with open(iso_path, "r", encoding="utf-8") as f:
                 for line in f:
-                    if line.startswith("#"): header_line = line
-                    else: break
-            
-            cols = header_line.lstrip("#").split()
-            df_iso = pd.read_csv(iso_path, sep=r"\s+", comment="#", names=cols)
+                    if line.startswith("#"):
+                        if "Gmag" in line and "G_BPmag" in line:
+                            col_names = line.lstrip("#").strip().split()
+                    elif line.strip():
+                        break
 
-            # 2. 识别 Gaia 波段字段
-            g_col = next(c for c in df_iso.columns if c.lower() in ["gmag", "g"])
-            bp_col = next(c for c in df_iso.columns if c.lower() in ["g_bpmag", "bpmag"])
-            rp_col = next(c for c in df_iso.columns if c.lower() in ["g_rpmag", "rpmag"])
+            if col_names:
+                self.isochrone_df = pd.read_csv(
+                    iso_path, sep=r"\s+", comment="#", names=col_names,
+                )
+            else:
+                self.isochrone_df = pd.read_csv(iso_path, sep=r"\s+", comment="#")
+
+            self.logger.info(
+                f"✅ [Model] 成功加载等龄线模型 ({len(self.isochrone_df)} 演化步长)"
+            )
+
+            # 2. 动态识别 Gaia 测光波段字段 (兼容多种 PARSEC 版本表头)
+            col_map = {}
+            for col in self.isochrone_df.columns:
+                cl = col.lower()
+                if cl in ["gmag", "g"]:
+                    col_map["G"] = col
+                if cl in ["g_bpmag", "bpmag", "bp"]:
+                    col_map["BP"] = col
+                if cl in ["g_rpmag", "rpmag", "rp"]:
+                    col_map["RP"] = col
+
+            if len(col_map) < 3:
+                self.logger.error(
+                    f"❌ [Model] 等龄线文件波段缺失 (已识别: {col_map})"
+                )
+                return
 
             # 3. 物理空间平移 (距离模数 + 红化修正)
             dist_pc = getattr(self, "distance_pc", 100.0)
             ext_ag = getattr(self, "ext_ag", 0.0)
-            ebprp = getattr(self, "e_bp_rp", 0.0)
-            
+            ebprp = getattr(self, "e_bp_rp", None)
+
+            # 🧪 增强：若 E_BP_RP 缺失，根据 EXT_AG 按经验比例自动估算
+            if ebprp is None:
+                ebprp = ext_ag * cfg.REDDENING_RATIO_BP_RP
+
             dist_mod = 5.0 * np.log10(dist_pc) - 5.0
-            model_g = df_iso[g_col].values + dist_mod + ext_ag
-            model_color = (df_iso[bp_col] - df_iso[rp_col]).values + ebprp
+            model_g = self.isochrone_df[col_map["G"]].values + dist_mod + ext_ag
+            model_color = (
+                self.isochrone_df[col_map["BP"]].values
+                - self.isochrone_df[col_map["RP"]].values
+                + ebprp
+            )
 
             # 4. 构建单调三次样条插值器
             sort_idx = np.argsort(model_color)
@@ -169,9 +207,16 @@ class StarCluster:
 
             self.cmd_color_bounds = (float(u_color.min()), float(u_color.max()))
             self.cmd_interpolator = interp1d(
-                u_color, u_g, kind="cubic", bounds_error=False, fill_value="extrapolate"
+                u_color,
+                u_g,
+                kind="cubic",
+                bounds_error=False,
+                fill_value="extrapolate",
             )
-            self.logger.info(f"✅ [Model] CMD DNA 构建完成。有效区间: {self.cmd_color_bounds}")
+            self.logger.info(
+                f"✅ [Model] CMD DNA 构建完成。"
+                f"色指数区间: ({self.cmd_color_bounds[0]:.4f}, {self.cmd_color_bounds[1]:.4f})"
+            )
         except Exception as e:
-            self.logger.error(f"❌ [Model] 构建 CMD 插值器失败: {e}")
+            self.logger.error(f"❌ [Model] 构建 CMD 插值器失败: {e}", exc_info=True)
             self.cmd_interpolator = None
