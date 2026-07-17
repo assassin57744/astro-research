@@ -188,14 +188,18 @@ def build_summary(
     matched = a_stats.get("Matched", 0)
     ref_missed = a_stats.get("Ref Only", 0)
     ref_total = ref_missed + matched
+    p_stats = v_all_audit_data.get("stats", {})
 
     summary = {
         "cluster": target_cluster_id,
         "mode": mode.upper(),
         "algo": algo.upper(),
-        "candidates": v_all_audit_data.get("stats", {}).get("n_candidates", 0),
-        "golden": v_all_audit_data.get("stats", {}).get("n_golden", 0),
-        "seed_core": v_all_audit_data.get("stats", {}).get("n_seed_core", 0),
+        "candidates": p_stats.get("n_candidates", 0),
+        "golden": p_stats.get("n_golden", 0),
+        "seed_core": p_stats.get("n_seed_core", 0),
+        "seeds_raw": p_stats.get("raw_count", 0),
+        "seeds_clean": p_stats.get("clean_count", 0),
+        "seeds_refined": p_stats.get("refined_count", 0),
         "matched": matched,
         "pg_only": a_stats.get("PG Only", 0),
         "ref_only": a_stats.get("Ref Only", 0),
@@ -304,29 +308,31 @@ def render_all_modes_comparison(
 
     all_results.sort(key=lambda x: x["mode"])
 
-    logger.info("═" * 125)
+    logger.info("═" * 155)
     logger.info(
         f" 🏆 [全模式算法绩效汇总对照表] - 目标星团: {all_results[0]['cluster']}"
     )
-    logger.info("-" * 125)
+    logger.info("-" * 155)
 
     header = (
-        f"{'MODE':<8} | {'ALGO':<8} | {'CANDIDATES':<12} | {'CORE':<6} | {'GOLDEN':<10} | {'MATCHED':<10} | "
+        f"{'MODE':<8} | {'ALGO':<8} | {'SEEDS_RAW':<10} | {'SEEDS_CLN':<10} | {'SEEDS_REF':<10} | "
+        f"{'CANDIDATES':<12} | {'GOLDEN':<10} | {'MATCHED':<10} | "
         f"{'PG ONLY':<10} | {'RECALL':<12} | {'NEW DISCOVERY':<15} | {'PRECISION'}"
     )
     logger.info(header)
-    logger.info("-" * 125)
+    logger.info("-" * 155)
 
     for res in all_results:
         line = (
-            f"{res['mode']:<8} | {res['algo']:<8} | {res['candidates']:<12} | {res['seed_core']:<6} | "
-            f"{res['golden']:<10} | "
+            f"{res['mode']:<8} | {res['algo']:<8} | {res['seeds_raw']:<10} | {res['seeds_clean']:<10} | "
+            f"{res['seeds_refined']:<10} | "
+            f"{res['candidates']:<12} | {res['golden']:<10} | "
             f"{res['matched']:<10} | {res['pg_only']:<10} | {res['recall']:>10.2f}% | "
             f"{res['new_finds']:<15} | {res['precision']:>9.2f}%"
         )
         logger.info(line)
 
-    logger.info("═" * 125)
+    logger.info("═" * 155)
     logger.info(
         " 💡 注: RECALL 基于文献已知成员的找回率; PRECISION 基于算法独有源通过物理深度审计的比例。\n"
     )
