@@ -336,10 +336,6 @@ class AstroWorkflow:
             else df_raw.dropna().copy()
         )
 
-        df_tag = df_seeds[[cfg.STD_COLS["ID"]]].copy()
-        df_tag["seed_type"] = "raw_seed"
-        self.db.tag_master_table(ctx.state.master_table, df_tag)
-
         self.logger.info(f"✅ [Process] 种子星提取完成，有效样本: {len(df_seeds)} 颗")
 
         df_ext = self._transform_and_bridge_features(
@@ -347,6 +343,12 @@ class AstroWorkflow:
         )
         df_clean = self._defensive_nan_purge(df_ext, ctx.state.required_features, label="Seeds")
         ctx.state.seed_stats["clean_count"] = len(df_clean)
+
+        # 🎯 标签回写必须在特征清洗之后，确保只标记最终实际使用的种子
+        df_tag = df_clean[[cfg.STD_COLS["ID"]]].copy()
+        df_tag["seed_type"] = "raw_seed"
+        self.db.tag_master_table(ctx.state.master_table, df_tag)
+
         return df_clean
 
     def _transform_and_bridge_features(
@@ -447,10 +449,11 @@ class AstroWorkflow:
 
         cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
         cluster_cfg["id"] = ctx.cluster_id
+        cluster_cfg["dim_mode"] = ctx.feature_space
 
-        engine = PriorGMM(params=self, ctx_cluster=cluster_cfg)
-        engine.fit(df_target_final, df_seeds_final, ctx.state.required_features)
-        return engine.predict(df_target_final, ctx.state.required_features)
+        engine = PriorGMM(config=cluster_cfg)
+        model_params = engine.fit(df_seeds_final, df_target_final)
+        return engine.predict(df_target_final, model_params)
 
     def _run_experimental_pipeline(
         self, ctx: RunContext, df_target_final: pd.DataFrame, df_seeds_final: pd.DataFrame
@@ -466,7 +469,7 @@ class AstroWorkflow:
         cluster_cfg["id"] = ctx.cluster_id
         extractor = ClusterSeedExtractor(cluster_profile=cluster_cfg)
         df_seeds_refined = extractor.extract_seeds(
-            field_stars_df=df_seeds_final,
+            seed_field_df=df_seeds_final,
             features=ctx.state.required_features,
         )
 
@@ -474,6 +477,14 @@ class AstroWorkflow:
             raise ValueError("❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！")
         ctx.state.seed_stats["refined_count"] = len(df_seeds_refined)
         self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_refined)} 颗。")
+
+        # 将精炼种子标记回写至 Master 表
+        df_tag_refined = df_seeds_refined[[cfg.STD_COLS["ID"]]].copy()
+        df_tag_refined["seed_type"] = "refined_seed"
+        self.db.tag_master_table(ctx.state.master_table, df_tag_refined)
+        self.logger.info(
+            f"📥 [Compute] 已将 {len(df_tag_refined)} 颗精炼种子标记同步至 Master 表。"
+        )
 
         strategy_params = (
             cfg.CLUSTERS[ctx.cluster_id.upper()]
@@ -487,6 +498,7 @@ class AstroWorkflow:
         for key in ("eps", "min_samples", "sigma_cutoff"):
             if key in ctx.algo_params:
                 strategy_kwargs[key] = ctx.algo_params[key]
+                self.logger.info(f"✅ [Compute] 已设置策略参数 [{key}]")
 
         from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
         from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
@@ -535,19 +547,26 @@ class AstroWorkflow:
                 SELECT 
                     count(*) FILTER (WHERE is_golden = TRUE) AS n_golden,
                     count(*) FILTER (WHERE is_candidate = TRUE) AS n_candidates,
-                    count(*) FILTER (WHERE seed_type = 'raw_seed') AS n_seeds,
+                    count(*) FILTER (WHERE seed_type = 'refined_seed') AS n_seeds_refined,
                     count(*) FILTER (WHERE density_status = 'core') AS n_seed_core,
                     count(*) FILTER (WHERE density_status = 'noise') AS n_seed_noise
                 FROM {ctx.state.master_table}
             """
             stats = self.db.execute(stats_sql).fetchone()
-            n_golden, n_candidates, n_seeds, n_seed_core, n_seed_noise = stats
+            n_golden, n_candidates, n_seeds_refined, n_seed_core, n_seed_noise = stats
+
+            # 种子计数从 seed_stats 取（不受 tag_master_table UPDATE 限制影响）
+            sd = ctx.state.seed_stats
+            n_seeds_raw = sd.get("raw_count", 0)
+            n_seeds_clean = sd.get("clean_count", 0)
 
             self.logger.info("=" * 60)
             self.logger.info(f"📊 [Process] [{ctx.cluster_id}] 后处理标签同步完成:")
             self.logger.info(f"  🔹 高置信金种子星 (is_golden): {n_golden} 颗")
             self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {n_candidates} 颗")
-            self.logger.info(f"  🔹 原始输入种子星 (Seeds): {n_seeds} 颗")
+            self.logger.info(f"  🔹 原始种子星目录总数 (Raw): {n_seeds_raw} 颗")
+            self.logger.info(f"  🔹 有效输入种子星 (Clean): {n_seeds_clean} 颗")
+            self.logger.info(f"  🔹 DBSCAN 精炼种子星 (Refined): {n_seeds_refined} 颗")
             self.logger.info(f"  🔹 种子集核心样本 (Core): {n_seed_core} 颗")
             self.logger.info("=" * 60)
 
@@ -563,9 +582,11 @@ class AstroWorkflow:
                 "stats": {
                     "n_golden": n_golden,
                     "n_candidates": n_candidates,
-                    "n_seeds": n_seeds,
+                    "n_seeds_raw": n_seeds_raw,
+                    "n_seeds_clean": n_seeds_clean,
                     "n_seed_core": n_seed_core,
                     "n_seed_noise": n_seed_noise,
+                    "n_seeds_refined": n_seeds_refined,
                     **ctx.state.seed_stats,
                 },
             }
