@@ -210,7 +210,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             diff = abs(f_new - f_current)
 
             if iteration % 20 == 0 or diff < self.tol:
-                self.logger.debug(
+                self.logger.info(
                     f"🔄 [贝叶斯迭代] 步数 {iteration:03d} | 当前空间权重 f = {f_new:.6f} | delta = {diff:.2e}"
                 )
 
