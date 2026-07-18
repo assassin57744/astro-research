@@ -7,6 +7,7 @@ modules/astro_membership/helpers.py
 """
 
 import logging
+import warnings
 import numpy as np
 from sklearn.neighbors import KernelDensity, NearestNeighbors
 
@@ -51,18 +52,13 @@ def calculate_adaptive_eps_kde(
 
     # 3. 蒙特卡洛重采样模拟：探查完全无物理凝聚的随机背景场在统计学上的“密度最高峰”
     sim_eps_list = []
-    for i in range(num_simulations):
-        # 保持样本大小完全一致的无偏泊松/混淆模拟
-        X_sim = kde.sample(n_samples=n_samples, random_state=42 + i)
-        
-        # 计算模拟背景场中每个点到其第 min_pts 个近邻的特征距离
-        nbrs = NearestNeighbors(n_neighbors=min_pts, n_jobs=-1).fit(X_sim)
-        distances, _ = nbrs.kneighbors(X_sim)
-        
-        # 记录这次模拟中，最极端的随机凝聚大涨落波动上限
-        # 数学语义：如果低于这个距离，说明哪怕是纯野星背景也极可能因为随机巧合凝聚在一起
-        # sim_eps_list.append(np.max(distances[:, min_pts - 1]))
-        sim_eps_list.append(np.min(distances[:, min_pts - 1]))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*delayed.*should be used with.*Parallel.*")
+        for i in range(num_simulations):
+            X_sim = kde.sample(n_samples=n_samples, random_state=42 + i)
+            nbrs = NearestNeighbors(n_neighbors=min_pts, n_jobs=-1).fit(X_sim)
+            distances, _ = nbrs.kneighbors(X_sim)
+            sim_eps_list.append(np.min(distances[:, min_pts - 1]))
 
     # 4. 科学沉淀：取多次模拟上限的均值，作为斩断一切随机噪声、筛选真实星团实体的 EPS 屏障
     optimal_eps = float(np.mean(sim_eps_list))
