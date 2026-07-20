@@ -180,6 +180,8 @@ CLUSTERS = {
         "HALF_MASS_RADIUS": 3.5,  # 单位：pc
         "R_HALF_LIGHT": 3.0,  # 单位：pc (保持原有小写变量名对齐)
         "TIDAL_RADIUS": 10.0,  # 单位：pc
+        "TUBE_LENGTH": 18.0,  # 总长 36 度
+        "TUBE_WIDTH": 1.5,    # 总宽 3 度
         "DISTANCE_PC": 136.2,
         "DISTANCE_MODULUS": 5.66,
         "EXT_AG": 0.12,  # Gaia G波段消光
@@ -249,6 +251,8 @@ CLUSTERS = {
         "HALF_MASS_RADIUS": 3.9,  # 单位：pc
         "R_HALF_LIGHT": 3.5,  # 单位：pc
         "TIDAL_RADIUS": 12.0,  # 单位：pc
+        "TUBE_LENGTH": 8.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
+        "TUBE_WIDTH": 2.0,
         "DISTANCE_PC": 187.0,
         "DISTANCE_MODULUS": 6.36,
         "EXT_AG": 0.05,
@@ -377,6 +381,8 @@ CLUSTERS = {
         "HALF_MASS_RADIUS": 4.5,
         "R_HALF_LIGHT": 3.8,
         "TIDAL_RADIUS": 16.0,
+        "TUBE_LENGTH": 5.0,   # 老年银河星团，距离较远，天球视尺度较小
+        "TUBE_WIDTH": 1.0,
         "DISTANCE_PC": 868.7818642069942,
         "DISTANCE_MODULUS": 9.65,
         "EXT_AG": 0.10,
@@ -487,6 +493,8 @@ CLUSTERS = {
         "HALF_MASS_RADIUS": 4.0,
         "R_HALF_LIGHT": 3.6,
         "TIDAL_RADIUS": 12.0,
+        "TUBE_LENGTH": 3.0,
+        "TUBE_WIDTH": 1.0,
         "DISTANCE_PC": 736.2945224042926,
         "DISTANCE_MODULUS": 9.25,
         "EXT_AG": 0.05,  # 消光较低

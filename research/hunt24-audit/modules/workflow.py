@@ -1,7 +1,9 @@
 import logging
-from dataclasses import dataclass, field
-
 import pandas as pd
+import numpy as np
+
+from dataclasses import dataclass, field
+from sklearn.decomposition import PCA
 
 from utils.decorators import astro_checkpoint
 
@@ -359,6 +361,8 @@ class AstroWorkflow:
         if df_raw is None:
             self.logger.error("❌ [Compute] 输入的原始 DataFrame 为 None！")
             return None
+        
+        self.logger.debug(f"🚀 [Compute] 正在执行特征转换，特征空间: {required_features}")
 
         cl = star_cluster
         cluster_rv = cl.get_param("RV_REF", None)
@@ -419,10 +423,12 @@ class AstroWorkflow:
         self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}")
 
         df_target_final = self._load_and_transform_field(ctx)
+        self.logger.info(f"✅ [Compute] 算法内核计算完成，目标天区共计 {len(df_target_final)} 颗天体。top N: \n{df_target_final.head()}")
 
         # 🚀 必须先建表，再加载种子（_load_and_transform_seeds 内部会调用 tag_master_table 回灌标签）
         self.db.init_master_table(ctx.state.master_table, df_target_final)
         df_seeds_final = self._load_and_transform_seeds(ctx)
+        self.logger.info(f"✅ [Compute] 算法内核计算完成，种子星共计 {len(df_seeds_final)} 颗。top N: \n{df_seeds_final.head()}")
 
         use_experimental = ctx.state.gmm_config.get("use_experimental", False)
         if not use_experimental:
@@ -503,6 +509,7 @@ class AstroWorkflow:
         from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
         from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
         from modules.astro_membership.disambiguation.blind import BlindGmmDisambiguation
+        from utils.tube import plot_spatial_tube
 
         STRATEGY_CLASSES = {
             "bayesian": BayesianGmmDisambiguation,
@@ -512,11 +519,94 @@ class AstroWorkflow:
 
         if strategy_name not in STRATEGY_CLASSES:
             raise ValueError(f"未知的策略类型 [{strategy_name}]")
+        
+        cl = ctx.star_cluster
+        # 如果配置里没写，可以设置一个默认的保底参数（例如长10°，宽1.5°）
+        length_deg = cl.get_param("TUBE_LENGTH", 10.0)
+        width_deg = cl.get_param("TUBE_WIDTH", 1.5)
+        
+        self.logger.info(
+            f"📐 [Dynamic Tube] 当前星团: {ctx.cluster_id} | "
+            f"动态空间管边界配置: 半长 ±{length_deg}° / 半宽 ±{width_deg}°"
+        )
+
+        # ---------------------------------------------------------
+        # 1. 执行空间掩模切割，获取候选池和 PCA 模型
+        # ---------------------------------------------------------
+        # 设定半径：长 18 度 (覆盖总长 36度)，宽 1.5 度 (覆盖总宽 3度)
+        df_tube, pca_model = self._build_spatial_tube(
+            df_all=df_target_final, 
+            df_seeds=df_seeds_refined, 
+            length_deg=length_deg, 
+            width_deg=width_deg
+        )
+
+        self.logger.info(f"✅ 空间管切割完成！从 {len(df_target_final)} 颗星中锁定管内候选星 {len(df_tube)} 颗。")
+
+        # ---------------------------------------------------------
+        # 2. 调用可视化模块，进行物理校验绘图
+        # ---------------------------------------------------------
+        plot_spatial_tube(
+            df_all=df_target_final,
+            df_seeds=df_seeds_refined,
+            df_tube=df_tube,
+            pca=pca_model,
+            length_deg=length_deg,
+            width_deg=width_deg,
+            output_dir=cfg.ANALYSIS_DIR,
+            cluster_id=ctx.cluster_id
+        )
+
+        # ---------------------------------------------------------
+        # 3. 将切好的 df_tube 送入下一阶段的 3D 洗涤内核
+        # ---------------------------------------------------------
+        # df_final_tail = your_3d_fit_predict(df_tube, features=["pm_l_cosb", "pm_b", "plx"])
 
         engine_class = STRATEGY_CLASSES[strategy_name]
         self.logger.info(f"✅ [Compute] 已路由至策略类 [{engine_class.__name__}]")
         engine = engine_class(**strategy_kwargs)
         return engine.fit_predict(df_target_final, df_seeds_refined, ctx.state.required_features)
+
+    def _build_spatial_tube(
+        self,
+        df_all: pd.DataFrame,
+        df_seeds: pd.DataFrame,
+        length_deg: float = 18.0,
+        width_deg: float = 1.5,
+    ):
+        """
+        基于物理投影平面锁定 PCA 空间主轴，并在全量天区中切割出狭长的轨道管。
+        """
+        # 强制克隆，防止修改外面的原 DataFrame
+        df_all = df_all.copy()
+
+        # 1. 统一构建平直投影平面的二维坐标 (X = l*cos(b), Y = b)
+        x_seeds = df_seeds["l"] * np.cos(np.radians(df_seeds["b"]))
+        y_seeds = df_seeds["b"]
+        coords_seeds = np.column_stack((x_seeds, y_seeds))
+
+        # 2. 在投影平面上训练 PCA 模型，精准捕捉星团在该视平面下的倾斜长轴
+        pca = PCA(n_components=2)
+        pca.fit(coords_seeds)
+
+        # 3. 对全量 900万恒星映射到同等的投影平面坐标
+        x_all = df_all["l"] * np.cos(np.radians(df_all["b"]))
+        y_all = df_all["b"]
+        coords_all = np.column_stack((x_all, y_all))
+
+        # 4. 将全天区投影到完全对称的 PCA 轨道坐标系中
+        coords_pca = pca.transform(coords_all)
+
+        df_all["pca_long"] = coords_pca[:, 0]
+        df_all["pca_cross"] = coords_pca[:, 1]
+
+        # 5. 在标准对齐的空间管内进行切片过滤
+        tube_mask = (df_all["pca_long"].abs() <= length_deg) & (
+            df_all["pca_cross"].abs() <= width_deg
+        )
+
+        df_tube = df_all[tube_mask].copy()
+        return df_tube, pca
 
     # ── 后处理 ──
 
