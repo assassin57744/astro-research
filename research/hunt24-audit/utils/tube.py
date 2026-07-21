@@ -79,7 +79,9 @@ def plot_spatial_tube(
             [-length_deg, width_deg],
         ]
     )
-    corners_sky = pca.inverse_transform(corners_pca)
+    # corners_sky = pca.inverse_transform(corners_pca)
+    # 反解 PCA 矩形顶点时加上质心偏移：
+    corners_sky = pca.inverse_transform(corners_pca) + getattr(pca, 'cluster_center_', np.array([0, 0]))
 
     tube_patch = Polygon(
         corners_sky,

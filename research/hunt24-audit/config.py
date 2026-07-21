@@ -251,8 +251,9 @@ CLUSTERS = {
         "HALF_MASS_RADIUS": 3.9,  # 单位：pc
         "R_HALF_LIGHT": 3.5,  # 单位：pc
         "TIDAL_RADIUS": 12.0,  # 单位：pc
-        "TUBE_LENGTH": 8.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
-        "TUBE_WIDTH": 2.0,
+        "TUBE_LENGTH": 6.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
+        "TUBE_WIDTH": 1.0,
+        "TUBE_SIGMA_CLIP": 3.0,  # 空间管后运动学截断: 保留 |pm+plx - seed_median| <= sigma_clip * seed_std 的星
         "DISTANCE_PC": 187.0,
         "DISTANCE_MODULUS": 6.36,
         "EXT_AG": 0.05,

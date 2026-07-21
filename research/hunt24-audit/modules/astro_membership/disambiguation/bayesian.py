@@ -33,7 +33,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         hdbscan_min_samples: Any = None,
         hdbscan_eps: float = 0.1,
         max_iter: int = 250,
-        tol: float = 1e-6,
+        tol: float = 1e-4,
         member_threshold: float = 0.2,
         **kwargs,
     ):
