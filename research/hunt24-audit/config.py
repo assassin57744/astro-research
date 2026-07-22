@@ -37,7 +37,8 @@ GAIA_PWD  = os.getenv("GAIA_PWD")
 # =================================================================
 # 2. 科学计算门限与物理常数 (Thresholds & Physics)
 # =================================================================
-MEMBER_SAMPLE_THRESHOLD = 0.2
+MEMBER_SAMPLE_THRESHOLD = 0.5
+HIGH_CONF_THRESHOLD = 0.5      # 高置信成员星判定门限
 GOLDEN_SAMPLE_THRESHOLD = 0.8
 
 AUDIT_PROB_HIGH = 0.7            # 成员身份判定高门限
@@ -83,7 +84,10 @@ STD_COLS = {
 MASTER_COLS = {
     "SEED_TYPE": "seed_type",   # raw_seed
     "DENSITY_TAG": "density_status", # core / noise
-    "GMM_PROB": "prob",         # 算法计算概率
+    "GMM_PROB": "prob",         # 算法计算概率（并集后最终概率）
+    "CORE_PROB": "core_prob",   # Channel A 核心成员概率
+    "TAIL_PROB": "tail_prob",   # Channel B 潮汐尾成员概率
+    "SOURCE": "source",         # 来源: core / tail / both / field
     "X_MATCH": "x_match_tag",   # Matched / PG_Only / Ref_Only
     "AUDIT": "audit_status",    # Confirmed / Candidate / Contamination
     "AUDIT_NOTE": "audit_note", # 审计备注（如：视差偏离、暗端漏检等）
@@ -182,6 +186,8 @@ CLUSTERS = {
         "TIDAL_RADIUS": 10.0,  # 单位：pc
         "TUBE_LENGTH": 18.0,  # 总长 36 度
         "TUBE_WIDTH": 1.5,    # 总宽 3 度
+        "TUBE_LENGTH_MULTIPLIER": 4.3,  # 自适应乘数覆盖：昴星团潮汐尾延伸极远
+        "TUBE_SIGMA_CLIP": 10.0,  # Mahalanobis 运动学截断 (σ²)
         "DISTANCE_PC": 136.2,
         "DISTANCE_MODULUS": 5.66,
         "EXT_AG": 0.12,  # Gaia G波段消光
@@ -253,7 +259,7 @@ CLUSTERS = {
         "TIDAL_RADIUS": 12.0,  # 单位：pc
         "TUBE_LENGTH": 6.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_WIDTH": 1.0,
-        "TUBE_SIGMA_CLIP": 3.0,  # 空间管后运动学截断: 保留 |pm+plx - seed_median| <= sigma_clip * seed_std 的星
+        "TUBE_SIGMA_CLIP": 10.0,  # 空间管后 Mahalanobis 运动学截断 (σ²阈值): 保留 MD² ≤ σ² 的星
         "DISTANCE_PC": 187.0,
         "DISTANCE_MODULUS": 6.36,
         "EXT_AG": 0.05,
@@ -384,6 +390,7 @@ CLUSTERS = {
         "TIDAL_RADIUS": 16.0,
         "TUBE_LENGTH": 5.0,   # 老年银河星团，距离较远，天球视尺度较小
         "TUBE_WIDTH": 1.0,
+        "TUBE_SIGMA_CLIP": 10.0,  # Mahalanobis 运动学截断 (σ²)
         "DISTANCE_PC": 868.7818642069942,
         "DISTANCE_MODULUS": 9.65,
         "EXT_AG": 0.10,
@@ -496,6 +503,7 @@ CLUSTERS = {
         "TIDAL_RADIUS": 12.0,
         "TUBE_LENGTH": 3.0,
         "TUBE_WIDTH": 1.0,
+        "TUBE_SIGMA_CLIP": 10.0,  # Mahalanobis 运动学截断
         "DISTANCE_PC": 736.2945224042926,
         "DISTANCE_MODULUS": 9.25,
         "EXT_AG": 0.05,  # 消光较低

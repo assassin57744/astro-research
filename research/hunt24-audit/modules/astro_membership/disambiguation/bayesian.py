@@ -56,7 +56,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         self.member_threshold = member_threshold
 
     def fit_predict(
-        self, df_all: pd.DataFrame, df_seeds: pd.DataFrame, features: List[str]
+        self, df_all: pd.DataFrame, df_seeds: pd.DataFrame, features: List[str], use_density_prune: bool = False
     ) -> pd.DataFrame:
         """
         洗涤接口：消除背景歧义并为全量天体打上成员概率标签。
@@ -82,15 +82,14 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         )
 
         n_seeds = len(df_seeds_clean)
-        if n_seeds < self.dbscan_min_samples:
+        # 尊重调用方传入的 use_density_prune，仅在样本不足时强制降级
+        if use_density_prune and n_seeds < self.dbscan_min_samples:
             self.logger.warning(
                 f"⚠️ [内核警告] 有效种子星数量 ({n_seeds}) 低于修剪阈值 {self.dbscan_min_samples}。将跳过密度修剪。"
             )
             use_density_prune = False
-        else:
-            use_density_prune = True
 
-        use_density_prune = False  # 强制关闭密度修剪，直接使用全量种子集拟合 GMM
+        # use_density_prune = False  # 强制关闭密度修剪，直接使用全量种子集拟合 GMM
 
         # --------------------------------==================--------------------------------
         # 2. 数学空间归一化 (Standardization)

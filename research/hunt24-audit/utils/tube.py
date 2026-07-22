@@ -126,3 +126,63 @@ def plot_spatial_tube(
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"💾 [{cluster_id}] 成果图已保存至: {output_path}")
+
+
+def plot_prob_distributions(
+    df_res: pd.DataFrame,
+    cluster_id: str = "M45",
+    output_dir: str = "./",
+):
+    """
+    绘制 prob / core_prob / tail_prob 三个概率分布直方图。
+
+    参数:
+        df_res : DataFrame，需包含 'prob', 'core_prob', 'tail_prob' 列
+        cluster_id : 星团名称（用于文件名和标题）
+        output_dir : 输出目录
+    """
+    import matplotlib.pyplot as plt
+
+    print(f"📊 正在渲染 [{cluster_id}] 三通道概率分布直方图...")
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), dpi=150)
+
+    titles = [
+        ("prob", "Union Prob", "#4C72B0"),
+        ("core_prob", "Core Channel Prob", "#DD8452"),
+        ("tail_prob", "Tail Channel Prob", "#55A868"),
+    ]
+
+    for ax, (col, title, color) in zip(axes, titles):
+        if col not in df_res.columns:
+            ax.text(0.5, 0.5, f"Missing: {col}", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(title, fontsize=13)
+            continue
+
+        data = df_res[col].dropna()
+        ax.hist(data, bins=80, range=(0, 1), color=color, alpha=0.8, edgecolor="white", linewidth=0.3)
+        ax.axvline(x=0.2, color="red", linestyle="--", linewidth=1.0, label="Member threshold (0.2)")
+        ax.axvline(x=0.5, color="darkred", linestyle="--", linewidth=1.0, label="High-conf threshold (0.5)")
+        ax.set_xlabel("Probability", fontsize=12)
+        ax.set_ylabel("Count", fontsize=12)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_yscale("log")
+        ax.legend(fontsize=8, framealpha=0.7)
+        ax.text(
+            0.95, 0.95,
+            f"N={len(data):,}\nμ={data.mean():.3f}\nmed={data.median():.3f}",
+            transform=ax.transAxes, ha="right", va="top",
+            fontsize=9, bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.8),
+        )
+
+    fig.suptitle(
+        f"{cluster_id.upper()} — Probability Distribution: Core vs Tail Channels",
+        fontsize=15, fontweight="bold", y=1.02,
+    )
+    plt.tight_layout()
+
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{cluster_id.lower()}_prob_dist.jpg")
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"💾 [{cluster_id}] 概率分布直方图已保存至: {output_path}")

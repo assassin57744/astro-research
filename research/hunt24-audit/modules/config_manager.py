@@ -76,10 +76,10 @@ class ClusterConfigManager:
                 self._set_memory_cache(cluster_id, param_name, val)
                 return val
 
-        self.logger.error(
-            f"❌ [ConfigError] 无法在任意域中匹配到星团 {cluster_id} 的物理参数: '{param_name}'"
+        self.logger.debug(
+            f"🛈 [ConfigWarning] 未找到 {cluster_id}.{param_name}，返回默认值: {default}"
         )
-        return None
+        return default
 
     def save_refined_params(self, cluster_id: str, refined_config: dict):
         """将自适应进化参数批量 Upsert 写入 DuckDB，并强刷内存缓存"""

@@ -442,7 +442,12 @@ class AstroWorkflow:
         self.logger.info(f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。")
         self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
 
-        updates = df_res[[cfg.STD_COLS["ID"], "prob"]].copy()
+        # 回灌概率及分通道信息（若存在 core_prob / tail_prob / source 则一并写入）
+        update_cols = [cfg.STD_COLS["ID"], "prob"]
+        for extra in ("core_prob", "tail_prob", "source"):
+            if extra in df_res.columns:
+                update_cols.append(extra)
+        updates = df_res[update_cols].copy()
         self.db.tag_master_table(ctx.state.master_table, updates)
 
         return ctx.state.master_table
@@ -547,14 +552,38 @@ class AstroWorkflow:
         from utils.tube import plot_spatial_tube  # 绘图保留在 utils 模块
 
         cl = ctx.star_cluster
-        length_deg = cl.get_param("TUBE_LENGTH", 5.0)
-        width_deg = cl.get_param("TUBE_WIDTH", 1.0)
+
+        # 🌟 自适应管尺寸：从潮汐半径和距离推算天球角尺度
+        tidal_radius_pc = cl.get_param("TIDAL_RADIUS", None)
+        distance_pc = cl.get_param("DISTANCE_PC", None)
+        if tidal_radius_pc and distance_pc and distance_pc > 0:
+            angular_tidal = np.degrees(tidal_radius_pc / distance_pc)
+            # 管长乘数：可从 config 覆盖（默认 1.6），M45 等扩散星团需更大值
+            length_mult = cl.get_param("TUBE_LENGTH_MULTIPLIER", 1.6)
+            # 管宽乘数：可从 config 覆盖（默认 0.3）
+            width_mult = cl.get_param("TUBE_WIDTH_MULTIPLIER", 0.3)
+            length_deg = angular_tidal * length_mult
+            width_deg = max(1.0, angular_tidal * width_mult)
+            self.logger.info(
+                f"📐 [Adaptive Tube] TIDAL_RADIUS={tidal_radius_pc}pc, "
+                f"DISTANCE={distance_pc:.0f}pc → "
+                f"角尺度={angular_tidal:.2f}° → "
+                f"管长={length_deg:.1f}°(×{length_mult}), "
+                f"管宽={width_deg:.1f}°(×{width_mult})"
+            )
+        else:
+            length_deg = cl.get_param("TUBE_LENGTH", 5.0)
+            width_deg = cl.get_param("TUBE_WIDTH", 1.0)
+            self.logger.info(
+                f"📐 [Fallback Tube] 物理参数缺失，使用配置值: "
+                f"管长={length_deg}°, 管宽={width_deg}°"
+            )
 
         # 纯净 5D 特征切片：按列名提取，避免 extract_seeds 追加 cluster_label 后 iloc 偏移
         df_all_clean = df_target_final[ctx.state.required_features].copy()
         df_seeds_clean = df_seeds_refined[ctx.state.required_features].copy()
 
-        # 🌟 调用类内移植方法 _build_spatial_tube，使用位置参数传入
+        # 🌟 构造空间管
         df_tube_clean, pca_model = self._build_spatial_tube(
             df_all_clean,
             df_seeds_clean,
@@ -571,21 +600,30 @@ class AstroWorkflow:
             length_deg=length_deg,
             width_deg=pca_model.tube_width_,
             cluster_id=ctx.cluster_id,
+            output_dir=cfg.ANALYSIS_DIR,
         )
 
-        # 🌟 运动学 sigma clip：在 PM+plx 空间以种子星为参考剔除明显场星
+        # 🌟 运动学 sigma clip（Mahalanobis 距离）：利用种子星协方差矩阵构建椭圆体边界
         pm_cols = ["pm_l_cosb", "pm_b", "plx"]
         sigma_clip = cl.get_param("TUBE_SIGMA_CLIP", 5.0)
+        # 保存原始空间管副本供 Phase 2 尾模板使用（sigma clip 后 df_tube_clean 会被缩减）
+        df_tube_clean_raw = df_tube_clean.copy()
         if sigma_clip > 0 and not df_tube_clean.empty:
-            seed_median = df_seeds_clean[pm_cols].median()
-            seed_std = df_seeds_clean[pm_cols].std().replace(0, 1.0)
-            clip_mask = pd.Series(True, index=df_tube_clean.index)
-            for col in pm_cols:
-                clip_mask &= (df_tube_clean[col] - seed_median[col]).abs() <= sigma_clip * seed_std[col]
+            seed_vals = df_seeds_clean[pm_cols].values.astype(np.float64)
+            seed_mean = seed_vals.mean(axis=0)
+            seed_cov = np.cov(seed_vals, rowvar=False)
+            seed_cov += np.eye(3) * 1e-10  # 正则化保证可逆
+            inv_cov = np.linalg.inv(seed_cov)
+
+            tube_vals = df_tube_clean[pm_cols].values.astype(np.float64)
+            diff = tube_vals - seed_mean
+            md_sq = np.sum((diff @ inv_cov) * diff, axis=1)
+
             n_before = len(df_tube_clean)
+            clip_mask = md_sq <= sigma_clip ** 2
             df_tube_clean = df_tube_clean[clip_mask].copy()
             self.logger.info(
-                f"📐 [Tube Sigma Clip] σ_clip={sigma_clip} | "
+                f"📐 [Tube Sigma Clip] σ_clip={sigma_clip} (Mahalanobis) | "
                 f"运动学过滤: {n_before} → {len(df_tube_clean)} 颗 "
                 f"(剔除 {(n_before - len(df_tube_clean)) / n_before * 100:.1f}%)"
             )
@@ -601,30 +639,92 @@ class AstroWorkflow:
 
         self.logger.info(f"📊 [Channel B] 空间管内捕获有效候选天体: {len(df_tube_full)} 颗")
 
+        prob_col = cfg.STD_COLS["PROB"]
+
         # 🌟 防御性熔断：如管内为空，避免抛出 StandardScaler 0 样本崩溃错误，直接退回 Core 结果
         if df_tube_full.empty:
             self.logger.warning("⚠️ [Channel B] 空间管内未捕获到任何有效天体，跳过 Tidal Tail 洗涤，返回 Core 核心成员。")
+            df_res_core["core_prob"] = df_res_core[prob_col]
+            df_res_core["tail_prob"] = 0.0
+            df_res_core["source"] = "core"
             return df_res_core
 
+        # 从 σ 裁剪管星中剔除 Core 已识别的成员，使尾模板专注非 Core 信号
+        core_prob_map = df_res_core.set_index("id")[prob_col]
+        tube_ids_from_idx = df_target_final.loc[df_tube_clean.index, "id"]
+        tube_core_probs = tube_ids_from_idx.map(core_prob_map)
+
+        tail_mask = tube_core_probs <= cfg.MEMBER_SAMPLE_THRESHOLD  # core_prob ≤ 0.2
+        df_tail_template = df_tube_clean[tail_mask].copy()
+        n_removed = len(df_tube_clean) - len(df_tail_template)
+        self.logger.info(
+            f"📐 [Tail Template] σ={sigma_clip} 管星: {len(df_tube_clean)} → "
+            f"{len(df_tail_template)} 颗 (剔除 {n_removed} 颗 Core 成员)"
+        )
+
         # 传给消歧引擎进行 Tidal Tail 相空间洗涤
-        df_res_tail = engine.fit_predict(df_tube_full, df_seeds_refined, ctx.state.required_features)
+        # 使用 df_target_final 作为全场背景，df_tail_template 作为尾模板
+        df_res_tail = engine.fit_predict(
+            df_target_final, df_tail_template,
+            ctx.state.required_features,
+            use_density_prune=False,
+        )
+        self.logger.info(
+            f"📊 [Channel B] 管内(σ={sigma_clip})全量: {len(df_tube_full)} 颗 | "
+            f"全场 Tail 候选(prob>0.2): {(df_res_tail[prob_col] > 0.2).sum()} 颗 | "
+            f"尾模板: df_tube_clean={len(df_tube_clean)}, 去核后={len(df_tail_template)}"
+        )
 
         # ---------------------------------------------------------
         # 5. 第五阶段：核心（Core）与潮汐尾（Tail）概率并集融合 (Union)
         # ---------------------------------------------------------
-        prob_col = cfg.STD_COLS["PROB"]
-        df_res_final = df_res_core.copy()
+        m_thresh = cfg.MEMBER_SAMPLE_THRESHOLD
 
-        # 对管内解算出的潮汐尾概率与核心概率取最大值 (并集)
-        df_res_final.loc[df_res_tail.index, prob_col] = np.maximum(
-            df_res_final.loc[df_res_tail.index, prob_col],
-            df_res_tail[prob_col]
+        # 记录 Core 原始概率
+        df_res_final = df_res_core.copy()
+        df_res_final["core_prob"] = df_res_core[prob_col].values
+
+        # 按 id 定位管内星，提取其 Tail 概率
+        tube_ids = set(df_tube_full["id"].values)
+        df_res_final["tail_prob"] = 0.0
+        tube_mask = df_res_final["id"].isin(tube_ids)
+        tail_prob_lookup = df_res_tail.set_index("id")[prob_col]
+        df_res_final.loc[tube_mask, "tail_prob"] = df_res_final.loc[tube_mask, "id"].map(tail_prob_lookup).values
+
+        # 对管内星：prob = max(core, tail)；管外星保持 core 不变
+        df_res_final.loc[tube_mask, prob_col] = np.maximum(
+            df_res_final.loc[tube_mask, prob_col].values,
+            df_res_final.loc[tube_mask, "tail_prob"].values,
         )
 
-        n_tail_boost = (df_res_final[prob_col] > 0.5).sum()
+        # 标记来源
+        core_mask = df_res_final["core_prob"] > m_thresh
+        tail_mask = df_res_final["tail_prob"] > m_thresh
+        df_res_final["source"] = "field"
+        df_res_final.loc[core_mask & ~tail_mask, "source"] = "core"
+        df_res_final.loc[~core_mask & tail_mask, "source"] = "tail"
+        df_res_final.loc[core_mask & tail_mask, "source"] = "both"
+
+        n_tail_boost = (df_res_final[prob_col] > cfg.HIGH_CONF_THRESHOLD).sum()
+        n_src_core = (df_res_final["source"] == "core").sum()
+        n_src_tail = (df_res_final["source"] == "tail").sum()
+        n_src_both = (df_res_final["source"] == "both").sum()
         self.logger.info(
             f"🎯 [Union Complete] 核心与潮汐尾并集完成！"
-            f"全区高置信成员星总数 (prob > 0.5): {n_tail_boost} 颗"
+            f"全区高置信成员星总数 (prob > {cfg.HIGH_CONF_THRESHOLD}): {n_tail_boost} 颗"
+        )
+        self.logger.info(
+            f"📋 [Source Breakdown] 来源分布: "
+            f"core_only={n_src_core} | tail_only={n_src_tail} | both={n_src_both} | "
+            f"total_member={(n_src_core + n_src_tail + n_src_both)}"
+        )
+
+        # 🌟 绘制三通道概率分布直方图
+        from utils.tube import plot_prob_distributions
+        plot_prob_distributions(
+            df_res_final,
+            cluster_id=ctx.cluster_id,
+            output_dir=cfg.ANALYSIS_DIR,
         )
 
         return df_res_final

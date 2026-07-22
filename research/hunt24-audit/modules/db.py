@@ -652,6 +652,8 @@ class AstroDB:
         # 默认全部为 VARCHAR，但算法概率列必须为 DOUBLE 以支持后续的数值比较和逻辑运算
         type_map = {
             cfg.MASTER_COLS['GMM_PROB']: "DOUBLE",
+            cfg.MASTER_COLS['CORE_PROB']: "DOUBLE",
+            cfg.MASTER_COLS['TAIL_PROB']: "DOUBLE",
         }
 
         # 预添加标准状态列
