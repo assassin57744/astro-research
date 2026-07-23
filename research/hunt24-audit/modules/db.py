@@ -194,7 +194,7 @@ class AstroDB:
 
     def register_audit_input_view(self, v_src, t_base, threshold=None):
         """准备增强后的审计输入视图 (含物理参数补全与概率过滤)。"""
-        threshold = threshold if threshold is not None else cfg.MEMBER_SAMPLE_THRESHOLD
+        threshold = threshold if threshold is not None else cfg.THRESHOLD_BASE
         v_audit_input = cfg.TMPL.V_ADT_INPUT.format(src=v_src)
 
         sql = self._get_enrichment_sql(v_src, t_base, threshold=threshold)

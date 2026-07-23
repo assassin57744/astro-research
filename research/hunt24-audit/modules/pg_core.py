@@ -8,7 +8,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 import config as cfg
-from config import MEMBER_SAMPLE_THRESHOLD, STD_COLS
+from config import THRESHOLD_BASE, STD_COLS
 from utils.decorators import astro_checkpoint
 
 
@@ -345,7 +345,7 @@ class PriorGMM:
         # --------------------------------==================--------------------------------
         # 4. 成员星最终划分统计与数据收拢
         # --------------------------------==================--------------------------------
-        high_prob_mask = probs > MEMBER_SAMPLE_THRESHOLD
+        high_prob_mask = probs > THRESHOLD_BASE
         n_members = np.sum(high_prob_mask)
         self.logger.info(
             f"✨ [测试核收工] 判定任务顺利结束 | 成功掘出星团高置信度成员星: {n_members} 颗。"

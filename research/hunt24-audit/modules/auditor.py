@@ -563,41 +563,54 @@ class LiteratureAuditor:
             f" 🟢 [Semantic Audit]----------待审计数据---------------\n {df}"
         )
 
-        keywords = build_cluster_keywords(self.cluster, self.cluster_id, self.logger)
-
-        # 构建正则模式
-        kw_pattern = "|".join(
-            [re.escape(k).replace(r"\ ", r"\s+") for k in keywords]
+        keywords = build_cluster_keywords(
+            self.cluster, self.cluster_id, self.logger
         )
-        parent_pattern = rf"{kw_pattern}"
 
         def clean_text(s):
+            if pd.isna(s):
+                return ""
             return re.sub(r"\s+", " ", str(s).strip().upper())
 
-        # Parent 审计
+        # 构建规范正则模式
+        kw_pattern = "|".join(
+            [re.escape(k).replace(r"\ ", r"\s+") for k in keywords if k]
+        )
+
+        # 1. Parent 严格边界审计
+        parent_pattern = rf"\b(?:{kw_pattern})\b"
         if "parent" in df.columns:
             parent_series = df["parent"].fillna("NONE").apply(clean_text)
             is_parent_match = parent_series.str.contains(
                 parent_pattern, regex=True, case=False, na=False
             )
         else:
-            is_parent_match = self._fallback_parent_lookup(df, keywords)
+            is_parent_match = self._fallback_parent_lookup(
+                df, kw_pattern, clean_text
+            )
 
-        # 严格名称匹配
+        # 2. 名称严格边界匹配 (Match Preferred or Aliases)
         norm_aliases = df["ids"].fillna("").apply(clean_text)
         norm_preferred = df["main_id"].fillna("").apply(clean_text)
-        strict_pattern = rf"(?:^|\||\s)(?:{kw_pattern})(?:\s*\||$)"
+        strict_pattern = rf"(?:^|\||\s)(?:{kw_pattern})(?:\s*\||\s|$)"
+
         is_strict = norm_aliases.str.contains(
             strict_pattern, regex=True, na=False, case=False
         ) | norm_preferred.str.contains(
             strict_pattern, regex=True, na=False, case=False
         )
 
-        # 聚合判定
+        # 3. 约束后的 Potential 判定 (必须同时符合 CL* 前缀 + 当前星团关键词)
         is_potential = norm_preferred.str.contains(
             r"^CL\*", regex=True, na=False
+        ) & norm_preferred.str.contains(
+            rf"\b(?:{kw_pattern})\b", regex=True, na=False, case=False
+        )
+
+        # 聚合判定
+        is_literature_member = (
+            is_parent_match | is_strict | is_potential
         ).astype(bool)
-        is_literature_member = (is_parent_match | is_strict | is_potential).astype(bool)
 
         match_type = pd.Series(
             np.select(
@@ -614,35 +627,40 @@ class LiteratureAuditor:
         )
 
         return pd.DataFrame(
-            {"is_lit_consensus": is_literature_member, "match_type": match_type}
+            {
+                "is_lit_consensus": is_literature_member,
+                "match_type": match_type,
+            }
         )
 
-    def _fallback_parent_lookup(self, df: pd.DataFrame,
-                                 keywords: list) -> pd.Series:
+    def _fallback_parent_lookup(
+        self, df: pd.DataFrame, kw_pattern: str, clean_text_fn
+    ) -> pd.Series:
         """实时 SIMBAD 家谱查询兜底（当输入缺失 parent 列时）。"""
         self.logger.warning(
             "⚠️ 输入矩阵中缺失 'parent' 字段，将执行实时网络家谱查询（这会非常慢！）"
         )
-        unique_mids = [
-            m for m in df["main_id"].unique()
-            if pd.notna(m) and str(m).strip().upper() not in ["", "NONE"]
-        ]
+        norm_mids = df["main_id"].apply(clean_text_fn)
+        unique_mids = [m for m in norm_mids.unique() if m and m != "NONE"]
+
         mid_to_match: dict = {}
         for mid in unique_mids:
+            mid_to_match[mid] = False
             try:
                 hierarchy = Simbad.query_hierarchy(mid, hierarchy="parents")
                 if hierarchy is not None:
-                    parent_names = [str(p["main_id"]).upper() for p in hierarchy]
-                    for kw in keywords:
-                        if any(kw in p for p in parent_names):
+                    parent_names = [
+                        clean_text_fn(p["main_id"]) for p in hierarchy
+                    ]
+                    for p in parent_names:
+                        if re.search(
+                            rf"\b(?:{kw_pattern})\b", p, flags=re.IGNORECASE
+                        ):
                             mid_to_match[mid] = True
                             break
             except Exception as e:
-                self.logger.warning(f"⚠️ [实时家谱审计] 天体 {mid} 查询失败: {e}")
+                self.logger.warning(
+                    f"⚠️ [实时家谱审计] 天体 {mid} 查询失败: {e}"
+                )
 
-        return (
-            df["main_id"]
-            .map(mid_to_match)
-            .fillna(False)
-            .astype(bool)
-        )
+        return norm_mids.map(mid_to_match).fillna(False).astype(bool)

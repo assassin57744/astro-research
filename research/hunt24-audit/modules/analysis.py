@@ -576,10 +576,10 @@ class AstroAnalyzer:
 
         # 添加门限参考线
         plt.axvline(
-            x=cfg.MEMBER_SAMPLE_THRESHOLD,
+            x=cfg.THRESHOLD_BASE,
             color="#e74c3c",
             linestyle="--",
-            label=f"Threshold ({cfg.MEMBER_SAMPLE_THRESHOLD})",
+            label=f"Threshold ({cfg.THRESHOLD_BASE})",
         )
         plt.legend()
 

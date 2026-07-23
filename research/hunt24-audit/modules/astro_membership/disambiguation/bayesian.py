@@ -21,7 +21,8 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
     """
     基于种子引导 & 高维贝叶斯对抗 EM 迭代的洗涤算子。
 
-    去除了旧版本中一阶矩中心化等特征工程逻辑，专注于纯粹矩阵上的密度修剪与似然估计收敛。
+    解耦 fit() 与 predict() 阶段，支持局部天区（如 Orbital Tube 空间管）参数拟合
+    与全域天区（Target Field）概率推理推导。
     """
 
     def __init__(
@@ -39,8 +40,6 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
     ):
         """
         初始化贝叶斯对抗洗涤算子。
-
-        所有控制超参均由主管线根据 config.CLUSTERS 的定义动态透传。
         """
         self.logger = logging.getLogger(f"AstroPipeline.AstroMembership.{__name__}")
 
@@ -55,68 +54,66 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         self.tol = tol
         self.member_threshold = member_threshold
 
-    def fit_predict(
-        self, df_all: pd.DataFrame, df_seeds: pd.DataFrame, features: List[str], use_density_prune: bool = False
-    ) -> pd.DataFrame:
+    def fit(
+        self,
+        df_tube: pd.DataFrame,
+        df_seeds: pd.DataFrame,
+        features: List[str],
+        use_density_prune: bool = False,
+    ) -> Dict[str, Any]:
         """
-        洗涤接口：消除背景歧义并为全量天体打上成员概率标签。
+        【拟合阶段】在输入天区（如 Channel B 空间管或全天区）内训练背景/成员 GMM 模型，
+        并通过 EMA 迭代求解高信噪比的先验物理密度 f。
 
         Args:
-            df_all (pd.DataFrame): 经过特征工程前置对齐后的全量天区观测数据。
-            df_seeds (pd.DataFrame): 经过无监督或外部物理先验初筛的高纯度种子数据集。
-            features (List[str]): 参与高维相空间拟合的特征列名定义（由 MEMBERSHIP_FEATURES 指定）。
+            df_tube (pd.DataFrame): 拟合基准天区数据（Channel A 传 df_target_final，Channel B 传 df_tube_full）。
+            df_seeds (pd.DataFrame): 引导种子数据集。
+            features (List[str]): 参与高维相空间拟合的特征列名。
+            use_density_prune (bool): 是否启用 DBSCAN/HDBSCAN 种子集密度修剪。
 
         Returns:
-            pd.DataFrame: 包含两列 ['id', 'prob'] 的洗涤打标结果。
+            Dict[str, Any]: 包含训练好的 StandardScaler, GMM 模型及收敛先验权重 f 的参数包。
         """
         self.logger.info(
-            f"🧬 [BayesianGMM] 启动高维洗涤内核 | 特征空间维度: {len(features)}D -> {features}"
+            f"🧬 [BayesianGMM.fit] 启动拟合内核 | 拟合天区基数: {len(df_tube)} 颗 | 特征空间: {len(features)}D -> {features}"
         )
 
-        # --------------------------------==================--------------------------------
-        # 1. 数据完整性高纯洗涤 (不再包含任何物理坐标转换)
-        # --------------------------------==================--------------------------------
-        df_field_clean = df_all.dropna(subset=features).copy()
+        df_field_clean = df_tube.dropna(subset=features).copy()
         df_seeds_clean = (
             df_seeds.dropna(subset=features).drop_duplicates(subset=features).copy()
         )
 
         n_seeds = len(df_seeds_clean)
-        # 尊重调用方传入的 use_density_prune，仅在样本不足时强制降级
         if use_density_prune and n_seeds < self.dbscan_min_samples:
             self.logger.warning(
-                f"⚠️ [内核警告] 有效种子星数量 ({n_seeds}) 低于修剪阈值 {self.dbscan_min_samples}。将跳过密度修剪。"
+                f"⚠️ [内核警告] 有效种子星数量 ({n_seeds}) 低于修剪阈值 {self.dbscan_min_samples}。跳过密度修剪。"
             )
             use_density_prune = False
 
-        # use_density_prune = False  # 强制关闭密度修剪，直接使用全量种子集拟合 GMM
-
-        # --------------------------------==================--------------------------------
-        # 2. 数学空间归一化 (Standardization)
-        # --------------------------------==================--------------------------------
+        # -----------------------------------------------------------------
+        # 1. 数学空间归一化 (以当前拟合天区 df_tube 的方差结构为度量基准)
+        # -----------------------------------------------------------------
         scaler = StandardScaler()
-        # 统一使用全域背景数据的方差结构作为数学空间的度量基准
         scaler.fit(df_field_clean[features])
 
         X_field_scaled = scaler.transform(df_field_clean[features])
         X_seeds_scaled = scaler.transform(df_seeds_clean[features])
 
-        # --------------------------------==================--------------------------------
-        # 3. 🌌 构建全域背景似然场模型 (Field Model)
-        # --------------------------------==================--------------------------------
+        # -----------------------------------------------------------------
+        # 2. 🌌 构建局部背景似然场模型 (Field Model)
+        # -----------------------------------------------------------------
         field_model = GaussianMixture(
             n_components=1, covariance_type="full", random_state=42
         )
         field_model.fit(X_field_scaled)
 
-        # --------------------------------==================--------------------------------
-        # 4. 🎯 稳健密度修剪：剥离种子集中的银盘噪声，锁定星团核心 (Cluster Model)
-        # --------------------------------==================--------------------------------
-        X_core = X_seeds_scaled  # 默认回退状态
+        # -----------------------------------------------------------------
+        # 3. 🎯 种子集密度修剪与星团核心锁定 (Cluster Model)
+        # -----------------------------------------------------------------
+        X_core = X_seeds_scaled
 
         if use_density_prune:
             if self.cluster_algo == "hdbscan":
-                # 🛡️ 注入 1e-8 极微小高斯噪声以打破高维空间由于浮点数精度导致的数值平局，防止 HDBSCAN 崩溃
                 X_input = X_seeds_scaled.astype(np.float64, order="C")
                 X_input += np.random.normal(0, 1e-8, X_input.shape)
 
@@ -128,12 +125,9 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
                         copy=True,
                     ).fit(X_input)
                 except TypeError as te:
-                    if (
-                        "converted to Python scalars" in str(te)
-                        and self.hdbscan_eps > 0
-                    ):
+                    if "converted to Python scalars" in str(te) and self.hdbscan_eps > 0:
                         self.logger.warning(
-                            "💥 HDBSCAN epsilon 发生树转换崩溃，强行降级 epsilon=0.0 重新解算..."
+                            "💥 HDBSCAN epsilon 发生树转换崩溃，降级 epsilon=0.0 重新解算..."
                         )
                         db = HDBSCAN(
                             min_cluster_size=self.hdbscan_min_cluster_size,
@@ -166,7 +160,6 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
                 best_cluster_idx = np.argmax(counts) if len(counts) > 0 else -1
                 n_best = counts[best_cluster_idx] if best_cluster_idx != -1 else 0
 
-                # 🛡️ 安全拦截：若核心样本占比低于 20%，说明发生了过度污染或严重的密度过度切分
                 if n_best < (n_seeds * 0.2):
                     self.logger.warning(
                         f"⚠️ [内核解构] {algo_name} 捕获的核心过小 ({n_best}/{n_seeds})，回退至全量种子星。"
@@ -179,33 +172,29 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
                         f"🎯 [核心锁定] {algo_name} 修剪成功：剔除野星 {np.sum(labels == -1)} 颗，沉淀核心样本 {len(X_core)} 颗。"
                     )
 
-        # 拟合高纯度星团成员先验高斯
         cluster_model = GaussianMixture(
             n_components=1, covariance_type="full", random_state=42
         )
         cluster_model.fit(X_core)
 
-        # --------------------------------==================--------------------------------
-        # 5. 🔮 运动学/动力学混合空间递归对抗收敛迭代 (EMA 推理)
-        # --------------------------------==================--------------------------------
+        # -----------------------------------------------------------------
+        # 4. 🔮 极大似然递归对抗收敛迭代 (EMA 推理求解 f)
+        # -----------------------------------------------------------------
         total_stars = len(X_field_scaled)
         p_cl = np.exp(cluster_model.score_samples(X_field_scaled))
         p_fi = np.exp(field_model.score_samples(X_field_scaled))
 
-        # 初始成员星空间密度混合权重期望 f
         f_current = len(X_core) / total_stars
         self.logger.info(f"🔮 贝叶斯迭代初始成员密度估计 (Initial f): {f_current:.5f}")
 
-        probs = np.zeros(total_stars)
-
-        f_floor = f_current * 0.2  # 🌟 动态护栏：根据每个星团的初始本征规模，自适应定制保护底线
+        f_floor = f_current * 0.2  # 动态保护底线
 
         for iteration in range(1, self.max_iter + 1):
             num = p_cl * f_current
             den = num + p_fi * (1.0 - f_current)
-            probs = num / (den + 1e-15)  # 注入微小 eps 防止分母零溃缩
+            probs = num / (den + 1e-15)
 
-            f_new = max(np.mean(probs), f_floor) # 保护底线，防止过度收敛导致成员权重被完全抹平
+            f_new = max(np.mean(probs), f_floor)
             diff = abs(f_new - f_current)
 
             if iteration % 20 == 0 or diff < self.tol:
@@ -224,15 +213,57 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
                 f"⚠️ [收敛警告] 达到最大安全步数 ({self.max_iter}) 未完全收敛。delta: {diff:.2e}"
             )
 
-        # --------------------------------==================--------------------------------
-        # 6. 打包打标输出结果
-        # --------------------------------==================--------------------------------
-        # 仅针对干净的数据帧打标
+        # 打包返回物理模型与收敛出的先验 f
+        return {
+            "scaler": scaler,
+            "field_model": field_model,
+            "cluster_model": cluster_model,
+            "f_converged": f_current,
+        }
+
+    def predict(
+        self,
+        df_all: pd.DataFrame,
+        model_params: Dict[str, Any],
+        features: List[str],
+    ) -> pd.DataFrame:
+        """
+        【推理阶段】使用拟合好的物理模型与先验密度 f，对目标天区（如全天区 223 万天体）进行后验概率推导。
+
+        Args:
+            df_all (pd.DataFrame): 待推导的目标天区数据集。
+            model_params (Dict[str, Any]): fit() 阶段产出的模型参数包。
+            features (List[str]): 参与洗涤的特征列名。
+
+        Returns:
+            pd.DataFrame: 包含 ['id', 'prob'] 的打标结果。
+        """
+        self.logger.info(
+            f"🔮 [BayesianGMM.predict] 启动全域推理 | 目标天区: {len(df_all)} 颗 | 使用先验 f={model_params['f_converged']:.6f}"
+        )
+
+        scaler = model_params["scaler"]
+        field_model = model_params["field_model"]
+        cluster_model = model_params["cluster_model"]
+        f_target = model_params["f_converged"]
+
+        df_field_clean = df_all.dropna(subset=features).copy()
+        X_field_scaled = scaler.transform(df_field_clean[features])
+
+        # 算似然
+        p_cl = np.exp(cluster_model.score_samples(X_field_scaled))
+        p_fi = np.exp(field_model.score_samples(X_field_scaled))
+
+        # 贝叶斯公式推导
+        num = p_cl * f_target
+        den = num + p_fi * (1.0 - f_target)
+        probs = num / (den + 1e-15)
+
         df_result_clean = pd.DataFrame(
             {"id": df_field_clean["id"].to_numpy(), "prob": probs}
         )
 
-        # 🛡️ 鲁棒性防线：如果有因 NaN 被清洗掉的野星，通过外连接补充回原始输入帧中，概率强制赋 0.0
+        # 🛡️ 特征残缺野星兜底隔离
         if len(df_result_clean) < len(df_all):
             df_all_ids = df_all[["id"]].copy()
             df_final = df_all_ids.merge(df_result_clean, on="id", how="left").fillna(
@@ -245,3 +276,21 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             return df_final
 
         return df_result_clean
+
+    def fit_predict(
+        self,
+        df_all: pd.DataFrame,
+        df_seeds: pd.DataFrame,
+        features: List[str],
+        use_density_prune: bool = False,
+    ) -> pd.DataFrame:
+        """
+        【快捷接口】拟合与推理天区一致时的快捷调用（如 Channel A Core 识别）。
+        """
+        model_params = self.fit(
+            df_tube=df_all,
+            df_seeds=df_seeds,
+            features=features,
+            use_density_prune=use_density_prune,
+        )
+        return self.predict(df_all=df_all, model_params=model_params, features=features)
