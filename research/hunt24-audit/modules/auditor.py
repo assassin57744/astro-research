@@ -82,7 +82,7 @@ class BasePhysicalAuditor(ABC):
 class _Chi2Auditor(BasePhysicalAuditor, ABC):
     """卡方检验系列策略的共享基类：运动学 / 视差 / RV / 决策逻辑。"""
 
-    p_threshold: float = 0.50  # 子类覆盖
+    p_threshold: float = cfg.THRESHOLD_MEMBERSHIP_PROB  # 子类覆盖
 
     # -------------------------------------------------------------------
     # 共享：维度计算
@@ -205,7 +205,7 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
 class Chi2UpmaskAuditor(_Chi2Auditor):
     """卡方检验 + pyUPMASK CMD 聚类概率 → χ²。"""
 
-    p_threshold = 0.50
+    p_threshold = cfg.THRESHOLD_MEMBERSHIP_PROB
 
     def __init__(self, cluster: StarCluster, logger: logging.Logger, cluster_id: str):
         super().__init__(cluster, logger)
@@ -292,7 +292,7 @@ class Chi2UpmaskAuditor(_Chi2Auditor):
 class Chi2ResidualAuditor(_Chi2Auditor):
     """卡方检验 + 等龄线插值残差 → χ²。"""
 
-    p_threshold = 0.05
+    p_threshold = cfg.ALPHA_CHI2_PVALUE
 
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
         return self._run_chi2_pipeline(df, "5d")

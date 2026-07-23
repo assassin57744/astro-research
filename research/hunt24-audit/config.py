@@ -41,6 +41,12 @@ THRESHOLD_BASE = 0.5
 THRESHOLD_HIGH_CONF = 0.5      # 高置信成员星判定门限
 THRESHOLD_GOLDEN = 0.8
 
+# 1. 机器学习/概率拟合模块的分界线（用于 Phase 2/3 分类硬门限）
+THRESHOLD_MEMBERSHIP_PROB = 0.5  # 成员概率 P >= 50% 记为 Candidate
+
+# 2. 物理一致性验证器 (Validator) 卡方检验显著性门限（用于 Phase 4 审计）
+ALPHA_CHI2_PVALUE = 0.05  # 统计学显著性水平 alpha = 0.05 (拒绝率 < 5% 的离群星)
+
 AUDIT_PROB_HIGH = 0.7            # 成员身份判定高门限
 AUDIT_PROB_LOW  = 0.3            # 成员身份判定低门限（背景噪点）
 AUDIT_RUWE_LIMIT = 1.4           # Gaia 天体测量质量门限
@@ -187,6 +193,7 @@ CLUSTERS = {
         "TUBE_LENGTH": 18.0,  # 总长 36 度
         "TUBE_WIDTH": 1.5,    # 总宽 3 度
         "TUBE_LENGTH_MULTIPLIER": 4.3,  # 自适应乘数覆盖：昴星团潮汐尾延伸极远
+        "TUBE_WIDTH_MULTIPLIER": 1.0,   # 自适应乘数覆盖: 增加宽度 0.3-1.0(乘数)
         "TUBE_SIGMA_CLIP": 5.0,  # Mahalanobis 运动学截断 (σ²)
         "DISTANCE_PC": 136.2,
         "DISTANCE_MODULUS": 5.66,
@@ -259,6 +266,8 @@ CLUSTERS = {
         "TIDAL_RADIUS": 12.0,  # 单位：pc
         "TUBE_LENGTH": 12.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_WIDTH": 3.0,
+        "TUBE_LENGTH_MULTIPLIER": 4.3,  # 蜂巢星团较近，但外围扩散尺度不同，按需调整
+        "TUBE_WIDTH_MULTIPLIER": 1.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_SIGMA_CLIP": 5.0,  # 空间管后 Mahalanobis 运动学截断 (σ²阈值): 保留 MD² ≤ σ² 的星
         "DISTANCE_PC": 187.0,
         "DISTANCE_MODULUS": 6.36,

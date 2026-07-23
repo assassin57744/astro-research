@@ -16,10 +16,10 @@ from modules.cluster import StarCluster
 
 import config as cfg
 
-
 # =============================================================================
 # 📦 管线运行时状态（可变，在管线执行过程中逐步填充）
 # =============================================================================
+
 
 @dataclass
 class PipelineState:
@@ -27,15 +27,19 @@ class PipelineState:
 
     与 RunContext 的不可变身份字段分离，避免"声称不可变却处处修改"的设计矛盾。
     """
+
     gmm_config: dict = field(default_factory=dict)
     required_features: list = field(default_factory=list)
     master_table: str = ""
-    seed_stats: dict = field(default_factory=dict)  # raw_count / clean_count / refined_count
+    seed_stats: dict = field(
+        default_factory=dict
+    )  # raw_count / clean_count / refined_count
 
 
 # =============================================================================
 # 📦 运行上下文数据类（单次运行的调度身份 + 可变状态引用）
 # =============================================================================
+
 
 @dataclass
 class RunContext:
@@ -50,12 +54,13 @@ class RunContext:
       - state: PipelineState，在管线各阶段逐步填充
       - star_cluster: 星团领域实体（Phase 1 创建后赋值）
     """
+
     cluster_id: str
-    category: str             # "hunt", "cg20", etc.
-    feature_space: str        # "2d", "5d", "6d_p", etc.
-    algorithm: str            # "dbscan", "hdbscan"
-    result_mode: str          # "brief" | "detailed"
-    param_source: str         # "file" | "db" — 用于构造 StarCluster，之后以 star_cluster.param_source 为准
+    category: str  # "hunt", "cg20", etc.
+    feature_space: str  # "2d", "5d", "6d_p", etc.
+    algorithm: str  # "dbscan", "hdbscan"
+    result_mode: str  # "brief" | "detailed"
+    param_source: str  # "file" | "db" — 用于构造 StarCluster，之后以 star_cluster.param_source 为准
 
     algo_params: dict = field(default_factory=dict)
     audit_params: dict = field(default_factory=dict)
@@ -68,6 +73,7 @@ class RunContext:
 # =============================================================================
 # AstroWorkflow 主类
 # =============================================================================
+
 
 class AstroWorkflow:
     """天文数据处理工作流编排引擎。
@@ -102,7 +108,6 @@ class AstroWorkflow:
     # =========================================================================
     # 🟢 一级：PUBLIC API
     # =========================================================================
-
 
     def run(
         self,
@@ -174,7 +179,6 @@ class AstroWorkflow:
 
         self._render_batch_summary(results)
         return results
-
 
     # =========================================================================
     # 🟡 二级：阶段调度器
@@ -290,7 +294,9 @@ class AstroWorkflow:
 
         local_ctx = ctx.copy() if ctx else {}
         cluster_id = local_ctx.get("id")
-        local_ctx.setdefault("CAT_NAME", local_ctx.get("ID_NAME", local_ctx.get("NAME")))
+        local_ctx.setdefault(
+            "CAT_NAME", local_ctx.get("ID_NAME", local_ctx.get("NAME"))
+        )
 
         if cluster_id:
             adapter = getattr(cfg, "CATALOG_NAMING_ADAPTER", {})
@@ -314,12 +320,16 @@ class AstroWorkflow:
         v_aln = cfg_source["aln_view"]
 
         df_raw = self.db.query(f"SELECT * FROM {v_aln}")
-        self.logger.info(f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗")
+        self.logger.info(
+            f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗"
+        )
 
         df_ext = self._transform_and_bridge_features(
             df_raw, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
         )
-        return self._defensive_nan_purge(df_ext, ctx.state.required_features, label="Target_field")
+        return self._defensive_nan_purge(
+            df_ext, ctx.state.required_features, label="Target_field"
+        )
 
     def _load_and_transform_seeds(self, ctx: RunContext) -> pd.DataFrame:
         """加载种子数据 → 特征转换 → NaN清洗。"""
@@ -329,9 +339,13 @@ class AstroWorkflow:
 
         df_raw = self.db.query(f"SELECT * FROM {v_src}")
         ctx.state.seed_stats["raw_count"] = len(df_raw)
-        self.logger.info(f"📋 [Process] 从视图 [{v_src}] 读取原始种子星: {len(df_raw)} 颗")
+        self.logger.info(
+            f"📋 [Process] 从视图 [{v_src}] 读取原始种子星: {len(df_raw)} 颗"
+        )
 
-        available_features = [f for f in ctx.state.required_features if f in df_raw.columns]
+        available_features = [
+            f for f in ctx.state.required_features if f in df_raw.columns
+        ]
         df_seeds = (
             df_raw.dropna(subset=available_features).copy()
             if available_features
@@ -343,7 +357,9 @@ class AstroWorkflow:
         df_ext = self._transform_and_bridge_features(
             df_seeds, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
         )
-        df_clean = self._defensive_nan_purge(df_ext, ctx.state.required_features, label="Seeds")
+        df_clean = self._defensive_nan_purge(
+            df_ext, ctx.state.required_features, label="Seeds"
+        )
         ctx.state.seed_stats["clean_count"] = len(df_clean)
 
         # 🎯 标签回写必须在特征清洗之后，确保只标记最终实际使用的种子
@@ -354,15 +370,20 @@ class AstroWorkflow:
         return df_clean
 
     def _transform_and_bridge_features(
-        self, df_raw: pd.DataFrame, feature_space: str, required_features: list[str],
+        self,
+        df_raw: pd.DataFrame,
+        feature_space: str,
+        required_features: list[str],
         star_cluster: StarCluster | None = None,
     ) -> pd.DataFrame:
         """特征转换网关。"""
         if df_raw is None:
             self.logger.error("❌ [Compute] 输入的原始 DataFrame 为 None！")
             return None
-        
-        self.logger.debug(f"🚀 [Compute] 正在执行特征转换，特征空间: {required_features}")
+
+        self.logger.debug(
+            f"🚀 [Compute] 正在执行特征转换，特征空间: {required_features}"
+        )
 
         cl = star_cluster
         cluster_rv = cl.get_param("RV_REF", None)
@@ -383,11 +404,15 @@ class AstroWorkflow:
         cols_upper = [col.upper() for col in required_features]
         cols_lower = [col.lower() for col in required_features]
 
-        df_features = pd.DataFrame(X_array, columns=required_features, index=df_raw.index)
+        df_features = pd.DataFrame(
+            X_array, columns=required_features, index=df_raw.index
+        )
 
         dup_cols = [col for col in df_raw.columns if col in (cols_upper + cols_lower)]
         if dup_cols:
-            self.logger.info(f"🔄 [Compute] 模式 [{feature_space}] 移除重复列: {dup_cols}")
+            self.logger.info(
+                f"🔄 [Compute] 模式 [{feature_space}] 移除重复列: {dup_cols}"
+            )
             df_raw = df_raw.drop(columns=dup_cols)
         return pd.concat([df_raw, df_features], axis=1)
 
@@ -400,7 +425,7 @@ class AstroWorkflow:
             return pd.DataFrame()
 
         initial_count = len(df_extended)
-        
+
         # 🌟 防护 1：校验 required_features 是否存在于 DataFrame 中
         missing_cols = [f for f in required_features if f not in df_extended.columns]
         if missing_cols:
@@ -425,11 +450,11 @@ class AstroWorkflow:
                 f"剩余 {len(df_clean)}。"
             )
         else:
-            self.logger.info(f"✅ [Compute] [数据预检 - {label}] 共计 {len(df_clean)} 颗。")
-            
-        return df_clean
+            self.logger.info(
+                f"✅ [Compute] [数据预检 - {label}] 共计 {len(df_clean)} 颗。"
+            )
 
-    
+        return df_clean
 
     # ── GMM 成员识别 ──
 
@@ -439,26 +464,36 @@ class AstroWorkflow:
     )
     def _compute_members(self, ctx: RunContext) -> str | None:
         """统一的成员识别调度器。"""
-        self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}")
+        self.logger.info(
+            f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}"
+        )
 
         df_target_final = self._load_and_transform_field(ctx)
-        self.logger.info(f"✅ [Compute] 算法内核计算完成，目标天区共计 {len(df_target_final)} 颗天体。top N: \n{df_target_final.head()}")
+        self.logger.info(
+            f"✅ [Compute] 算法内核计算完成，目标天区共计 {len(df_target_final)} 颗天体。top N: \n{df_target_final.head()}"
+        )
 
         # 🚀 必须先建表，再加载种子（_load_and_transform_seeds 内部会调用 tag_master_table 回灌标签）
         self.db.init_master_table(ctx.state.master_table, df_target_final)
         df_seeds_final = self._load_and_transform_seeds(ctx)
-        self.logger.info(f"✅ [Compute] 算法内核计算完成，种子星共计 {len(df_seeds_final)} 颗。top N: \n{df_seeds_final.head()}")
+        self.logger.info(
+            f"✅ [Compute] 算法内核计算完成，种子星共计 {len(df_seeds_final)} 颗。top N: \n{df_seeds_final.head()}"
+        )
 
         use_experimental = ctx.state.gmm_config.get("use_experimental", False)
         if not use_experimental:
             df_res = self._run_stable_pipeline(ctx, df_target_final, df_seeds_final)
         else:
-            df_res = self._run_experimental_pipeline(ctx, df_target_final, df_seeds_final)
+            df_res = self._run_experimental_pipeline(
+                ctx, df_target_final, df_seeds_final
+            )
 
         if df_res is None or df_res.empty:
             raise ValueError("❌ [Compute] 算法内核异常：结果 DataFrame 为空！")
 
-        self.logger.info(f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。")
+        self.logger.info(
+            f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。"
+        )
         self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
 
         # 回灌概率及分通道信息（若存在 core_prob / tail_prob / source 则一并写入）
@@ -472,7 +507,10 @@ class AstroWorkflow:
         return ctx.state.master_table
 
     def _run_stable_pipeline(
-        self, ctx: RunContext, df_target_final: pd.DataFrame, df_seeds_final: pd.DataFrame
+        self,
+        ctx: RunContext,
+        df_target_final: pd.DataFrame,
+        df_seeds_final: pd.DataFrame,
     ) -> pd.DataFrame:
         """稳定生产轨：使用传统 PriorGMM。"""
         self.logger.warning("🔒 [Compute] 稳定生产模式：执行 PriorGMM 老轨行为")
@@ -517,15 +555,11 @@ class AstroWorkflow:
         )
 
         if df_seeds_core is None or df_seeds_core.empty:
-            raise ValueError(
-                "❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！"
-            )
+            raise ValueError("❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！")
 
         # 记录种子统计信息并回写 Master 表
         ctx.state.seed_stats["refined_count"] = len(df_seeds_core)
-        self.logger.info(
-            f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_core)} 颗。"
-        )
+        self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_core)} 颗。")
 
         df_tag_refined = df_seeds_core[[cfg.STD_COLS["ID"]]].copy()
         df_tag_refined["seed_type"] = "refined_seed"
@@ -568,9 +602,7 @@ class AstroWorkflow:
             raise ValueError(f"未知的策略类型 [{strategy_name}]")
 
         engine_class = STRATEGY_CLASSES[strategy_name]
-        self.logger.info(
-            f"🧠 [Compute] 路由至消歧拟合引擎 [{engine_class.__name__}]"
-        )
+        self.logger.info(f"🧠 [Compute] 路由至消歧拟合引擎 [{engine_class.__name__}]")
         engine = engine_class(**strategy_kwargs)
 
         # ---------------------------------------------------------
@@ -815,7 +847,6 @@ class AstroWorkflow:
     import pandas as pd
     from sklearn.decomposition import PCA
 
-
     def _build_spatial_tube(
         self,
         df_all: pd.DataFrame,
@@ -854,6 +885,12 @@ class AstroWorkflow:
                     )
 
         col_x, col_y = coord_cols[0], coord_cols[1]
+        self.logger.info(f"🌟 [Compute] 空间坐标列: {coord_cols}")
+        self.logger.info(f"🌟 [Compute] 空间主轴长度：{length_deg}°")
+        self.logger.info(f"🌟 [Compute] 空间主轴宽度：{width_deg}°")
+
+        # 🌟 2. 精确计算种子星物理质心 (x0, y0)
+        # 1. 计算种子星质心
 
         # 2. 精确计算种子星物理质心 (x0, y0)
         y0 = float(np.mean(df_seeds[col_y]))
@@ -891,11 +928,7 @@ class AstroWorkflow:
             None,
         )
         pm_y_col = next(
-            (
-                cols_map[k]
-                for k in ["pm_b", "pmb", "pmdec", "pm_dec"]
-                if k in cols_map
-            ),
+            (cols_map[k] for k in ["pm_b", "pmb", "pmdec", "pm_dec"] if k in cols_map),
             None,
         )
 
@@ -938,9 +971,7 @@ class AstroWorkflow:
         coords_seeds_pca = pca.transform(coords_seeds_centered)
         seed_cross_std = float(np.std(coords_seeds_pca[:, 1]))
         actual_width = float(
-            np.clip(
-                sigma_multiplier * seed_cross_std, a_min=0.8, a_max=width_deg
-            )
+            np.clip(sigma_multiplier * seed_cross_std, a_min=0.8, a_max=width_deg)
         )
 
         self.logger.info(
@@ -957,9 +988,7 @@ class AstroWorkflow:
         coords_pca = pca.transform(coords_all_centered)
 
         pca_long = pd.Series(coords_pca[:, 0], index=df_all.index, name="pca_long")
-        pca_cross = pd.Series(
-            coords_pca[:, 1], index=df_all.index, name="pca_cross"
-        )
+        pca_cross = pd.Series(coords_pca[:, 1], index=df_all.index, name="pca_cross")
 
         # 9. 构建切片掩模
         tube_mask = (
@@ -1067,12 +1096,12 @@ class AstroWorkflow:
         target_aln_view = self.manifest[ctx.category]["aln_view"].format(
             cluster=ctx.cluster_id.lower()
         )
-        audit_res = self._cross_match_with_literature(
-            ctx, target_aln_view
-        )
+        audit_res = self._cross_match_with_literature(ctx, target_aln_view)
 
         if audit_res.get("status") != "success":
-            self.logger.warning(f"⚠️ [Audit] 交叉比对未完全成功: {audit_res.get('message')}")
+            self.logger.warning(
+                f"⚠️ [Audit] 交叉比对未完全成功: {audit_res.get('message')}"
+            )
             return audit_res
 
         self.logger.info("✅ [Audit] 交叉审计比对完成。")
@@ -1081,9 +1110,7 @@ class AstroWorkflow:
         audit_res["deep_stats_ref"] = deep_stats_ref
         return audit_res
 
-    def _cross_match_with_literature(
-        self, ctx: RunContext, v_target: str
-    ) -> dict:
+    def _cross_match_with_literature(self, ctx: RunContext, v_target: str) -> dict:
         """交叉比对（保留原有逻辑）。"""
         if not self._verify_audit_target_exists(v_target):
             self.logger.warning(f"⚠️ [Audit] 审计目标表 '{v_target}' 不存在。")
@@ -1172,9 +1199,13 @@ class AstroWorkflow:
 
         return deep_stats_pg, deep_stats_ref
 
-    def _run_deep_audit(self, ctx: RunContext, v_audit_view: str, audit_type: str) -> tuple:
+    def _run_deep_audit(
+        self, ctx: RunContext, v_audit_view: str, audit_type: str
+    ) -> tuple:
         """对单个候选视图执行深度审计。"""
-        v_result = self._run_audit_pipeline(ctx, target=v_audit_view, audit_type=audit_type)
+        v_result = self._run_audit_pipeline(
+            ctx, target=v_audit_view, audit_type=audit_type
+        )
         if not v_result:
             return None, {}
 
@@ -1185,7 +1216,9 @@ class AstroWorkflow:
         stats = dict(self.db.con.execute(sql).fetchall())
         return v_result, stats
 
-    def _run_audit_pipeline(self, ctx: RunContext, target: str, audit_type: str = "default") -> str | None:
+    def _run_audit_pipeline(
+        self, ctx: RunContext, target: str, audit_type: str = "default"
+    ) -> str | None:
         """驱动完整审计管线（原 run_audit 重命名）。"""
         self.logger.info(f"🔍 🎬 [Audit] 开始对 {target} 进行身份审计...")
 
@@ -1244,7 +1277,9 @@ class AstroWorkflow:
             self.logger.error(f"❌ [Audit] 审计数据准备失败: {str(e)}")
             return None
 
-    def _warm_up_literature_cache(self, validator: UnifiedMemberValidator, v_source: str):
+    def _warm_up_literature_cache(
+        self, validator: UnifiedMemberValidator, v_source: str
+    ):
         """SIMBAD 文献缓存预热。
 
         若本地缓存表尚不存在（首次运行），将所有候选 ID 一次性送入
@@ -1278,7 +1313,9 @@ class AstroWorkflow:
                 LEFT JOIN {cache_table} c ON CAST(v.id AS VARCHAR) = c.gaia_dr3_id
                 WHERE c.gaia_dr3_id IS NULL
             """
-            self.logger.info(f"🔍 [Audit] 正在检索 [{v_source}] 中缺失的文献缓存记录...")
+            self.logger.info(
+                f"🔍 [Audit] 正在检索 [{v_source}] 中缺失的文献缓存记录..."
+            )
             df_missing = self.db.con.execute(sql_missing).df()
             ids_to_sync = df_missing["id"].tolist()
 
@@ -1321,7 +1358,9 @@ class AstroWorkflow:
         if audit_result.get("v_audit_ref_only"):
             self.db.export_table(
                 audit_result["v_audit_ref_only"],
-                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(base=export_base + "_ref_only"),
+                filename=cfg.TMPL.FILE_DEEP_AUDIT.format(
+                    base=export_base + "_ref_only"
+                ),
                 format="csv",
                 export_dir=cfg.RESULTS_DIR,
             )
@@ -1330,7 +1369,9 @@ class AstroWorkflow:
 
     # ── 报告 ──
 
-    def _report_phase(self, ctx: RunContext, post_result: dict, audit_result: dict) -> dict:
+    def _report_phase(
+        self, ctx: RunContext, post_result: dict, audit_result: dict
+    ) -> dict:
         """生成最终报告并返回绩效摘要。"""
         cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
@@ -1368,5 +1409,3 @@ class AstroWorkflow:
         self.logger.info(
             f"🏁 [Batch] 全量执行完成。共 {len(all_results)} 个组合产出有效结果。"
         )
-
-
