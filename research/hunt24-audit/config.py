@@ -415,8 +415,8 @@ CLUSTERS = {
         "RV_ERROR": 3.0,
         "KINE_SCORE_LIMIT": 2.0,
         "PM_RADIUS": 1.5,  # 远距离星团自行弥散极小
-        "PLX_ERROR": 0.029495399758903088,  # 视差容忍度收紧
-        "CMD_DEV": 0.5,
+        "PLX_ERROR": 0.2,  # 视差容忍度收紧
+        "CMD_DEV": 0.6,
         "SEED_RADIUS": 2.5,       # 继续扩大以包含更多外围种子
         "SEED_PLX_LIM": 1.2,       # 放宽视差限制以找回更多潜在种子
         "SEED_MAX_MAG": 22.0,

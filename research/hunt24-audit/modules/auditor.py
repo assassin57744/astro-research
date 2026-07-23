@@ -2,8 +2,8 @@
 """物理一致性审计策略模块。
 
 提供可插拔的物理验证策略，每种策略封装完整的审计管线：
-  - Chi2UpmaskAuditor      (默认): 卡方检验 + pyUPMASK CMD,  p ≥ 0.50
-  - Chi2ResidualAuditor    (实验A): 卡方检验 + 等龄线插值残差, p ≥ 0.05
+  - Chi2UpmaskAuditor      (默认): 卡方检验 + pyUPMASK CMD,  p ≥ cfg.THRESHOLD_MEMBERSHIP_PROB
+  - Chi2ResidualAuditor    (实验A): 卡方检验 + 等龄线插值残差, p ≥ cfg.ALPHA_CHI2_PVALUE
   - WeightedPenaltyAuditor (实验B): 启发式加权惩罚分
 
 工厂函数 create_auditor() 根据 cfg.VALIDATION_STRATEGY 自动路由。
@@ -29,9 +29,10 @@ import modules.pyUPMASK.pyUPMASK as upmask_mod
 class BasePhysicalAuditor(ABC):
     """物理审计策略抽象基类。"""
 
-    def __init__(self, cluster: StarCluster, logger: logging.Logger):
+    def __init__(self, cluster: StarCluster, logger: logging.Logger, dim_mode: str = "5d_h"):
         self.cluster = cluster
         self.logger = logger
+        self.dim_mode = dim_mode
 
     # -------------------------------------------------------------------
     # 共享：NaN 过滤
@@ -66,12 +67,16 @@ class BasePhysicalAuditor(ABC):
         )
 
     # -------------------------------------------------------------------
-    # 抽象入口
+    # 抽象入口（所有子类必须实现 audit）
     # -------------------------------------------------------------------
 
     @abstractmethod
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
-        """执行物理一致性审计，返回带 is_phys_consistent 列的 DataFrame。"""
+        """执行物理一致性审计，返回带 is_phys_consistent 列的 DataFrame。
+
+        Args:
+            df: 输入数据帧（含运动学、测光等字段）
+        """
         ...
 
 
@@ -82,41 +87,55 @@ class BasePhysicalAuditor(ABC):
 class _Chi2Auditor(BasePhysicalAuditor, ABC):
     """卡方检验系列策略的共享基类：运动学 / 视差 / RV / 决策逻辑。"""
 
-    p_threshold: float = cfg.THRESHOLD_MEMBERSHIP_PROB  # 子类覆盖
+    p_threshold: float = cfg.ALPHA_CHI2_PVALUE  # 子类覆盖
 
     # -------------------------------------------------------------------
     # 共享：维度计算
     # -------------------------------------------------------------------
 
-    def _compute_kine_chi2(self, df: pd.DataFrame, is_2d: bool, is_physical_v: bool):
-        """动力学卡方：3D 速度或 2D 自行马氏距离。"""
-        if is_physical_v and all(c in df.columns for c in ["u", "v", "w"]):
-            uvw_ref = self.cluster.get_param("UVW_REF")
-            u_res = df["u"] - uvw_ref[0]
-            v_res = df["v"] - uvw_ref[1]
-            w_res = df["w"] - uvw_ref[2]
-            kine = (
-                (u_res / self.cluster.get_param("U_ERROR")) ** 2
-                + (v_res / self.cluster.get_param("V_ERROR")) ** 2
-                + (w_res / self.cluster.get_param("W_ERROR")) ** 2
-            )
+    def _compute_kine_chi2(self, df: pd.DataFrame):
+        """动力学卡方：3D 速度或 2D 自行马氏距离。
+
+        使用当前子集的 PM/UVW 中位数作为动态参考值（而非固定配置值），
+        使得审计能自适应不同子集（PG Only / Ref Only）的 PM 分布差异。
+        Ref Only 星往往是更弥散的外围成员，PM 质心可能与核心不同，
+        使用动态参考可避免系统性偏差导致的 χ² 膨胀。
+
+        注意：5d_h 模式（银道特征空间 pm_l_cosb/pm_b）在审计时不做特殊处理。
+        原因：
+          1. SQL (_build_audit_sql) 已通过 stx_view 计算出赤道 pmra_residual/pmdec_residual，
+             审计矩阵始终包含 pmra/pmdec 列，无论特征空间是赤道还是银道。
+          2. pm_inv_cov 基于 PMRA_DISPERSION/PMDEC_DISPERSION 构建，是赤道坐标系下的。
+          3. 赤道 ↔ 银道是纯坐标系旋转，马氏距离在正交旋转下保持不变，
+             因此 χ² 值相同，无需为银道模式单独实现。
+          总之：审计和聚类是解耦的 —— 聚类用银道特征空间，审计统一用赤道自行残差。
+        """
+        if all(c in df.columns for c in ["u", "v", "w"]):
+            uvw_ref = df[["u", "v", "w"]].median().values
+            u_res = df[["u", "v", "w"]].values - uvw_ref
+            uvw_inv_cov = self.cluster.uvw_inv_cov
+            kine = np.einsum("ni,ij,nj->n", u_res, uvw_inv_cov, u_res)
             dof = 3
+            self.logger.debug(
+                f"  🎯 [Kine] 动态 UVW 参考: ({uvw_ref[0]:.2f}, {uvw_ref[1]:.2f}, {uvw_ref[2]:.2f}) km/s"
+            )
         else:
-            pmra_ref = self.cluster.get_param("PMRA_REF")
-            pmdec_ref = self.cluster.get_param("PMDEC_REF")
+            pmra_ref = df["pmra"].median()
+            pmdec_ref = df["pmdec"].median()
             pm_res = df[["pmra", "pmdec"]].values - np.array([pmra_ref, pmdec_ref])
             pm_inv_cov = self.cluster.pm_inv_cov
             kine = np.einsum("ni,ij,nj->n", pm_res, pm_inv_cov, pm_res)
             dof = 2
+            self.logger.debug(
+                f"  🎯 [Kine] 动态 PM 参考: pmra={pmra_ref:.3f}, pmdec={pmdec_ref:.3f} mas/yr"
+            )
 
         df["kine_chi2"] = kine
         df["total_integrated_chi2"] += kine
         df["total_dof"] += dof
 
-    def _compute_plx_chi2(self, df: pd.DataFrame, is_2d: bool):
+    def _compute_plx_chi2(self, df: pd.DataFrame):
         """视差卡方 (DoF=1)，仅 3D+ 模式生效。"""
-        if is_2d:
-            return
         plx_err = self.cluster.get_param("PLX_ERROR", 1.0)
         plx_chi2 = (df["plx_residual"] / plx_err) ** 2
         df["plx_chi2"] = plx_chi2
@@ -151,17 +170,30 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
             df["global_cluster_probability"] >= self.p_threshold
         )
 
-        self.logger.info(f"📊 [卡方检验报告] p 阈值 = {self.p_threshold}:")
+        self.logger.info(f"📊 [卡方检验报告] p 阈值 = {self.p_threshold}（上尾检验）:")
         for dof_val in sorted(df["total_dof"].unique()):
             dof_mask = df["total_dof"] == dof_val
             if not dof_mask.any():
                 continue
-            chi2_cutoff = chi2.ppf(self.p_threshold, max(int(dof_val), 1))
+            _dof = max(int(dof_val), 1)
+            chi2_cutoff = chi2.ppf(1 - self.p_threshold, _dof)  # 上尾临界
             passed = (dof_mask & df["is_phys_consistent"]).sum()
             total = dof_mask.sum()
             self.logger.info(
-                f"  -> DoF={int(dof_val)}: χ²临界={chi2_cutoff:.3f}, "
+                f"  -> DoF={_dof}: χ²临界(上尾)={chi2_cutoff:.3f}, "
                 f"通过={passed}/{total} ({passed/total*100:.1f}%)"
+            )
+
+        # 诊断：未通过星的各分量均值
+        failed = df[~df["is_phys_consistent"]]
+        if not failed.empty:
+            parts = []
+            for col, label in [("kine_chi2", "PM"), ("plx_chi2", "PLX"),
+                               ("rv_chi2", "RV"), ("cmd_chi2", "CMD")]:
+                if col in failed.columns and failed[col].notna().any():
+                    parts.append(f"{label}={failed[col].mean():.2f}")
+            self.logger.info(
+                f"  💡 [诊断] 未通过星 χ² 分量均值: {' | '.join(parts)}"
             )
         return df
 
@@ -178,13 +210,22 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
     # 模板方法
     # -------------------------------------------------------------------
 
-    def _run_chi2_pipeline(self, df: pd.DataFrame, dim_mode: str) -> pd.DataFrame:
+    def _run_chi2_pipeline(self, df: pd.DataFrame) -> pd.DataFrame:
         """卡方系列共享管线：维度计算 → CMD → 决策 → 后处理。"""
-        is_2d = dim_mode == "2d"
-        is_physical_v = dim_mode in ["3d_v", "6d_p"]
+        is_2d = self.dim_mode == "2d"
 
-        self._compute_kine_chi2(df, is_2d, is_physical_v)
-        self._compute_plx_chi2(df, is_2d)
+        # 日志诊断：输出当前弥散度参数，用于排查 χ² 偏离问题
+        self.logger.info(
+            f"📐 [Chi2 弥散度参数] "
+            f"PMRA_DISP={self.cluster.get_param('PMRA_DISPERSION', 'N/A'):.3f}, "
+            f"PMDEC_DISP={self.cluster.get_param('PMDEC_DISPERSION', 'N/A'):.3f}, "
+            f"PLX_ERR={self.cluster.get_param('PLX_ERROR', 'N/A'):.3f}, "
+            f"CMD_DEV={self.cluster.get_param('CMD_DEV', 'N/A'):.3f}"
+        )
+
+        self._compute_kine_chi2(df)
+        if not is_2d:
+            self._compute_plx_chi2(df)
         self._compute_rv_chi2(df)
 
         self._compute_cmd(df)
@@ -205,19 +246,14 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
 class Chi2UpmaskAuditor(_Chi2Auditor):
     """卡方检验 + pyUPMASK CMD 聚类概率 → χ²。"""
 
-    p_threshold = cfg.THRESHOLD_MEMBERSHIP_PROB
+    p_threshold = cfg.ALPHA_CHI2_PVALUE
 
-    def __init__(self, cluster: StarCluster, logger: logging.Logger, cluster_id: str):
-        super().__init__(cluster, logger)
+    def __init__(self, cluster: StarCluster, logger: logging.Logger, cluster_id: str, dim_mode: str = "5d_h"):
+        super().__init__(cluster, logger, dim_mode)
         self.cluster_id = cluster_id
 
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
-        dim_mode = "5d"  # 由调用方通过 feature_space 指定时注入，此处保留默认
-        # 实际 dim_mode 由 validator 在外层传入；为保持接口一致，这里由子类处理
-        return self._run_chi2_pipeline(df, dim_mode)
-
-    def audit_with_dim(self, df: pd.DataFrame, dim_mode: str) -> pd.DataFrame:
-        return self._run_chi2_pipeline(df, dim_mode)
+        return self._run_chi2_pipeline(df)
 
     def _compute_cmd(self, df: pd.DataFrame):
         """pyUPMASK 聚类概率 → χ²。"""
@@ -295,10 +331,7 @@ class Chi2ResidualAuditor(_Chi2Auditor):
     p_threshold = cfg.ALPHA_CHI2_PVALUE
 
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._run_chi2_pipeline(df, "5d")
-
-    def audit_with_dim(self, df: pd.DataFrame, dim_mode: str) -> pd.DataFrame:
-        return self._run_chi2_pipeline(df, dim_mode)
+        return self._run_chi2_pipeline(df)
 
     def _compute_cmd(self, df: pd.DataFrame):
         """等龄线插值残差 → χ²。"""
@@ -339,16 +372,8 @@ class WeightedPenaltyAuditor(BasePhysicalAuditor):
     """启发式加权惩罚分验证。"""
 
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
-        """执行加权惩罚分审计，返回带 is_phys_consistent 的 DataFrame。
-
-        注意：dim_mode 在 constructor 之后由 validator 通过 audit_with_dim 传入。
-        """
-        # 由 audit_with_dim 实际驱动
-        return df
-
-    def audit_with_dim(self, df: pd.DataFrame, dim_mode: str) -> pd.DataFrame:
-        is_2d = dim_mode == "2d"
-        is_physical_v = dim_mode in ["3d_v", "6d_p"]
+        is_2d = self.dim_mode == "2d"
+        is_physical_v = self.dim_mode in ["3d_v", "6d_p"]
 
         penalties: dict = {}
         df["cmd_residual"] = np.nan
@@ -439,7 +464,8 @@ class WeightedPenaltyAuditor(BasePhysicalAuditor):
 # =============================================================================
 
 def create_auditor(strategy: str, cluster: StarCluster, logger: logging.Logger,
-                   cluster_id: str | None = None) -> BasePhysicalAuditor:
+                   cluster_id: str | None = None,
+                   dim_mode: str = "5d_h") -> BasePhysicalAuditor:
     """根据策略名创建对应的物理审计器实例。
 
     Args:
@@ -447,11 +473,12 @@ def create_auditor(strategy: str, cluster: StarCluster, logger: logging.Logger,
         cluster: 星团物理实体
         logger: 日志记录器
         cluster_id: 星团 ID（chi2_upmask 策略需要，用于 pyUPMASK 文件路径构造）
+        dim_mode: 维度模式 ("2d", "5d", "5d_h", "3d_v", "6d_p" 等)
     """
     _strategies = {
-        "chi2_upmask": lambda: Chi2UpmaskAuditor(cluster, logger, cluster_id or cluster.id),
-        "chi2_cmd_residual": lambda: Chi2ResidualAuditor(cluster, logger),
-        "weighted_penalty": lambda: WeightedPenaltyAuditor(cluster, logger),
+        "chi2_upmask": lambda: Chi2UpmaskAuditor(cluster, logger, cluster_id or cluster.id, dim_mode),
+        "chi2_cmd_residual": lambda: Chi2ResidualAuditor(cluster, logger, dim_mode=dim_mode),
+        "weighted_penalty": lambda: WeightedPenaltyAuditor(cluster, logger, dim_mode=dim_mode),
     }
     factory = _strategies.get(strategy)
     if factory is None:

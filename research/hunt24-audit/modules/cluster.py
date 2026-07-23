@@ -22,7 +22,8 @@ class StarCluster:
         "CENTER_RA", "CENTER_DEC", "PLX_REF", "PLX_ERROR",
         "PMRA_REF", "PMDEC_REF", "PMRA_ERROR", "PMDEC_ERROR",
         "PMRA_DISPERSION", "PMDEC_DISPERSION", "PM_CORR",
-        "RV_REF", "RV_ERROR", "DISTANCE_PC", "ISO_FILE", "E_BP_RP", "EXT_AG"
+        "RV_REF", "RV_ERROR", "DISTANCE_PC", "ISO_FILE", "E_BP_RP", "EXT_AG",
+        "U_ERROR", "V_ERROR", "W_ERROR", "UVW_CORR_UV", "UVW_CORR_UW", "UVW_CORR_VW",
     ]
 
     def __init__(self, cluster_id: str, db_instance=None, param_source=None):
@@ -36,6 +37,7 @@ class StarCluster:
 
         # 2. 初始化关键容器
         self.pm_inv_cov = None
+        self.uvw_inv_cov = None
         self.cmd_interpolator = None
         self.cmd_color_bounds = (0.0, 3.5) # 默认安全边界
 
@@ -66,6 +68,7 @@ class StarCluster:
 
             # 3. 重新构建运动学逆协方差矩阵
             self.pm_inv_cov = self._load_pm_inverse_covariance()
+            self.uvw_inv_cov = self._load_uvw_inverse_covariance()
 
             # 4. 触发测光演化 DNA (等龄线) 的解析与构建
             self._setup_cmd_constraints()
@@ -119,6 +122,31 @@ class StarCluster:
         except Exception as e:
             self.logger.warning(f"⚠️ [Physical] 逆协方差矩阵构建失败，降级为单位阵。原因: {e}")
             return np.eye(2)
+
+    def _load_uvw_inverse_covariance(self):
+        """基于 UVW 弥散度构建 3D 逆协方差矩阵"""
+        self.logger.debug(f"📐 [Physical] 正在构建 UVW 协方差矩阵...")
+        try:
+            full_cov = self.get_param("UVW_COVARIANCE_MATRIX")
+            if full_cov is not None:
+                return np.linalg.inv(np.array(full_cov))
+
+            u_err = getattr(self, "u_error", None) or 2.5
+            v_err = getattr(self, "v_error", None) or 1.8
+            w_err = getattr(self, "w_error", None) or 1.2
+            corr_uv = getattr(self, "uvw_corr_uv", 0.0) or 0.0
+            corr_uw = getattr(self, "uvw_corr_uw", 0.0) or 0.0
+            corr_vw = getattr(self, "uvw_corr_vw", 0.0) or 0.0
+
+            cov_matrix = np.array([
+                [u_err**2,          corr_uv*u_err*v_err, corr_uw*u_err*w_err],
+                [corr_uv*u_err*v_err, v_err**2,          corr_vw*v_err*w_err],
+                [corr_uw*u_err*w_err, corr_vw*v_err*w_err, w_err**2],
+            ])
+            return np.linalg.inv(cov_matrix)
+        except Exception as e:
+            self.logger.warning(f"⚠️ [Physical] UVW 逆协方差矩阵构建失败，降级为单位阵。原因: {e}")
+            return np.eye(3)
 
     def _setup_cmd_constraints(self):
         """解析理论模型文件，应用距离模数平移并构建 CMD 插值器。

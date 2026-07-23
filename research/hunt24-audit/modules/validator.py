@@ -35,7 +35,8 @@ class UnifiedMemberValidator:
         # 物理审计器（策略由 cfg.VALIDATION_STRATEGY 决定，构造时一次性选定）
         strategy = getattr(cfg, "VALIDATION_STRATEGY", "chi2_upmask")
         self._phys_auditor = create_auditor(
-            strategy, self.cluster_obj, self.logger, self.cluster_id
+            strategy, self.cluster_obj, self.logger,
+            cluster_id=self.cluster_id, dim_mode=feature_space,
         )
         # 文献审计器
         self._lit_auditor = LiteratureAuditor(
@@ -43,103 +44,103 @@ class UnifiedMemberValidator:
         )
 
     def run(self, v_target_detail: str) -> pd.DataFrame:
-        """
-        驱动多维度深度审计管线。
-        包括：
-        1. 数据库侧执行物理残差预计算与文献对齐。
-        2. 空间分布分析（距离中心投影）。
-        3. 测光演化残差（CMD）分析。
-        4. 综合物理与文献证据链，判定成员身份。
-        Args:
-            v_target_detail (str): 包含详细物理参数的输入视图名。
-        Returns:
-            pd.DataFrame: 包含审计结果（audit_status）与物理指标的完整数据帧。
-        """
+        """驱动多维度深度审计管线：加载 → 空间投影 → 物理审计 → 文献审计 → 融合决策。"""
         self.logger.info(f"🎬 [Validator] 启动审计管线，目标视图: {v_target_detail}")
-        # 1. 构建并执行 SQL 获取基础数据
-        sql = self._build_audit_sql(v_target_detail)
-        audit_matrix = self.db.execute(sql).df()
-        self.logger.debug(f"🔍 [Validator] 获取到 {len(audit_matrix)} 条样本。")
-        self.logger.debug(f"🔍 [Validator] 审计数据: \n{audit_matrix.head(5)}")
-        for cc in audit_matrix.columns:
-            self.logger.debug(f"🔍 [Validator] 审计数据 columns : {cc}")
-        # 🚀 【防御机制】如果数据集为空，直接初始化结构并提前退出，防止下游 KeyError
+
+        # ── 1. 数据加载 ──
+        audit_matrix = self._load_audit_data(v_target_detail)
         if audit_matrix.empty:
-            self.logger.warning(
-                f"⚠️ [Validator] 目标视图 {v_target_detail} 未提取到任何样本，跳过后续矩阵计算。"
-            )
-            # 补齐关键列名，确保下游合并或读取时不会崩溃
-            empty_cols = [
-                "distance_to_center",
-                "cmd_residual",
-                "is_phys_consistent",
-                "audit_status",
-                "audit_note",
-            ]
-            for col in empty_cols:
-                audit_matrix[col] = pd.Series(dtype=object)
             return audit_matrix
-        # 2. 空间投影距离计算 (利用从 Cluster 绑定的 CfgMgr 动态拉取的视距离参数)
-        cluster_dist = self.cluster_obj.get_param("DISTANCE_PC", 100.0)
-        audit_matrix["distance_to_center"] = cluster_dist * np.radians(
-            audit_matrix["sep_deg"]
-        )
-        # 3. 物理一致性审计：验证观测数据是否符合星团物理规律 (送入重构后的 StarCluster 对象)
-        audit_matrix = self._audit_physical_consistency(audit_matrix)
-        # 4. 文献共识审计
-        consensus_df = self._lit_auditor.audit(audit_matrix)
-        is_lit_consensus = consensus_df["is_lit_consensus"]
-        is_phys_consistent = audit_matrix["is_phys_consistent"]
-        # 5. 向量化最终规则决策
-        conditions = [
-            (is_phys_consistent == True) & (is_lit_consensus == True),
-            (is_phys_consistent == True) & (is_lit_consensus == False),
-            (is_phys_consistent == False)
-            & (is_lit_consensus == True),  # Literature Only
-            (is_phys_consistent == False)
-            & (is_lit_consensus == False),  # Contamination
-        ]
-        choices = [
-            "Confirmed Member",
-            "New Candidate",
-            "Literature Only",
-            "Contamination",
-        ]
-        audit_matrix["audit_status"] = np.select(
-            conditions, choices, default="Contamination"
-        )
-        # 6. 向量化细化诊断备注
-        audit_matrix["audit_note"] = "N/A"
-        mask_lit = audit_matrix["audit_status"] == "Literature Only"
-        if mask_lit.any():
-            # 使用 np.select 进一步优化备注生成逻辑
-            ruwe_col = (
-                audit_matrix["ruwe"]
-                if "ruwe" in audit_matrix.columns
-                else pd.Series(1.0, index=audit_matrix.index)
-            )
-            # 仅对符合 Literature Only 条件的子集进行条件判定，确保结果长度对齐
-            df_lit = audit_matrix[mask_lit]
-            # 安全兼容一维及解耦后的二维自行残差判定备注
-            if "pmra_residual" in df_lit.columns and "pmdec_residual" in df_lit.columns:
-                pm_outlier_cond = (df_lit["pmra_residual"] > cfg.PHYS_LIT_PM_LIMIT) | (
-                    df_lit["pmdec_residual"] > cfg.PHYS_LIT_PM_LIMIT
-                )
-            else:
-                pm_outlier_cond = df_lit["pm_residual"] > cfg.PHYS_LIT_PM_LIMIT
-            # 动态获取当前星团的潮汐半径限制
-            tidal_radius = self.cluster_obj.get_param("TIDAL_RADIUS", 10.0)
-            conds = [
-                pm_outlier_cond & (df_lit["cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT),
-                (df_lit["distance_to_center"] > tidal_radius),
-                (ruwe_col[mask_lit] > cfg.AUDIT_RUWE_LIMIT),
-            ]
-            choices = ["CMD Outlier", "Tidal Tail Member", "Gaia Data Quality Issue"]
-            audit_matrix.loc[mask_lit, "audit_note"] = np.select(
-                conds, choices, default="Standard Literature Entry"
-            )
+
+        # ── 2. 空间投影 ──
+        self._compute_spatial_features(audit_matrix)
+
+        # ── 3. 物理一致性审计 ──
+        self._audit_physical_consistency(audit_matrix)
+
+        # ── 4. 文献共识审计 ──
+        consensus_df = self._audit_literature_consistency(audit_matrix)
+
+        # ── 5. 融合决策 ──
+        audit_matrix = self._fuse_audit_decisions(audit_matrix, consensus_df)
+
+        # ── 6. 诊断备注 ──
+        audit_matrix = self._apply_diagnostic_notes(audit_matrix)
+
         self._print_audit_summary(audit_matrix)
         return audit_matrix
+
+    # ── 子步骤 ──
+
+    def _load_audit_data(self, v_target_detail: str) -> pd.DataFrame:
+        """1. 执行 SQL 获取审计数据，空表时补齐字段并提前退出。"""
+        sql = self._build_audit_sql(v_target_detail)
+        df = self.db.execute(sql).df()
+        self.logger.info(f"🔍 [Validator] 获取到 {len(df)} 条样本。")
+        self.logger.debug(f"🔍 [Validator] 审计数据: \n{df.head(5)}")
+        for cc in df.columns:
+            self.logger.debug(f"🔍 [Validator] 审计数据 columns : {cc}")
+
+        if not df.empty:
+            return df
+
+        self.logger.warning(
+            f"⚠️ [Validator] 目标视图 {v_target_detail} 未提取到任何样本，跳过后续矩阵计算。"
+        )
+        for col in ["distance_to_center", "cmd_residual", "is_phys_consistent",
+                     "audit_status", "audit_note"]:
+            df[col] = pd.Series(dtype=object)
+        return df
+
+    def _compute_spatial_features(self, df: pd.DataFrame) -> None:
+        """2. 空间投影距离计算。直接修改 df。"""
+        cluster_dist = self.cluster_obj.get_param("DISTANCE_PC", 100.0)
+        df["distance_to_center"] = cluster_dist * np.radians(df["sep_deg"])
+
+    def _fuse_audit_decisions(self, df: pd.DataFrame,
+                               consensus_df: pd.DataFrame) -> pd.DataFrame:
+        """5. 融合决策：物理 × 文献 → audit_status。"""
+        is_phys = df["is_phys_consistent"]
+        is_lit = consensus_df["is_lit_consensus"]
+        df["audit_status"] = np.select(
+            [
+                is_phys & is_lit,                         # Confirmed Member
+                is_phys & ~is_lit,                         # New Candidate
+                ~is_phys & is_lit,                         # Literature Only
+                ~is_phys & ~is_lit,                        # Contamination
+            ],
+            ["Confirmed Member", "New Candidate",
+             "Literature Only", "Contamination"],
+            default="Contamination",
+        )
+        return df
+
+    def _apply_diagnostic_notes(self, df: pd.DataFrame) -> pd.DataFrame:
+        """6. Literature Only 星追加诊断备注。"""
+        df["audit_note"] = "N/A"
+        mask = df["audit_status"] == "Literature Only"
+        if not mask.any():
+            return df
+
+        ruwe = df["ruwe"] if "ruwe" in df.columns else pd.Series(1.0, index=df.index)
+        tidal_radius = self.cluster_obj.get_param("TIDAL_RADIUS", 10.0)
+
+        if "pmra_residual" in df.columns and "pmdec_residual" in df.columns:
+            pm_outlier = (df["pmra_residual"] > cfg.PHYS_LIT_PM_LIMIT) | (
+                df["pmdec_residual"] > cfg.PHYS_LIT_PM_LIMIT)
+        else:
+            pm_outlier = df["pm_residual"] > cfg.PHYS_LIT_PM_LIMIT
+
+        df.loc[mask, "audit_note"] = np.select(
+            [
+                pm_outlier[mask] & (df.loc[mask, "cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT),
+                df.loc[mask, "distance_to_center"] > tidal_radius,
+                ruwe[mask] > cfg.AUDIT_RUWE_LIMIT,
+            ],
+            ["CMD Outlier", "Tidal Tail Member", "Gaia Data Quality Issue"],
+            default="Standard Literature Entry",
+        )
+        return df
 
     def _build_audit_sql(self, v_target_input: str) -> str:
         """构建审计核心 SQL 语句，使用面向 Cluster 的物理参数替换凌乱的硬编码 config 获取"""
@@ -165,33 +166,35 @@ class UnifiedMemberValidator:
         SELECT p.*, {lit_cols} FROM physical_stage p {lit_join}
         """
 
-    def _audit_physical_consistency(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
-        """[委托] 物理一致性审计，由构造时选定的策略执行。"""
-        if audit_matrix.empty:
-            return audit_matrix
-        dim_mode = self.feature_space
-        audit_matrix = BasePhysicalAuditor._filter_nan(audit_matrix, dim_mode)
-        if audit_matrix.empty:
-            return audit_matrix
+    def _audit_physical_consistency(self, df: pd.DataFrame) -> None:
+        """[委托] 物理一致性审计，由构造时选定的策略执行。直接修改 df。"""
+        if df.empty:
+            return
+        # 剔除运动学 NaN 行（利用 BasePhysicalAuditor 的静态方法，然后 in-place 删除）
+        cleaned = BasePhysicalAuditor._filter_nan(df, self.feature_space)
+        if cleaned is not df:
+            df.drop(index=df.index.difference(cleaned.index), inplace=True)
+        if df.empty:
+            return
         self.logger.info(
-            f"🔍 [PhysAudit] 启动物理一致性审计。样本: {len(audit_matrix)}, 维度: {dim_mode}"
+            f"🔍 [PhysAudit] 启动物理一致性审计。样本: {len(df)}, 维度: {self.feature_space}"
         )
         # 初始化审计列
-        audit_matrix["cmd_residual"] = np.nan
-        audit_matrix["kine_chi2"] = np.nan
-        audit_matrix["plx_chi2"] = np.nan
-        audit_matrix["rv_chi2"] = np.nan
-        audit_matrix["cmd_chi2"] = np.nan
-        audit_matrix["total_integrated_chi2"] = 0.0
-        audit_matrix["total_dof"] = 0
-        if hasattr(self._phys_auditor, "audit_with_dim"):
-            audit_matrix = self._phys_auditor.audit_with_dim(audit_matrix, dim_mode)
-        else:
-            audit_matrix = self._phys_auditor.audit(audit_matrix)
-        if "id_str" in audit_matrix.columns:
-            audit_matrix.drop(columns=["id_str"], inplace=True)
-        self._phys_auditor._log_stats(audit_matrix)
-        return audit_matrix
+        df["cmd_residual"] = np.nan
+        df["kine_chi2"] = np.nan
+        df["plx_chi2"] = np.nan
+        df["rv_chi2"] = np.nan
+        df["cmd_chi2"] = np.nan
+        df["total_integrated_chi2"] = 0.0
+        df["total_dof"] = 0
+        self._phys_auditor.audit(df)
+        if "id_str" in df.columns:
+            df.drop(columns=["id_str"], inplace=True)
+        self._phys_auditor._log_stats(df)
+
+    def _audit_literature_consistency(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
+        """[委托] 文献共识审计，由构造时绑定的 LiteratureAuditor 执行。"""
+        return self._lit_auditor.audit(audit_matrix)
 
     def _print_audit_summary(self, df: pd.DataFrame):
         """控制台高亮输出最终统计摘要"""

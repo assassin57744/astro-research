@@ -85,8 +85,8 @@ class AstroWorkflow:
                      _audit_phase() / _export_phase() / _report_phase()
       - 三级 功能单元: _standardize_ref_tables() / _load_and_transform_field() /
                      _load_and_transform_seeds() / _run_stable_pipeline() /
-                     _run_experimental_pipeline() / _cross_match_with_literature() /
-                     _run_audit_pipeline() / 等
+                     _run_experimental_pipeline() / _run_cross_match() / [A]
+                     _run_phys_lit_fusion() / _audit_pg_ref_subsets() / [B+C+D]
     """
 
     def __init__(self, db_instance: AstroDB | None = None):
@@ -1090,29 +1090,43 @@ class AstroWorkflow:
             return {"status": "error", "message": str(e)}
 
     # ── 审计 ──
+    # Phase 4 分为三个核心审计 + 一个交叉比对辅助步骤:
+    #   [A] 交叉比对     (_run_cross_match)     — PG 结果 vs 参考星表
+    #   [B] 物理审计     (_run_phys_lit_fusion)  — 卡方/加权惩罚 (Chi2Upmask/Residual/WeightedPenalty)
+    #   [C] 文献审计     (同上, validator.run 内部) — SIMBAD 文献共识
+    #   [D] 融合决策     (同上, validator.run 内部) — 物理 × 文献 → audit_status
 
     def _audit_phase(self, ctx: RunContext, post_result: dict) -> dict:
-        """审计阶段：交叉比对 + 深度审计。"""
-        target_aln_view = self.manifest[ctx.category]["aln_view"].format(
-            cluster=ctx.cluster_id.lower()
-        )
-        audit_res = self._cross_match_with_literature(ctx, target_aln_view)
-
+        """审计阶段：[A] 交叉比对 → [B+C+D] 物理+文献+融合。"""
+        audit_res = self._run_cross_match(ctx)
         if audit_res.get("status") != "success":
             self.logger.warning(
                 f"⚠️ [Audit] 交叉比对未完全成功: {audit_res.get('message')}"
             )
             return audit_res
 
-        self.logger.info("✅ [Audit] 交叉审计比对完成。")
-        deep_stats_pg, deep_stats_ref = self._execute_deep_audits(ctx, audit_res)
-        audit_res["deep_stats_pg"] = deep_stats_pg
-        audit_res["deep_stats_ref"] = deep_stats_ref
+        self.logger.info("✅ [Audit] 交叉比对完成。")
+        audit_stats = self._audit_pg_ref_subsets(ctx, audit_res)
+        audit_res.update(audit_stats)
         return audit_res
 
-    def _cross_match_with_literature(self, ctx: RunContext, v_target: str) -> dict:
-        """交叉比对（保留原有逻辑）。"""
-        if not self._verify_audit_target_exists(v_target):
+    # ── [A] 交叉比对 ──
+
+    def _run_cross_match(self, ctx: RunContext) -> dict:
+        """4a. PG/Ref 交叉比对：标记匹配状态，区分 Matched/PG Only/Ref Only。"""
+        v_target = self.manifest[ctx.category]["aln_view"].format(
+            cluster=ctx.cluster_id.lower()
+        )
+
+        # 检查审计目标表是否存在
+        if not self.db:
+            self.logger.warning(f"⚠️ [Audit] 审计目标表 '{v_target}' 不存在。")
+            return {"status": "warning", "message": f"审计目标表 '{v_target}' 不存在"}
+        exists = self.db.con.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
+            [v_target],
+        ).fetchone() is not None
+        if not exists:
             self.logger.warning(f"⚠️ [Audit] 审计目标表 '{v_target}' 不存在。")
             return {"status": "warning", "message": f"审计目标表 '{v_target}' 不存在"}
 
@@ -1172,61 +1186,38 @@ class AstroWorkflow:
             "stats": stats_cross,
         }
 
-    def _verify_audit_target_exists(self, v_target: str) -> bool:
-        """检查审计目标表是否存在。"""
-        if not self.db:
-            return False
-        sql = f"SELECT 1 FROM information_schema.tables WHERE table_name = '{v_target}'"
-        return self.db.con.execute(sql).fetchone() is not None
+    # ── [B+C+D] 物理审计 + 文献审计 + 融合决策 ──
 
-    def _execute_deep_audits(self, ctx: RunContext, audit_res: dict) -> tuple:
-        """对 PG Only / Ref Only 执行深度审计。"""
-        v_audit_pg = audit_res.get("v_audit_pg_only")
-        v_audit_ref = audit_res.get("v_audit_ref_only")
-        x_stats = audit_res.get("stats", {})
+    def _audit_pg_ref_subsets(self, ctx: RunContext, cross_result: dict) -> dict:
+        """对 PG Only 和 Ref Only 子集分别执行 [B]物理 + [C]文献 + [D]融合 审计。"""
+        audit_stats = {}
+        for subset_type, label in [("pg_only", "PG Only"), ("ref_only", "Ref Only")]:
+            view = cross_result.get(f"v_audit_{subset_type}")
+            count = cross_result.get("stats", {}).get(label, 0)
+            if view and count > 0:
+                v_result, stats = self._run_phys_lit_fusion(ctx, view, subset_type)
+                audit_stats[f"deep_stats_{subset_type.replace('_only', '')}"] = stats
+            else:
+                self.logger.warning(f"⚠️ [Audit] 无 {label} 候选，跳过审计。")
+        return audit_stats
 
-        deep_stats_pg = {}
-        if v_audit_pg and x_stats.get("PG Only", 0) > 0:
-            _, deep_stats_pg = self._run_deep_audit(ctx, v_audit_pg, "pg_only")
-        else:
-            self.logger.warning("⚠️ [Audit] 无 PG Only 候选，跳过深度审计。")
-
-        deep_stats_ref = {}
-        if v_audit_ref and x_stats.get("Ref Only", 0) > 0:
-            _, deep_stats_ref = self._run_deep_audit(ctx, v_audit_ref, "ref_only")
-        else:
-            self.logger.warning("⚠️ [Audit] 无 Ref Only 候选，跳过深度审计。")
-
-        return deep_stats_pg, deep_stats_ref
-
-    def _run_deep_audit(
-        self, ctx: RunContext, v_audit_view: str, audit_type: str
-    ) -> tuple:
-        """对单个候选视图执行深度审计。"""
-        v_result = self._run_audit_pipeline(
-            ctx, target=v_audit_view, audit_type=audit_type
-        )
-        if not v_result:
-            return None, {}
-
-        sql = (
-            f"SELECT audit_status, count(*) FROM {v_result} "
-            f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
-        )
-        stats = dict(self.db.con.execute(sql).fetchall())
-        return v_result, stats
-
-    def _run_audit_pipeline(
+    def _run_phys_lit_fusion(
         self, ctx: RunContext, target: str, audit_type: str = "default"
-    ) -> str | None:
-        """驱动完整审计管线（原 run_audit 重命名）。"""
-        self.logger.info(f"🔍 🎬 [Audit] 开始对 {target} 进行身份审计...")
+    ) -> tuple:
+        """[B+C+D] 对单个候选子集执行物理审计 + 文献审计 + 融合决策，返回 (view_name, stats_dict)。
+
+        内部由 UnifiedMemberValidator.run() 串联三个子阶段:
+          ① 物理一致性审计 — 卡方检验 (Chi2Upmask/Chi2Residual) 或加权惩罚 (WeightedPenalty)
+          ② 文献共识审计   — SIMBAD 语义树匹配 (LiteratureAuditor)
+          ③ 融合决策       — 物理 × 文献 → Confirmed Member / New Candidate / Literature Only / Contamination
+        """
+        self.logger.info(f"🔍 🎬 [Audit] 开始 [{audit_type}] 审计: {target}")
 
         try:
-            v_audit_input = self._pre_audit(ctx, target)
+            v_audit_input = self._prepare_audit_input(ctx, target)
             if not v_audit_input:
                 self.logger.error("❌ [Audit] 审计预处理失败")
-                return None
+                return None, {}
 
             validator = UnifiedMemberValidator(
                 cluster=ctx.star_cluster,
@@ -1234,11 +1225,18 @@ class AstroWorkflow:
                 feature_space=ctx.feature_space,
             )
 
+            # ── ① 文献审计前置：SIMBAD 缓存预热 ──
             self._warm_up_literature_cache(validator, v_audit_input)
 
+            # ── ② UnifiedMemberValidator.run()
+            #       内部自动串联: 物理审计 → 文献审计 → 融合决策
+            self.logger.info(
+                f"⚖️ [Audit] 启动 Validator: "
+                f"物理审计({cfg.VALIDATION_STRATEGY}) + 文献审计(SIMBAD) + 融合决策"
+            )
             audit_report_df = validator.run(v_audit_input)
 
-            self.logger.info("📥 [Audit] 正在将深度审计结果同步至 Master 表...")
+            self.logger.info("📥 [Audit] 正在将审计结果同步至 Master 表...")
             self.db.tag_master_table(ctx.state.master_table, audit_report_df)
 
             v_report = f"{ctx.state.master_table}_{audit_type}_audited_report"
@@ -1258,14 +1256,21 @@ class AstroWorkflow:
                 sql_filter = f"SELECT * FROM {ctx.state.master_table} WHERE audit_status IS NOT NULL"
 
             self.db.register_view_from_sql(v_report, sql_filter)
-            return v_report
+
+            # 统计审计结果
+            sql = (
+                f"SELECT audit_status, count(*) FROM {v_report} "
+                f"WHERE audit_status IS NOT NULL GROUP BY audit_status"
+            )
+            stats = dict(self.db.con.execute(sql).fetchall())
+            return v_report, stats
 
         except Exception as e:
             self.logger.error(f"❌ [Audit] 审计流程故障: {str(e)}", exc_info=True)
-            return None
+            return None, {}
 
-    def _pre_audit(self, ctx: RunContext, v_target: str) -> str | None:
-        """审计前准备：补全物理参数。"""
+    def _prepare_audit_input(self, ctx: RunContext, v_target: str) -> str | None:
+        """审计前准备：补全物理参数并注册审计输入视图。"""
         self.logger.info("🔧 [Audit] 正在准备审计数据视图...")
         try:
             field_idx = cfg.CLUSTERS[ctx.cluster_id]["FIELD_IDX"]
