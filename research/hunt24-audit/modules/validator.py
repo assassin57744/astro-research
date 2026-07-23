@@ -125,15 +125,22 @@ class UnifiedMemberValidator:
         ruwe = df["ruwe"] if "ruwe" in df.columns else pd.Series(1.0, index=df.index)
         tidal_radius = self.cluster_obj.get_param("TIDAL_RADIUS", 10.0)
 
+        # 动态判定 PM 离群条件（兼容 pmra/pmdec 分量残差与向量合成 pm_residual）
         if "pmra_residual" in df.columns and "pmdec_residual" in df.columns:
             pm_outlier = (df["pmra_residual"] > cfg.PHYS_LIT_PM_LIMIT) | (
-                df["pmdec_residual"] > cfg.PHYS_LIT_PM_LIMIT)
-        else:
+                df["pmdec_residual"] > cfg.PHYS_LIT_PM_LIMIT
+            )
+        elif "pm_residual" in df.columns:
             pm_outlier = df["pm_residual"] > cfg.PHYS_LIT_PM_LIMIT
+        else:
+            pm_outlier = pd.Series(False, index=df.index)
+
+        # CMD 残差提取防护
+        cmd_res = df["cmd_residual"] if "cmd_residual" in df.columns else pd.Series(0.0, index=df.index)
 
         df.loc[mask, "audit_note"] = np.select(
             [
-                pm_outlier[mask] & (df.loc[mask, "cmd_residual"] > cfg.PHYS_LIT_CMD_LIMIT),
+                pm_outlier[mask] & (cmd_res[mask] > cfg.PHYS_LIT_CMD_LIMIT),
                 df.loc[mask, "distance_to_center"] > tidal_radius,
                 ruwe[mask] > cfg.AUDIT_RUWE_LIMIT,
             ],

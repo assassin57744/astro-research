@@ -120,14 +120,29 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
                 f"  🎯 [Kine] 动态 UVW 参考: ({uvw_ref[0]:.2f}, {uvw_ref[1]:.2f}, {uvw_ref[2]:.2f}) km/s"
             )
         else:
+            # 1. 获取星团固有物理自行弥散度 (物理常数)
+            pmra_disp = self.cluster.get_param("PMRA_DISPERSION", 0.16)
+            pmdec_disp = self.cluster.get_param("PMDEC_DISPERSION", 0.16)
+
+            # 2. 获取逐星 Gaia 测量误差 (若缺失则退化为 0)
+            e_pmra = df["pmra_error"].fillna(0.0).values if "pmra_error" in df.columns else np.zeros(len(df))
+            e_pmdec = df["pmdec_error"].fillna(0.0).values if "pmdec_error" in df.columns else np.zeros(len(df))
+
+            # 3. 动态合成逐星总方差: sigma_total^2 = sigma_intrinsic^2 + e_gaia^2
+            sigma2_pmra = (pmra_disp ** 2) + (e_pmra ** 2)
+            sigma2_pmdec = (pmdec_disp ** 2) + (e_pmdec ** 2)
+
+            # 4. 计算动态中位数参考点与残差
             pmra_ref = df["pmra"].median()
             pmdec_ref = df["pmdec"].median()
-            pm_res = df[["pmra", "pmdec"]].values - np.array([pmra_ref, pmdec_ref])
-            pm_inv_cov = self.cluster.pm_inv_cov
-            kine = np.einsum("ni,ij,nj->n", pm_res, pm_inv_cov, pm_res)
+            res_pmra = df["pmra"].values - pmra_ref
+            res_pmdec = df["pmdec"].values - pmdec_ref
+
+            # 5. 计算带逐星测量误差修正的卡方残差
+            kine = (res_pmra ** 2 / sigma2_pmra) + (res_pmdec ** 2 / sigma2_pmdec)
             dof = 2
             self.logger.debug(
-                f"  🎯 [Kine] 动态 PM 参考: pmra={pmra_ref:.3f}, pmdec={pmdec_ref:.3f} mas/yr"
+                f"  🎯 [Kine] 逐星误差合成 PM 卡方: pmra_ref={pmra_ref:.3f}, pmdec_ref={pmdec_ref:.3f} mas/yr"
             )
 
         df["kine_chi2"] = kine
@@ -135,9 +150,25 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
         df["total_dof"] += dof
 
     def _compute_plx_chi2(self, df: pd.DataFrame):
-        """视差卡方 (DoF=1)，仅 3D+ 模式生效。"""
-        plx_err = self.cluster.get_param("PLX_ERROR", 1.0)
-        plx_chi2 = (df["plx_residual"] / plx_err) ** 2
+        """视差卡方 (DoF=1)，仅 3D+ 模式生效。
+
+        🌟 物理升级：合成“星团视差弥散”与“Gaia 逐星视差测量误差”。
+        """
+        # 星团物理视差容差/系统弥散
+        plx_err_sys = self.cluster.get_param("PLX_ERROR", 0.2)
+
+        # 获取逐星 Gaia 视差测量误差
+        if "parallax_error" in df.columns:
+            e_plx = df["parallax_error"].fillna(0.0).values
+        elif "plx_err" in df.columns:
+            e_plx = df["plx_err"].fillna(0.0).values
+        else:
+            e_plx = np.zeros(len(df))
+
+        # 动态合成方差
+        sigma2_plx = (plx_err_sys ** 2) + (e_plx ** 2)
+        plx_chi2 = (df["plx_residual"].values ** 2) / sigma2_plx
+
         df["plx_chi2"] = plx_chi2
         df["total_integrated_chi2"] += plx_chi2
         df["total_dof"] += 1

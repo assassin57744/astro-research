@@ -86,7 +86,7 @@ class AstroWorkflow:
       - 三级 功能单元: _standardize_ref_tables() / _load_and_transform_field() /
                      _load_and_transform_seeds() / _run_stable_pipeline() /
                      _run_experimental_pipeline() / _run_cross_match() / [A]
-                     _run_phys_lit_fusion() / _audit_pg_ref_subsets() / [B+C+D]
+                     _run_phys_lit_fusion() / _audit_xmatch_subsets() / [B+C+D]
     """
 
     def __init__(self, db_instance: AstroDB | None = None):
@@ -1106,7 +1106,7 @@ class AstroWorkflow:
             return audit_res
 
         self.logger.info("✅ [Audit] 交叉比对完成。")
-        audit_stats = self._audit_pg_ref_subsets(ctx, audit_res)
+        audit_stats = self._audit_xmatch_subsets(ctx, audit_res)
         audit_res.update(audit_stats)
         return audit_res
 
@@ -1179,49 +1179,57 @@ class AstroWorkflow:
         self.logger.info(f"    Ref Only: {stats_cross.get('Ref Only', 0)}")
         self.logger.info("=" * 60)
 
-        # 新增：创建参考星表全量视图 (Matched + Ref Only = 该 category 全部参考星)
-        v_audit_category = f"v_tmp_audit_{ctx.category}_{ctx.state.master_table}"
+        # 新增：创建双方共识成员视图 (Matched)
+        v_audit_matched = f"v_tmp_audit_matched_{ctx.state.master_table}"
         self.db.register_view_from_sql(
-            v_audit_category,
-            f"SELECT * FROM {ctx.state.master_table} WHERE {col_x} IN ('Matched', 'Ref Only')",
+            v_audit_matched,
+            f"SELECT * FROM {ctx.state.master_table} WHERE {col_x} = 'Matched'",
         )
 
         return {
             "status": "success",
             "v_audit_pg_only": v_audit_pg_only,
             "v_audit_ref_only": v_audit_ref_only,
-            f"v_audit_{ctx.category}": v_audit_category,
+            "v_audit_matched": v_audit_matched,
             "stats": stats_cross,
         }
 
     # ── [B+C+D] 物理审计 + 文献审计 + 融合决策 ──
 
-    def _audit_pg_ref_subsets(self, ctx: RunContext, cross_result: dict) -> dict:
-        """对 PG Only 和 Ref Only 子集分别执行 [B]物理 + [C]文献 + [D]融合 审计。
+    def _audit_xmatch_subsets(self, ctx: RunContext, cross_result: dict) -> dict:
+        """对三个原子子集（PG Only / Ref Only / Matched）分别执行 [B]物理 + [C]文献 + [D]融合 审计。
 
-        同时额外对参考星表全量 (Matched + Ref Only) 执行审计，
-        评估整个参考星表的物理一致性通过情况。
+        组合集（Category = Matched+Ref Only, PG Algo = Matched+PG Only）
+        通过简单相加原子子集的 deep_stats 获得，避免重复运行 Validator。
         """
         audit_stats = {}
-        for subset_type, label in [("pg_only", "PG Only"), ("ref_only", "Ref Only")]:
+        for subset_type, label in [("pg_only", "PG Only"), ("ref_only", "Ref Only"),
+                                    ("matched", "Matched")]:
             view = cross_result.get(f"v_audit_{subset_type}")
             count = cross_result.get("stats", {}).get(label, 0)
             if view and count > 0:
                 v_result, stats = self._run_phys_lit_fusion(ctx, view, subset_type)
-                audit_stats[f"deep_stats_{subset_type.replace('_only', '')}"] = stats
+                audit_stats[f"deep_stats_{subset_type}"] = stats
             else:
                 self.logger.warning(f"⚠️ [Audit] 无 {label} 候选，跳过审计。")
 
-        # [新增] 参考星表全量审计 (Matched + Ref Only = 该 category 全部参考星)
-        cat = ctx.category
-        cat_view = cross_result.get(f"v_audit_{cat}")
-        cat_count = (cross_result.get("stats", {}).get("Matched", 0) +
-                     cross_result.get("stats", {}).get("Ref Only", 0))
-        if cat_view and cat_count > 0:
-            v_result, stats = self._run_phys_lit_fusion(ctx, cat_view, cat)
-            audit_stats[f"deep_stats_{cat}"] = stats
-        else:
-            self.logger.warning(f"⚠️ [Audit] 无 {cat} 参考星候选，跳过审计。")
+        # ── 组合集：通过原子子集相加获得 ──
+        deep_pg = audit_stats.get("deep_stats_pg_only", {})
+        deep_ref = audit_stats.get("deep_stats_ref_only", {})
+        deep_matched = audit_stats.get("deep_stats_matched", {})
+        all_keys = {"Confirmed Member", "New Candidate", "Literature Only", "Contamination"}
+
+        if deep_matched and deep_ref:
+            cat = ctx.category
+            audit_stats[f"deep_stats_{cat}"] = {
+                k: deep_matched.get(k, 0) + deep_ref.get(k, 0)
+                for k in all_keys
+            }
+        if deep_matched and deep_pg:
+            audit_stats["deep_stats_pg_algo"] = {
+                k: deep_matched.get(k, 0) + deep_pg.get(k, 0)
+                for k in all_keys
+            }
 
         return audit_stats
 
@@ -1420,9 +1428,11 @@ class AstroWorkflow:
             ctx.state.gmm_config,
             post_result,
             audit_result,
-            audit_result.get("deep_stats_pg", {}),
-            audit_result.get("deep_stats_ref", {}),
+            audit_result.get("deep_stats_pg_only", {}),
+            audit_result.get("deep_stats_ref_only", {}),
+            audit_result.get("deep_stats_matched", {}),
             audit_result.get(f"deep_stats_{ctx.category}", {}),
+            audit_result.get("deep_stats_pg_algo", {}),
             self.logger,
         )
 

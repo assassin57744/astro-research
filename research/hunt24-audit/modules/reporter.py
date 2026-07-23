@@ -243,7 +243,9 @@ def render_final_report(
     audit_res: dict,
     deep_stats_pg: dict,
     deep_stats_ref: dict,
+    deep_stats_matched: dict,
     deep_stats_category: dict,
+    deep_stats_pg_algo: dict,
     logger: logging.Logger,
 ) -> dict:
     """构建、打印并持久化管线最终执行报告。
@@ -279,31 +281,73 @@ def render_final_report(
     # 交叉比对统计
     report_lines += _format_cross_match_stats(audit_res.get("stats", {}))
 
-    # PG Only 深度审计
-    report_lines += _format_deep_audit_section(
-        3, "PG Only (算法独有候选)", "文献证实 (+)", deep_stats_pg
-    )
+    # ── 统一基准：参考星表总数 (Matched + Ref Only) ──
+    _matched = audit_res.get("stats", {}).get("Matched", 0)
+    _ref_only = audit_res.get("stats", {}).get("Ref Only", 0)
+    _pg_only = audit_res.get("stats", {}).get("PG Only", 0)
+    _ref_total = _matched + _ref_only
 
-    # Ref Only 深度审计
-    report_lines += _format_deep_audit_section(
+    def _add_coverage(lines, deep_stats, subset_label, subset_total):
+        """在判别矩阵之前插入覆盖率与双重确认覆盖率两行。"""
+        total = sum(deep_stats.values()) if deep_stats else 0
+        tp = deep_stats.get("Confirmed Member", 0) if deep_stats else 0
+        sub_cov = (total / subset_total * 100) if subset_total > 0 else 0
+        ref_cov = (total / _ref_total * 100) if _ref_total > 0 else 0
+        dual_cov = (tp / _ref_total * 100) if _ref_total > 0 else 0
+        lines.insert(3, f"      - 双重确认覆盖率: {tp}/{_ref_total} ({dual_cov:.2f}%)")
+        lines.insert(3, f"      - {subset_label}可审率: {total}/{subset_total} ({sub_cov:.2f}%)  |  占参考星全量: {total}/{_ref_total} ({ref_cov:.2f}%)")
+
+    # ── [3] PG Only ──
+    pg_lines = list(_format_deep_audit_section(
+        3, "PG Only (算法独有候选)", "文献证实 (+)", deep_stats_pg,
+    ))
+    if pg_lines and deep_stats_pg and _pg_only > 0:
+        _add_coverage(pg_lines, deep_stats_pg, "PG Only ", _pg_only)
+    report_lines += pg_lines
+
+    # ── [4] Ref Only ──
+    ref_lines = list(_format_deep_audit_section(
         4, "Ref Only (文献独有候选)", "文献一致 (+)", deep_stats_ref,
         pass_label="物理验证通过", pass_rate_label="物理通过率",
-    )
+    ))
+    if ref_lines and deep_stats_ref and _ref_only > 0:
+        _add_coverage(ref_lines, deep_stats_ref, "Ref Only", _ref_only)
+    report_lines += ref_lines
 
-    # Category 全量参考星审计 (Matched + Ref Only)
-    cat_lines = _format_deep_audit_section(
-        5, f"{target_category} 全量参考星 (Matched+Ref Only)", "文献一致 (+)", deep_stats_category,
+    # ── [5] Matched ──
+    matched_lines = list(_format_deep_audit_section(
+        5, "Matched (双方共识成员)", "文献证实 (+)", deep_stats_matched,
+    ))
+    if matched_lines and deep_stats_matched and _matched > 0:
+        _add_coverage(matched_lines, deep_stats_matched, "共识成员", _matched)
+    report_lines += matched_lines
+
+    # ── [6] Category 全量参考星 (Matched + Ref Only) ──
+    cat_lines = list(_format_deep_audit_section(
+        6, f"{target_category} 全量参考星 (Matched+Ref Only)", "文献一致 (+)", deep_stats_category,
         pass_label="物理验证通过", pass_rate_label="物理通过率",
-    )
-    if cat_lines:
-        # 在深度审计样本总数之后插入参考星覆盖率信息
-        matched = audit_res.get("stats", {}).get("Matched", 0)
-        ref_only = audit_res.get("stats", {}).get("Ref Only", 0)
-        ref_total = matched + ref_only
-        cat_audited = sum(deep_stats_category.values()) if deep_stats_category else 0
-        coverage = (cat_audited / ref_total * 100) if ref_total > 0 else 0
-        cat_lines.insert(3, f"      - 参考星覆盖率: {cat_audited}/{ref_total} ({coverage:.2f}%)")
+    ))
+    if cat_lines and deep_stats_category and _ref_total > 0:
+        cat_audited = sum(deep_stats_category.values())
+        tp_cat = deep_stats_category.get("Confirmed Member", 0)
+        cov = (cat_audited / _ref_total * 100) if _ref_total > 0 else 0
+        dual_cov = (tp_cat / _ref_total * 100) if _ref_total > 0 else 0
+        cat_lines.insert(3, f"      - 双重确认覆盖率: {tp_cat}/{_ref_total} ({dual_cov:.2f}%)")
+        cat_lines.insert(3, f"      - 参考星覆盖率: {cat_audited}/{_ref_total} ({cov:.2f}%)")
     report_lines += cat_lines
+
+    # ── [7] PG Algo 全量 (Matched + PG Only) ──
+    pg_algo_lines = list(_format_deep_audit_section(
+        7, "PG 算法发现全量 (Matched+PG Only)", "文献证实 (+)", deep_stats_pg_algo,
+    ))
+    if pg_algo_lines and deep_stats_pg_algo and _ref_total > 0:
+        pg_algo_audited = sum(deep_stats_pg_algo.values())
+        tp_pg_algo = deep_stats_pg_algo.get("Confirmed Member", 0)
+        cov = (pg_algo_audited / _ref_total * 100) if _ref_total > 0 else 0
+        dual_cov = (tp_pg_algo / _ref_total * 100) if _ref_total > 0 else 0
+        pg_algo_lines.insert(3, f"      - 双重确认覆盖率: {tp_pg_algo}/{_ref_total} ({dual_cov:.2f}%)")
+        pg_algo_lines.insert(3, f"      - 算法候选覆盖率: {pg_algo_audited}/{_ref_total} ({cov:.2f}%)")
+    report_lines += pg_algo_lines
 
     # 页脚
     report_lines.append("-" * 65)
