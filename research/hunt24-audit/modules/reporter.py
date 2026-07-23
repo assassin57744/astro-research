@@ -138,8 +138,15 @@ def _format_deep_audit_section(
     label: str,
     lit_pos_label: str,
     deep_stats: dict,
+    pass_label: str = "New Discovery",
+    pass_rate_label: str = "发现准确率",
 ) -> list[str]:
     """格式化单个深度审计结果段（统计摘要 + 列联表）。
+
+    Args:
+        pass_label: 物理验证通过行的标签，PG Only 用 "New Discovery"，
+                    参考星审计 (Ref Only / Category) 用 "物理验证通过"。
+        pass_rate_label: 通过率指标标签，对应 pass_label 的比率名称。
 
     Returns:
         格式化行列表；若 deep_stats 为空则返回空列表。
@@ -153,13 +160,13 @@ def _format_deep_audit_section(
     fn = deep_stats.get("Literature Only", 0)
     tn = deep_stats.get("Contamination", 0)
     new_finds = tp + fp
-    precision = (new_finds / total * 100) if total > 0 else 0
+    pass_rate = (new_finds / total * 100) if total > 0 else 0
 
     lines = [
         f"  [{section_num}] 深度审计结果 - {label}:",
         f"      - 深度审计样本总数: {total} 颗",
         f"      - 双重确认成员 (物理+文献): {tp} 颗",
-        f"      - 物理验证通过 (New Discovery): {new_finds} 颗 (发现准确率: {precision:.2f}%)",
+        f"      - 物理验证通过 ({pass_label}): {new_finds} 颗 ({pass_rate_label}: {pass_rate:.2f}%)",
         f"      - 确认为背景噪点 (Contamination): {tn}",
         f"      - 仅文献收录 (Lit. Only):       {fn}",
     ]
@@ -279,12 +286,14 @@ def render_final_report(
 
     # Ref Only 深度审计
     report_lines += _format_deep_audit_section(
-        4, "Ref Only (文献独有候选)", "文献一致 (+)", deep_stats_ref
+        4, "Ref Only (文献独有候选)", "文献一致 (+)", deep_stats_ref,
+        pass_label="物理验证通过", pass_rate_label="物理通过率",
     )
 
     # Category 全量参考星审计 (Matched + Ref Only)
     cat_lines = _format_deep_audit_section(
-        5, f"{target_category} 全量参考星 (Matched+Ref Only)", "文献一致 (+)", deep_stats_category
+        5, f"{target_category} 全量参考星 (Matched+Ref Only)", "文献一致 (+)", deep_stats_category,
+        pass_label="物理验证通过", pass_rate_label="物理通过率",
     )
     if cat_lines:
         # 在深度审计样本总数之后插入参考星覆盖率信息

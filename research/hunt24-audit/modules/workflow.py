@@ -1277,7 +1277,13 @@ class AstroWorkflow:
                     f"WHERE audit_status IS NOT NULL AND {col_x} = '{x_match_val}'"
                 )
             else:
-                sql_filter = f"SELECT * FROM {ctx.state.master_table} WHERE audit_status IS NOT NULL"
+                # target 是已限定范围的视图（如 v_tmp_audit_hunt_...）
+                # 用 INNER JOIN 确保统计只包含该视图内的行，而非全表
+                sql_filter = (
+                    f"SELECT m.* FROM {ctx.state.master_table} m "
+                    f"INNER JOIN {target} t ON m.id = t.id "
+                    f"WHERE m.audit_status IS NOT NULL"
+                )
 
             self.db.register_view_from_sql(v_report, sql_filter)
 
