@@ -1179,17 +1179,29 @@ class AstroWorkflow:
         self.logger.info(f"    Ref Only: {stats_cross.get('Ref Only', 0)}")
         self.logger.info("=" * 60)
 
+        # 新增：创建参考星表全量视图 (Matched + Ref Only = 该 category 全部参考星)
+        v_audit_category = f"v_tmp_audit_{ctx.category}_{ctx.state.master_table}"
+        self.db.register_view_from_sql(
+            v_audit_category,
+            f"SELECT * FROM {ctx.state.master_table} WHERE {col_x} IN ('Matched', 'Ref Only')",
+        )
+
         return {
             "status": "success",
             "v_audit_pg_only": v_audit_pg_only,
             "v_audit_ref_only": v_audit_ref_only,
+            f"v_audit_{ctx.category}": v_audit_category,
             "stats": stats_cross,
         }
 
     # ── [B+C+D] 物理审计 + 文献审计 + 融合决策 ──
 
     def _audit_pg_ref_subsets(self, ctx: RunContext, cross_result: dict) -> dict:
-        """对 PG Only 和 Ref Only 子集分别执行 [B]物理 + [C]文献 + [D]融合 审计。"""
+        """对 PG Only 和 Ref Only 子集分别执行 [B]物理 + [C]文献 + [D]融合 审计。
+
+        同时额外对参考星表全量 (Matched + Ref Only) 执行审计，
+        评估整个参考星表的物理一致性通过情况。
+        """
         audit_stats = {}
         for subset_type, label in [("pg_only", "PG Only"), ("ref_only", "Ref Only")]:
             view = cross_result.get(f"v_audit_{subset_type}")
@@ -1199,6 +1211,18 @@ class AstroWorkflow:
                 audit_stats[f"deep_stats_{subset_type.replace('_only', '')}"] = stats
             else:
                 self.logger.warning(f"⚠️ [Audit] 无 {label} 候选，跳过审计。")
+
+        # [新增] 参考星表全量审计 (Matched + Ref Only = 该 category 全部参考星)
+        cat = ctx.category
+        cat_view = cross_result.get(f"v_audit_{cat}")
+        cat_count = (cross_result.get("stats", {}).get("Matched", 0) +
+                     cross_result.get("stats", {}).get("Ref Only", 0))
+        if cat_view and cat_count > 0:
+            v_result, stats = self._run_phys_lit_fusion(ctx, cat_view, cat)
+            audit_stats[f"deep_stats_{cat}"] = stats
+        else:
+            self.logger.warning(f"⚠️ [Audit] 无 {cat} 参考星候选，跳过审计。")
+
         return audit_stats
 
     def _run_phys_lit_fusion(
@@ -1392,6 +1416,7 @@ class AstroWorkflow:
             audit_result,
             audit_result.get("deep_stats_pg", {}),
             audit_result.get("deep_stats_ref", {}),
+            audit_result.get(f"deep_stats_{ctx.category}", {}),
             self.logger,
         )
 

@@ -179,6 +179,7 @@ def build_summary(
     v_all_audit_data: dict,
     audit_res: dict,
     deep_stats_pg: dict,
+    deep_stats_category: dict | None = None,
 ) -> dict:
     """从各阶段结果字典中提取统一的绩效摘要。
 
@@ -218,6 +219,9 @@ def build_summary(
             (new_finds_pg / total_audited_pg * 100) if total_audited_pg > 0 else 0
         )
 
+    if deep_stats_category:
+        summary["deep_stats_category"] = deep_stats_category
+
     return summary
 
 
@@ -232,6 +236,7 @@ def render_final_report(
     audit_res: dict,
     deep_stats_pg: dict,
     deep_stats_ref: dict,
+    deep_stats_category: dict,
     logger: logging.Logger,
 ) -> dict:
     """构建、打印并持久化管线最终执行报告。
@@ -277,6 +282,20 @@ def render_final_report(
         4, "Ref Only (文献独有候选)", "文献一致 (+)", deep_stats_ref
     )
 
+    # Category 全量参考星审计 (Matched + Ref Only)
+    cat_lines = _format_deep_audit_section(
+        5, f"{target_category} 全量参考星 (Matched+Ref Only)", "文献一致 (+)", deep_stats_category
+    )
+    if cat_lines:
+        # 在深度审计样本总数之后插入参考星覆盖率信息
+        matched = audit_res.get("stats", {}).get("Matched", 0)
+        ref_only = audit_res.get("stats", {}).get("Ref Only", 0)
+        ref_total = matched + ref_only
+        cat_audited = sum(deep_stats_category.values()) if deep_stats_category else 0
+        coverage = (cat_audited / ref_total * 100) if ref_total > 0 else 0
+        cat_lines.insert(3, f"      - 参考星覆盖率: {cat_audited}/{ref_total} ({coverage:.2f}%)")
+    report_lines += cat_lines
+
     # 页脚
     report_lines.append("-" * 65)
     report_lines.append(f"  ✅ 任务状态: 成功完成 | 资产导出路径: {cfg.RESULTS_DIR}")
@@ -299,7 +318,8 @@ def render_final_report(
         logger.error(f"❌ 无法保存最终报告副本: {e}")
 
     return build_summary(
-        target_cluster_id, mode, algo, v_all_audit_data, audit_res, deep_stats_pg
+        target_cluster_id, mode, algo, v_all_audit_data, audit_res, deep_stats_pg,
+        deep_stats_category=deep_stats_category,
     )
 
 
