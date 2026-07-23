@@ -181,9 +181,12 @@ CLUSTERS = {
         "ID_NAME": "melotte_22",
         "CAT_NAME": "Melotte_22",
         "ISO_FILE": "pleiades_126myr.dat",
+        # source: gemini
         # "CENTER_RA": 56.75, "CENTER_DEC": 24.12, "RADIUS": 17.78,
-        # 基于hunt24的星团成员的均值
-        "CENTER_RA": 56.61398997432307, "CENTER_DEC": 24.09029596042996, "RADIUS": 17.78, 
+        # source: 基于hunt24的星团成员的均值
+        # "CENTER_RA": 56.61398997432307, "CENTER_DEC": 24.09029596042996, "RADIUS": 17.78, 
+        # source: https://simbad.cds.unistra.fr/simbad/sim-basic?Ident=melotte_22&submit=SIMBAD+search
+        "CENTER_RA": 56.60, "CENTER_DEC": 24.11, "RADIUS": 17.78, 
         "RA_MIN": 44.0, "RA_MAX": 66.0, "DEC_MIN": 16.0, "DEC_MAX": 36.0, 
         "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.3,  # 单位：pc
@@ -211,7 +214,7 @@ CLUSTERS = {
         "UVW_ERROR": 2.0,  # 速度空间容忍度 (km/s)
         "U_ERROR": 2.2, "V_ERROR": 1.6, "W_ERROR": 1.0, # 速度空间分散度 (km/s), 仅 3d_v/6d_p 模式下生效
         "CMD_REF": np.array([0.0, 0.0, 0.0]),
-        "CMD_DEV": 9.0,  # CMD 偏离容忍度 (mag)
+        "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag)
         "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛     # TODO: 可以细化到分pm, plx, cmd, rv
         # 🌟 核心算法参数 - 种子区域截断范围
         "SEED_RADIUS": 5.0, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)

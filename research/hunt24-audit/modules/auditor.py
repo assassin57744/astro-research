@@ -124,9 +124,29 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
             pmra_disp = self.cluster.get_param("PMRA_DISPERSION", 0.16)
             pmdec_disp = self.cluster.get_param("PMDEC_DISPERSION", 0.16)
 
-            # 2. 获取逐星 Gaia 测量误差 (若缺失则退化为 0)
-            e_pmra = df["pmra_error"].fillna(0.0).values if "pmra_error" in df.columns else np.zeros(len(df))
-            e_pmdec = df["pmdec_error"].fillna(0.0).values if "pmdec_error" in df.columns else np.zeros(len(df))
+            # 2. 精准匹配数据库/DataFrame 字段列名: pmra_err 与 pmde_err
+            col_pmra_err = next(
+                (c for c in ["pmra_err", "pmra_error"] if c in df.columns), None
+            )
+            col_pmdec_err = next(
+                (
+                    c
+                    for c in ["pmde_err", "pmdec_err", "pmdec_error"]
+                    if c in df.columns
+                ),
+                None,
+            )
+
+            e_pmra = (
+                df[col_pmra_err].fillna(0.0).values
+                if col_pmra_err
+                else np.zeros(len(df))
+            )
+            e_pmdec = (
+                df[col_pmdec_err].fillna(0.0).values
+                if col_pmdec_err
+                else np.zeros(len(df))
+            )
 
             # 3. 动态合成逐星总方差: sigma_total^2 = sigma_intrinsic^2 + e_gaia^2
             sigma2_pmra = (pmra_disp ** 2) + (e_pmra ** 2)
@@ -141,8 +161,10 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
             # 5. 计算带逐星测量误差修正的卡方残差
             kine = (res_pmra ** 2 / sigma2_pmra) + (res_pmdec ** 2 / sigma2_pmdec)
             dof = 2
-            self.logger.debug(
-                f"  🎯 [Kine] 逐星误差合成 PM 卡方: pmra_ref={pmra_ref:.3f}, pmdec_ref={pmdec_ref:.3f} mas/yr"
+
+            self.logger.info(
+                f"  📐 [Kine 逐星误差合成] 读取列: pmra_err='{col_pmra_err}' (均值 {e_pmra.mean():.3f}), "
+                f"pmde_err='{col_pmdec_err}' (均值 {e_pmdec.mean():.3f})"
             )
 
         df["kine_chi2"] = kine
@@ -157,13 +179,15 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
         # 星团物理视差容差/系统弥散
         plx_err_sys = self.cluster.get_param("PLX_ERROR", 0.2)
 
-        # 获取逐星 Gaia 视差测量误差
-        if "parallax_error" in df.columns:
-            e_plx = df["parallax_error"].fillna(0.0).values
-        elif "plx_err" in df.columns:
-            e_plx = df["plx_err"].fillna(0.0).values
-        else:
-            e_plx = np.zeros(len(df))
+        # 匹配 plx_err / parallax_error 列
+        col_plx_err = next(
+            (c for c in ["plx_err", "parallax_error"] if c in df.columns), None
+        )
+        e_plx = (
+            df[col_plx_err].fillna(0.0).values
+            if col_plx_err
+            else np.zeros(len(df))
+        )
 
         # 动态合成方差
         sigma2_plx = (plx_err_sys ** 2) + (e_plx ** 2)
@@ -177,14 +201,34 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
         """视向速度卡方 (DoF=1)，仅对有 RV 的行生效。"""
         if "rv" not in df.columns:
             return
-        rv_err = self.cluster.get_param("RV_ERROR", 5.0)
+        rv_err_sys = self.cluster.get_param("RV_ERROR", 3.0)
         rv_ref = self.cluster.get_param("RV_REF", 0.0)
+
         has_rv = df["rv"].notna()
         if not has_rv.any():
             return
-        rv_chi2 = ((df.loc[has_rv, "rv"] - rv_ref) / rv_err) ** 2
+
+        # 匹配 rv_err / rv_error 列
+        col_rv_err = next(
+            (
+                c
+                for c in ["rv_err", "rv_error", "radial_velocity_error"]
+                if c in df.columns
+            ),
+            None,
+        )
+        e_rv = (
+            df.loc[has_rv, col_rv_err].fillna(0.0).values
+            if col_rv_err
+            else np.zeros(has_rv.sum())
+        )
+
+        sigma2_rv = (rv_err_sys**2) + (e_rv**2)
+        rv_res = df.loc[has_rv, "rv"].values - rv_ref
+
+        rv_chi2 = (rv_res**2) / sigma2_rv
         df.loc[has_rv, "rv_chi2"] = rv_chi2
-        df.loc[has_rv, "total_integrated_chi2"] += rv_chi2.values
+        df.loc[has_rv, "total_integrated_chi2"] += rv_chi2
         df.loc[has_rv, "total_dof"] += 1
 
     # -------------------------------------------------------------------
