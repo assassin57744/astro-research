@@ -181,17 +181,17 @@ CLUSTERS = {
         "ID_NAME": "melotte_22",
         "CAT_NAME": "Melotte_22",
         "ISO_FILE": "pleiades_126myr.dat",
-        # source: gemini
+        # ↓ source ↓ : gemini
         # "CENTER_RA": 56.75, "CENTER_DEC": 24.12, "RADIUS": 17.78,
-        # source: 基于hunt24的星团成员的均值
-        # "CENTER_RA": 56.61398997432307, "CENTER_DEC": 24.09029596042996, "RADIUS": 17.78, 
-        # source: https://simbad.cds.unistra.fr/simbad/sim-basic?Ident=melotte_22&submit=SIMBAD+search
+        # ↓ source ↓ : 基于hunt24的星团成员的均值
+        # "CENTER_RA": 56.61398997432307, "CENTER_DEC": 24.09029596042996, "RADIUS": 17.78,
+        # ↓ source ↓ : https://simbad.cds.unistra.fr/simbad/sim-basic?Ident=melotte_22&submit=SIMBAD+search
         "CENTER_RA": 56.60, "CENTER_DEC": 24.11, "RADIUS": 17.78, 
         "RA_MIN": 44.0, "RA_MAX": 66.0, "DEC_MIN": 16.0, "DEC_MAX": 36.0, 
         "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.3,  # 单位：pc
         "HALF_MASS_RADIUS": 3.5,  # 单位：pc
-        "R_HALF_LIGHT": 3.0,  # 单位：pc (保持原有小写变量名对齐)
+        "R_HALF_LIGHT": 3.0,  # 单位：pc
         "TIDAL_RADIUS": 10.0,  # 单位：pc
         "TUBE_LENGTH": 18.0,  # 总长 36 度
         "TUBE_WIDTH": 1.5,    # 总宽 3 度
@@ -202,13 +202,20 @@ CLUSTERS = {
         "DISTANCE_MODULUS": 5.66,
         "EXT_AG": 0.12,  # Gaia G波段消光
         "E_BP_RP": 0.06,  # 对应色余 E(BP-RP)
-        # "PLX_REF": 7.33, "PMRA_REF": 20.10, "PMDEC_REF": -45.40,   
-        "PLX_REF": 7.329881851789656,   # source: 基于hunt24的星团成员的均值
-        "PLX_ERROR": 0.512,  # 视差误差容忍度 (mas)
-        "PMRA_REF": 19.816076644561296, "PMDEC_REF": -45.02481613280063,
+        # ↓ source: gemini
+        # "PLX_REF": 7.33, "PMRA_REF": 20.10, "PMDEC_REF": -45.40,
+        # ↓ source: 基于hunt24的星团成员的均值
+        # "PLX_REF": 7.329881851789656, "PMRA_REF": 19.816076644561296, "PMDEC_REF": -45.02481613280063,   
+        # ↓ source: https://simbad.cds.unistra.fr/simbad/sim-basic?Ident=melotte_22&submit=SIMBAD+search
+        "PLX_REF": 7.364,"PMRA_REF": 19.997, "PMDEC_REF": -45.548,
+        "PLX_ERROR": 0.512,  # 视差误差容忍度 (mas)        
         "PMRA_DISPERSION": 1.5, "PMDEC_DISPERSION": 1.2, # 自行空间分散度 (mas/yr), 非 3d_v/6d_p 模式下生效
         "PM_RADIUS": 3.0,  # 自行空间容忍度 (mas/yr)，source: Hunt2024 Figure 3 分布范围
-        "RV_REF": 5.63,
+        # source: gemini
+        # "RV_REF": 5.63,     
+        # ↓ source ↓ : https://simbad.cds.unistra.fr/simbad/sim-basic?Ident=melotte_22&submit=SIMBAD+search
+        # https://simbad.cds.unistra.fr/simbad/sim-ref?bibcode=2021A%26A...647A..19T
+        "RV_REF": 5.88,     # source: gemini
         "RV_ERROR": 5.0, # 视向速度容忍度 (km/s)        
         "UVW_REF": np.array([-6.05, -28.02, -14.34]),
         "UVW_ERROR": 2.0,  # 速度空间容忍度 (km/s)
@@ -229,7 +236,9 @@ CLUSTERS = {
         # "SIGMA_CUTOFF": 3.0,                     # 阶段一专用超参
         "SEED_FROM_LITERATURE": False,           # 不使用文献种子集作为初始种子
         "MEMBER_THRESHOLD": 0.5,
+        "enable_subsampling": False,              # M45 860 万场星，降采样加速
         "DBSCAN_EPS": "auto", #0.3,                    # 🌟 开启全自动自适应调参
+        "DBSCAN_MIN_SAMPLES": 40,
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
@@ -542,7 +551,8 @@ CLUSTERS = {
         "SUBSTRUCTURE_MODE": "identity",        # 守护并剥离长期演化遗留的潮汐尾
         "MEMBER_THRESHOLD": 3.0,                 # 略微收紧门槛以压制银盘野星
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
-        "DBSCAN_EPS": "auto",                      # 🌟 也可以选择硬编码死一个物理经验值
+        "DBSCAN_EPS": "auto",                     
+        "DBSCAN_MIN_SAMPLES": 40,
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -564,7 +574,7 @@ CLUSTERS = {
                 "min_samples": 4
             }
         },
-        "MEMBER_THRESHOLD": 0.5, 
+        "MEMBER_THRESHOLD": 0.5,
     },
 }
 
@@ -944,8 +954,8 @@ GMM_CONFIG = {
     "dim_mode": "5d_h",
     "ruwe_limit": 1.4,
     "cluster_algo": "dbscan", # 可选: dbscan, hdbscan
-    "dbscan_eps": 0.3,  # 从 0.3 调大，补偿高维空间距离
-    "dbscan_min_samples": 100,  # 3d模型为100
+    "DBSCAN_EPS": 0.3,  # 从 0.3 调大，补偿高维空间距离
+    "DBSCAN_MIN_SAMPLES": 100,  # 3d模型为100
     "hdbscan_min_cluster_size": 15,
     "hdbscan_min_samples": 5,          # 提高门限，使种子核心更凝聚，减少杂质
     "hdbscan_cluster_selection_epsilon": 0.1, # 进一步降低合并容忍度，只保留最高密度的核心部分
@@ -956,5 +966,6 @@ GMM_CONFIG = {
     # "default_strategy": "threshold", # 实验模式下的默认精筛策略
     "default_strategy": "bayesian",  # 实验模式下的默认精筛策略
     "enable_subsampling": False,  # 是否启用背景下采样优化，以加速模型拟合
-    "subsampling_limit": 500000, # 下采样触发门限及目标样本量
+    "subsampling_limit": 100000,  # 下采样触发门限及目标样本量
+    "bayesian_ema_rtol": 1e-3,    # 贝叶斯 EMA 迭代相对收敛门限
 }

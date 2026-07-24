@@ -17,9 +17,9 @@ def _format_algo_params(algo: str, gmm_config: dict) -> list[str]:
     """格式化 GMM 算法参数配置块（使用实际运行时的配置，非全局默认值）。"""
     lines = ["  [算法参数配置]"]
     if algo == "dbscan":
-        lines.append(f"      - DBSCAN eps: {gmm_config.get('dbscan_eps', 'N/A')}")
+        lines.append(f"      - DBSCAN eps: {gmm_config.get('DBSCAN_EPS', 'N/A')}")
         lines.append(
-            f"      - DBSCAN min_samples: {gmm_config.get('dbscan_min_samples', 'N/A')}"
+            f"      - DBSCAN min_samples: {gmm_config.get('DBSCAN_MIN_SAMPLES', 'N/A')}"
         )
     elif algo == "hdbscan":
         lines.append(
@@ -251,7 +251,7 @@ def render_final_report(
     """构建、打印并持久化管线最终执行报告。
 
     Args:
-        gmm_config: 实际运行时使用的 GMM 配置（含 dim_mode 等运行时覆盖）。
+        gmm_config: 实际运行时使用的 GMM 配置（含 feature_space 等运行时覆盖）。
             ── 注意：feature_map 也必须从中读取，确保与 ctx.state.required_features 一致。
 
     Returns:

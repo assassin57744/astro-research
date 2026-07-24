@@ -46,10 +46,10 @@ class ClusterSeedExtractor:
         ).lower()
 
         # 2. 严格映射 config.py 中的 "dbscan_eps" 字段（支持 "auto" 或 浮点数）
-        self.dbscan_eps = profile.get("dbscan_eps", kwargs.get("dbscan_eps", "auto"))
+        self.dbscan_eps = profile.get("DBSCAN_EPS", kwargs.get("DBSCAN_EPS", "auto"))
 
         # 3. 严格映射 config.py 中的 "dbscan_min_samples" 字段作为基础物理凝聚门限
-        self.min_pts = profile.get("dbscan_min_samples", kwargs.get("min_pts", 9))
+        self.min_pts = profile.get("DBSCAN_MIN_SAMPLES", kwargs.get("min_pts", 9))
 
         # 4. 严格映射 config.py 中的 "hdbscan_min_cluster_size"
         self.hdbscan_min_cluster_size = profile.get(
@@ -125,7 +125,7 @@ class ClusterSeedExtractor:
             if str(actual_eps).lower() == "auto":
                 # 🌟 情况 A: 显式配置了 "auto"，调度重采样解算
                 self.logger.info(
-                    "⏳ [DBSCAN 自适应] 检测到 dbscan_eps='auto'，正在启动 KDE 银河系背景重采样模拟..."
+                    "⏳ [DBSCAN 自适应] 检测到 DBSCAN_EPS='auto'，正在启动 KDE 银河系背景重采样模拟..."
                 )
                 actual_eps = calculate_adaptive_eps_kde(
                     X_raw=X_raw,                 # # 传入归一化后的特征矩阵******************

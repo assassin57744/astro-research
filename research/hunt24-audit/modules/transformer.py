@@ -263,14 +263,12 @@ class AstroTransformer:
                 pm_dec=df["pmdec"].to_numpy() * u.mas / u.yr,
                 frame="icrs",
             )
-            galactic_frame = sc.galactic
-
-            l = galactic_frame.l.degree
-            b = galactic_frame.b.degree
-            pm_l_cosb = galactic_frame.pm_l_cosb.value
-            pm_b = galactic_frame.pm_b.value
+            gal = sc.galactic
+            l = gal.l.degree
+            b = gal.b.degree
+            pm_l_cosb = gal.pm_l_cosb.value
+            pm_b = gal.pm_b.value
             plx = df["plx"].to_numpy()
-
             res = np.column_stack((l, b, pm_l_cosb, pm_b, plx))
 
         elif feature_space in ["3d_v", "6d_p"]:

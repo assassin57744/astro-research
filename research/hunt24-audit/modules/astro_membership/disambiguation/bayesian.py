@@ -36,6 +36,9 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         max_iter: int = 250,
         tol: float = 1e-4,
         member_threshold: float = 0.2,
+        enable_subsampling: bool = False,
+        subsampling_limit: int = 100000,
+        bayesian_ema_rtol: float = 1e-3,
         **kwargs,
     ):
         """
@@ -53,10 +56,13 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         self.max_iter = max_iter
         self.tol = tol
         self.member_threshold = member_threshold
+        self.enable_subsampling = enable_subsampling
+        self.subsampling_limit = subsampling_limit
+        self.bayesian_ema_rtol = bayesian_ema_rtol
 
     def fit(
         self,
-        df_tube: pd.DataFrame,
+        df_field: pd.DataFrame,
         df_seeds: pd.DataFrame,
         features: List[str],
         use_density_prune: bool = False,
@@ -66,7 +72,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         并通过 EMA 迭代求解高信噪比的先验物理密度 f。
 
         Args:
-            df_tube (pd.DataFrame): 拟合基准天区数据（Channel A 传 df_target_final，Channel B 传 df_tube_full）。
+            df_field (pd.DataFrame): 拟合基准天区数据（Channel A 传 df_target_final，Channel B 传 df_tube_full）。
             df_seeds (pd.DataFrame): 引导种子数据集。
             features (List[str]): 参与高维相空间拟合的特征列名。
             use_density_prune (bool): 是否启用 DBSCAN/HDBSCAN 种子集密度修剪。
@@ -75,10 +81,10 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             Dict[str, Any]: 包含训练好的 StandardScaler, GMM 模型及收敛先验权重 f 的参数包。
         """
         self.logger.info(
-            f"🧬 [BayesianGMM.fit] 启动拟合内核 | 拟合天区基数: {len(df_tube)} 颗 | 特征空间: {len(features)}D -> {features}"
+            f"🧬 [BayesianGMM.fit] 启动拟合内核 | 拟合天区基数: {len(df_field)} 颗 | 特征空间: {len(features)}D -> {features}"
         )
 
-        df_field_clean = df_tube.dropna(subset=features).copy()
+        df_field_clean = df_field.dropna(subset=features).copy()
         df_seeds_clean = (
             df_seeds.dropna(subset=features).drop_duplicates(subset=features).copy()
         )
@@ -105,7 +111,15 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         field_model = GaussianMixture(
             n_components=1, covariance_type="full", random_state=42
         )
-        field_model.fit(X_field_scaled)
+        X_fit = X_field_scaled
+        if self.enable_subsampling and len(X_field_scaled) > self.subsampling_limit:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(len(X_field_scaled), self.subsampling_limit, replace=False)
+            X_fit = X_field_scaled[idx]
+            self.logger.info(
+                f"⚡ [场模型降采样] {len(X_field_scaled)} → {self.subsampling_limit} | 协方差类型: full"
+            )
+        field_model.fit(X_fit)
 
         # -----------------------------------------------------------------
         # 3. 🎯 种子集密度修剪与星团核心锁定 (Cluster Model)
@@ -187,7 +201,10 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         f_current = len(X_core) / total_stars
         self.logger.info(f"🔮 贝叶斯迭代初始成员密度估计 (Initial f): {f_current:.5f}")
 
-        f_floor = f_current * 0.2  # 动态保护底线
+        # 绝对下限：防止 EM 坍缩至 0，同时避免与 f_current 自锁
+        f_floor = max(1.0 / total_stars, 0.0001)
+        f_current = max(f_current, f_floor)
+        self.logger.info(f"🔮 迭代保护底线 (f_floor): {f_floor:.6f}")
 
         for iteration in range(1, self.max_iter + 1):
             num = p_cl * f_current
@@ -197,14 +214,20 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             f_new = max(np.mean(probs), f_floor)
             diff = abs(f_new - f_current)
 
-            if iteration % 20 == 0 or diff < self.tol:
+            # 收敛判定：仅用相对变化（f 量级变化极大，绝对 tol 不适用）
+            rel_diff = diff / max(f_current, f_floor)
+            converged = rel_diff < self.bayesian_ema_rtol
+
+            if iteration % 20 == 0 or converged:
                 self.logger.info(
-                    f"🔄 [贝叶斯迭代] 步数 {iteration:03d} | 当前空间权重 f = {f_new:.6f} | delta = {diff:.2e}"
+                    f"🔄 [贝叶斯迭代] 步数 {iteration:03d} | 当前空间权重 f = {f_new:.6f} "
+                    f"| Δabs = {diff:.2e} | Δrel = {rel_diff:.3e}"
                 )
 
-            if diff < self.tol:
+            if converged:
+                f_current = f_new  # 同步最新值再退出
                 self.logger.info(
-                    f"✅ [贝叶斯收敛] 极大似然递归成功收敛！迭代总步数 = {iteration} | 最终收敛权重 f = {f_new:.6f}"
+                    f"✅ [贝叶斯收敛] 极大似然递归成功收敛！迭代总步数 = {iteration} | 最终收敛权重 f = {f_current:.6f}"
                 )
                 break
             f_current = f_new
@@ -288,7 +311,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         【快捷接口】拟合与推理天区一致时的快捷调用（如 Channel A Core 识别）。
         """
         model_params = self.fit(
-            df_tube=df_all,
+            df_field=df_all,
             df_seeds=df_seeds,
             features=features,
             use_density_prune=use_density_prune,

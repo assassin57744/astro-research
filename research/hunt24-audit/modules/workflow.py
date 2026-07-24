@@ -104,6 +104,7 @@ class AstroWorkflow:
 
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
         self.manifest = getattr(self.db, "data_manifest", {})
+        self._field_cache = {}  # 场星数据跨 mode 缓存
 
     # =========================================================================
     # 🟢 一级：PUBLIC API
@@ -313,16 +314,27 @@ class AstroWorkflow:
 
     # ── 特征工程 ──
 
+    # 场星查询的最小列集：id + 坐标变换所需的所有原始列
+    _MIN_FIELD_COLS = {'id', 'ra', 'dec', 'pmra', 'pmdec', 'plx', 'rv'}
+
     def _load_and_transform_field(self, ctx: RunContext) -> pd.DataFrame:
         """加载靶场数据 → 特征转换 → NaN清洗。"""
         field_idx = ctx.star_cluster.get_param("FIELD_IDX")
         cfg_source = self.manifest[field_idx]
         v_aln = cfg_source["aln_view"]
 
-        df_raw = self.db.query(f"SELECT * FROM {v_aln}")
-        self.logger.info(
-            f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗"
-        )
+        # 缓存：同一 cluster 多次 mode 运行不复读 SQL
+        cache_key = f"raw_{ctx.cluster_id}"
+        df_raw = self._field_cache.get(cache_key)
+        if df_raw is None:
+            # 只选 id + 坐标变换必需列，省去 70% 的列序列化开销
+            cols = [c for c in self._MIN_FIELD_COLS]
+            cols_str = ', '.join(cols)
+            df_raw = self.db.query(f"SELECT {cols_str} FROM {v_aln}")
+            self._field_cache[cache_key] = df_raw
+            self.logger.info(
+                f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗 (7 列精简)"
+            )
 
         df_ext = self._transform_and_bridge_features(
             df_raw, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
@@ -576,6 +588,13 @@ class AstroWorkflow:
         strategy_kwargs = {**strategy_params}
         strategy_kwargs.setdefault("spatial_cols", ["l", "b"])
         strategy_kwargs.setdefault("scale_col", "plx")
+
+        # 背景降采样与 EMA 收敛参数：优先星团配置，回退全局 GMM_CONFIG
+        cl_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()]
+        gmm_cfg = ctx.state.gmm_config
+        for key in ("enable_subsampling", "subsampling_limit", "bayesian_ema_rtol"):
+            strategy_kwargs.setdefault(key,
+                cl_cfg.get(key, gmm_cfg.get(key)))
 
         for key in ("eps", "min_samples", "sigma_cutoff"):
             if key in ctx.algo_params:

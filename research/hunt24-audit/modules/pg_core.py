@@ -22,7 +22,7 @@ class GMMModelParams:
         field_model (GaussianMixture): 拟合好的背景场高斯分布模型。
         scaler (StandardScaler): 特征标准化处理器，用于保持推理时的一致性。
         n_core_samples (int): 参与星团核心模型训练的有效样本数。
-        dim_mode (str): 特征空间维度模式（如 '3d', '6d_p'）。
+        feature_space (str): 特征空间维度模式（如 '3d', '6d_p'）。
         features_used (list): 实际参与计算的特征列名。
         df_seeds_classified (pd.DataFrame): 包含分类标签(Core/Noise)的种子星副本。
         center_coords (dict): 用于中心化修正的各维度锚点值。
@@ -32,7 +32,7 @@ class GMMModelParams:
     field_model: GaussianMixture
     scaler: StandardScaler
     n_core_samples: int
-    dim_mode: str
+    feature_space: str
     features_used: list
     df_seeds_classified: pd.DataFrame = None
     center_coords: dict = field(default_factory=dict)
@@ -52,7 +52,7 @@ class PriorGMM:
         self.config = config or {}
 
         # 确定特征维度模式，无缝对接升级后的特征工程
-        self.dim_mode = self.config.get("dim_mode", "3d").lower()
+        self.feature_space = self.config.get("dim_mode", "3d").lower()
 
         # 动态映射 6 大特征空间对应的特征列名，严格匹配大一统规范（短键名 plx 与 rv）
         feature_map = {
@@ -65,24 +65,24 @@ class PriorGMM:
             "6d_p": ["X", "Y", "Z", "U", "V", "W"],
         }
 
-        if self.dim_mode not in feature_map:
+        if self.feature_space not in feature_map:
             self.logger.error(
-                f"❌ [🧪测试核] 无法识别未知的 dim_mode: '{self.dim_mode}'"
+                f"❌ [🧪测试核] 无法识别未知的 dim_mode: '{self.feature_space}'"
             )
-            raise ValueError(f"❌ 未知的特征维度模式: '{self.dim_mode}'")
+            raise ValueError(f"❌ 未知的特征维度模式: '{self.feature_space}'")
 
-        self.features = feature_map[self.dim_mode]
+        self.features = feature_map[self.feature_space]
 
         # 提取聚类超参数
         self.cluster_algo = self.config.get("cluster_algo", "dbscan").lower()
-        self.dbscan_eps = self.config.get("dbscan_eps", 0.3)
-        self.dbscan_min_samples = self.config.get("dbscan_min_samples", 10)
+        self.dbscan_eps = self.config.get("DBSCAN_EPS", 0.3)
+        self.dbscan_min_samples = self.config.get("DBSCAN_MIN_SAMPLES", 10)
         self.hdbscan_min_cluster_size = self.config.get("hdbscan_min_cluster_size", 15)
         self.hdbscan_min_samples = self.config.get("hdbscan_min_samples", None)
         self.hdbscan_eps = self.config.get("hdbscan_cluster_selection_epsilon", 0.0)
 
         self.logger.info(
-            f"🧪 [PriorGMM] 实验性内核加载成功 | 模式: {self.dim_mode.upper()} | 算法: {self.cluster_algo.upper()} | 维度轴: {self.features}"
+            f"🧪 [PriorGMM] 实验性内核加载成功 | 模式: {self.feature_space.upper()} | 算法: {self.cluster_algo.upper()} | 维度轴: {self.features}"
         )
 
     def _apply_adaptive_centering(
@@ -130,7 +130,7 @@ class PriorGMM:
             GMMModelParams: 包含模型状态的参数对象。
         """
         self.logger.info(
-            f"--- 🧪 [PriorGMM] 开始拟合先验模型 ({self.dim_mode.upper()}) ---"
+            f"--- 🧪 [PriorGMM] 开始拟合先验模型 ({self.feature_space.upper()}) ---"
         )
 
         # --------------------------------==================--------------------------------
@@ -266,7 +266,7 @@ class PriorGMM:
             field_model=field_model,
             scaler=scaler,
             n_core_samples=len(X_core),
-            dim_mode=self.dim_mode,
+            feature_space=self.feature_space,
             features_used=self.features,
             df_seeds_classified=df_seeds_classified,
             center_coords=center_coords,

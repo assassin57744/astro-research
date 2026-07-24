@@ -36,7 +36,7 @@ class UnifiedMemberValidator:
         strategy = getattr(cfg, "VALIDATION_STRATEGY", "chi2_upmask")
         self._phys_auditor = create_auditor(
             strategy, self.cluster_obj, self.logger,
-            cluster_id=self.cluster_id, dim_mode=feature_space,
+            cluster_id=self.cluster_id, feature_space=feature_space,
         )
         # 文献审计器
         self._lit_auditor = LiteratureAuditor(

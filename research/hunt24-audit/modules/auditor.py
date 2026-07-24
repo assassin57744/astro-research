@@ -29,20 +29,20 @@ import modules.pyUPMASK.pyUPMASK as upmask_mod
 class BasePhysicalAuditor(ABC):
     """物理审计策略抽象基类。"""
 
-    def __init__(self, cluster: StarCluster, logger: logging.Logger, dim_mode: str = "5d_h"):
+    def __init__(self, cluster: StarCluster, logger: logging.Logger, feature_space: str = "5d_h"):
         self.cluster = cluster
         self.logger = logger
-        self.dim_mode = dim_mode
+        self.feature_space = feature_space
 
     # -------------------------------------------------------------------
     # 共享：NaN 过滤
     # -------------------------------------------------------------------
 
     @staticmethod
-    def _filter_nan(df: pd.DataFrame, dim_mode: str) -> pd.DataFrame:
+    def _filter_nan(df: pd.DataFrame, feature_space: str) -> pd.DataFrame:
         """剔除运动学关键字段含 NaN 的行，返回过滤后的副本。"""
         required = ["ra", "dec", "pmra", "pmdec"]
-        if dim_mode != "2d":
+        if feature_space != "2d":
             required.append("plx")
         existing = [c for c in required if c in df.columns]
         nan_mask = df[existing].isna().any(axis=1)
@@ -287,7 +287,7 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
 
     def _run_chi2_pipeline(self, df: pd.DataFrame) -> pd.DataFrame:
         """卡方系列共享管线：维度计算 → CMD → 决策 → 后处理。"""
-        is_2d = self.dim_mode == "2d"
+        is_2d = self.feature_space == "2d"
 
         # 日志诊断：输出当前弥散度参数，用于排查 χ² 偏离问题
         self.logger.info(
@@ -323,8 +323,8 @@ class Chi2UpmaskAuditor(_Chi2Auditor):
 
     p_threshold = cfg.ALPHA_CHI2_PVALUE
 
-    def __init__(self, cluster: StarCluster, logger: logging.Logger, cluster_id: str, dim_mode: str = "5d_h"):
-        super().__init__(cluster, logger, dim_mode)
+    def __init__(self, cluster: StarCluster, logger: logging.Logger, cluster_id: str, feature_space: str = "5d_h"):
+        super().__init__(cluster, logger, feature_space)
         self.cluster_id = cluster_id
 
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -447,8 +447,8 @@ class WeightedPenaltyAuditor(BasePhysicalAuditor):
     """启发式加权惩罚分验证。"""
 
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
-        is_2d = self.dim_mode == "2d"
-        is_physical_v = self.dim_mode in ["3d_v", "6d_p"]
+        is_2d = self.feature_space == "2d"
+        is_physical_v = self.feature_space in ["3d_v", "6d_p"]
 
         penalties: dict = {}
         df["cmd_residual"] = np.nan
@@ -540,7 +540,7 @@ class WeightedPenaltyAuditor(BasePhysicalAuditor):
 
 def create_auditor(strategy: str, cluster: StarCluster, logger: logging.Logger,
                    cluster_id: str | None = None,
-                   dim_mode: str = "5d_h") -> BasePhysicalAuditor:
+                   feature_space: str = "5d_h") -> BasePhysicalAuditor:
     """根据策略名创建对应的物理审计器实例。
 
     Args:
@@ -548,12 +548,12 @@ def create_auditor(strategy: str, cluster: StarCluster, logger: logging.Logger,
         cluster: 星团物理实体
         logger: 日志记录器
         cluster_id: 星团 ID（chi2_upmask 策略需要，用于 pyUPMASK 文件路径构造）
-        dim_mode: 维度模式 ("2d", "5d", "5d_h", "3d_v", "6d_p" 等)
+        feature_space: 维度模式 ("2d", "5d", "5d_h", "3d_v", "6d_p" 等)
     """
     _strategies = {
-        "chi2_upmask": lambda: Chi2UpmaskAuditor(cluster, logger, cluster_id or cluster.id, dim_mode),
-        "chi2_cmd_residual": lambda: Chi2ResidualAuditor(cluster, logger, dim_mode=dim_mode),
-        "weighted_penalty": lambda: WeightedPenaltyAuditor(cluster, logger, dim_mode=dim_mode),
+        "chi2_upmask": lambda: Chi2UpmaskAuditor(cluster, logger, cluster_id or cluster.id, feature_space),
+        "chi2_cmd_residual": lambda: Chi2ResidualAuditor(cluster, logger, feature_space=feature_space),
+        "weighted_penalty": lambda: WeightedPenaltyAuditor(cluster, logger, feature_space=feature_space),
     }
     factory = _strategies.get(strategy)
     if factory is None:
