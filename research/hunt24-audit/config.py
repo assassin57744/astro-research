@@ -237,8 +237,8 @@ CLUSTERS = {
         "SEED_FROM_LITERATURE": False,           # 不使用文献种子集作为初始种子
         "MEMBER_THRESHOLD": 0.5,
         "enable_subsampling": False,              # M45 860 万场星，降采样加速
-        "DBSCAN_EPS": "auto", #0.3,                    # 🌟 开启全自动自适应调参
-        "DBSCAN_MIN_SAMPLES": 40,
+        "DBSCAN_EPS": 0.10, #0.3,                    # 🌟 开启全自动自适应调参
+        "DBSCAN_MIN_SAMPLES": 20,
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
@@ -305,8 +305,8 @@ CLUSTERS = {
         "DISAMBIGUATION_MODE": "bayesian_gmm",   # 中年星团，银盘背景复杂，引入对抗
         "SUBSTRUCTURE_MODE": "dual_comp",        # 解剖 Core + 整体 潮汐尾
         "CLUSTER_ALGO": "dbscan",
-        "DBSCAN_MIN_SAMPLES": 80,
-        "DBSCAN_EPS": "auto",                    # 🌟 开启全自动自适应调参
+        "DBSCAN_MIN_SAMPLES": 20,
+        "DBSCAN_EPS": 0.10,                    # 🌟 开启全自动自适应调参
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
@@ -440,9 +440,8 @@ CLUSTERS = {
         "DISAMBIGUATION_MODE": "bayesian_gmm",   # 老疏散星团，强噪声对抗
         "SUBSTRUCTURE_MODE": "dual_comp",        # 守护并剥离长期演化遗留的潮汐尾
         "CLUSTER_ALGO": "dbscan",
-        "DBSCAN_MIN_SAMPLES": 40,
-        # "DBSCAN_EPS": 0.25,                      # 🌟 也可以选择硬编码死一个物理经验值
-        "DBSCAN_EPS": "auto",                      # 🌟 也可以选择硬编码死一个物理经验值
+        "DBSCAN_EPS": 0.10,                    
+        "DBSCAN_MIN_SAMPLES": 20,
         "MEMBER_THRESHOLD": 0.6,                 # 略微收紧门槛以压制银盘野星
         "SEED_FROM_LITERATURE": True,            # 使用文献种子集作为初始种子
         "LIT_SEED_IDX": "cg20",                  # 使用 CG20 文献种子集作为初始种子  
@@ -551,8 +550,8 @@ CLUSTERS = {
         "SUBSTRUCTURE_MODE": "identity",        # 守护并剥离长期演化遗留的潮汐尾
         "MEMBER_THRESHOLD": 3.0,                 # 略微收紧门槛以压制银盘野星
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
-        "DBSCAN_EPS": "auto",                     
-        "DBSCAN_MIN_SAMPLES": 40,
+        "DBSCAN_EPS": 0.10,                     
+        "DBSCAN_MIN_SAMPLES": 20,
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -955,7 +954,7 @@ GMM_CONFIG = {
     "ruwe_limit": 1.4,
     "cluster_algo": "dbscan", # 可选: dbscan, hdbscan
     "DBSCAN_EPS": 0.3,  # 从 0.3 调大，补偿高维空间距离
-    "DBSCAN_MIN_SAMPLES": 100,  # 3d模型为100
+    "DBSCAN_MIN_SAMPLES": 9,  # 自适应eps算法缺省值
     "hdbscan_min_cluster_size": 15,
     "hdbscan_min_samples": 5,          # 提高门限，使种子核心更凝聚，减少杂质
     "hdbscan_cluster_selection_epsilon": 0.1, # 进一步降低合并容忍度，只保留最高密度的核心部分

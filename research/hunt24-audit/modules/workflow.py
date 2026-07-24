@@ -773,7 +773,7 @@ class AstroWorkflow:
 
         # 🌟 4.5 两阶段推导 (管内 fit + 管内 predict)
         tail_params = engine.fit(
-            df_tube=df_tube_full,
+            df_field=df_tube_full,
             df_seeds=df_tail_template,
             features=ctx.state.required_features,
             use_density_prune=False,
