@@ -237,7 +237,7 @@ CLUSTERS = {
         "SEED_FROM_LITERATURE": False,           # 不使用文献种子集作为初始种子
         "MEMBER_THRESHOLD": 0.5,
         "enable_subsampling": False,              # M45 860 万场星，降采样加速
-        "DBSCAN_EPS": 0.10, #0.3,                    # 🌟 开启全自动自适应调参
+        "DBSCAN_EPS": "auto", #0.3,                    # 🌟 开启全自动自适应调参
         "DBSCAN_MIN_SAMPLES": 20,
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
         "STRATEGY_PARAMS": {
@@ -306,7 +306,7 @@ CLUSTERS = {
         "SUBSTRUCTURE_MODE": "dual_comp",        # 解剖 Core + 整体 潮汐尾
         "CLUSTER_ALGO": "dbscan",
         "DBSCAN_MIN_SAMPLES": 20,
-        "DBSCAN_EPS": 0.10,                    # 🌟 开启全自动自适应调参
+        "DBSCAN_EPS": "auto",                    # 🌟 开启全自动自适应调参
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
@@ -440,7 +440,7 @@ CLUSTERS = {
         "DISAMBIGUATION_MODE": "bayesian_gmm",   # 老疏散星团，强噪声对抗
         "SUBSTRUCTURE_MODE": "dual_comp",        # 守护并剥离长期演化遗留的潮汐尾
         "CLUSTER_ALGO": "dbscan",
-        "DBSCAN_EPS": 0.10,                    
+        "DBSCAN_EPS": "auto",                    
         "DBSCAN_MIN_SAMPLES": 20,
         "MEMBER_THRESHOLD": 0.6,                 # 略微收紧门槛以压制银盘野星
         "SEED_FROM_LITERATURE": True,            # 使用文献种子集作为初始种子
@@ -550,7 +550,7 @@ CLUSTERS = {
         "SUBSTRUCTURE_MODE": "identity",        # 守护并剥离长期演化遗留的潮汐尾
         "MEMBER_THRESHOLD": 3.0,                 # 略微收紧门槛以压制银盘野星
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
-        "DBSCAN_EPS": 0.10,                     
+        "DBSCAN_EPS": "auto",                     
         "DBSCAN_MIN_SAMPLES": 20,
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 

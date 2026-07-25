@@ -12,6 +12,7 @@ from modules.pg_core import PriorGMM
 from modules.validator import UnifiedMemberValidator
 from modules.transformer import AstroTransformer
 from modules.reporter import render_final_report, render_all_modes_comparison
+from modules.result_logger import update_dbscan_csv
 from modules.cluster import StarCluster
 
 import config as cfg
@@ -34,6 +35,7 @@ class PipelineState:
     seed_stats: dict = field(
         default_factory=dict
     )  # raw_count / clean_count / refined_count
+    computed_dbscan_eps: str | None = None  # 运行时 KDE 解算的真实 eps（非 "auto"）
 
 
 # =============================================================================
@@ -571,6 +573,9 @@ class AstroWorkflow:
 
         # 记录种子统计信息并回写 Master 表
         ctx.state.seed_stats["refined_count"] = len(df_seeds_core)
+        # 保存运行时实际使用的 eps（"auto" 模式下为 KDE 解算值）
+        if extractor.computed_eps is not None:
+            ctx.state.computed_dbscan_eps = f"{extractor.computed_eps:.4f}"
         self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_core)} 颗。")
 
         df_tag_refined = df_seeds_core[[cfg.STD_COLS["ID"]]].copy()
@@ -1438,7 +1443,7 @@ class AstroWorkflow:
         cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
 
-        return render_final_report(
+        summary = render_final_report(
             ctx.cluster_id,
             ctx.category,
             ctx.feature_space,
@@ -1454,6 +1459,34 @@ class AstroWorkflow:
             audit_result.get("deep_stats_pg_algo", {}),
             self.logger,
         )
+
+        # ── 独立功能：记录 DBSCAN 实验结果到 CSV ──
+        try:
+            from modules.result_logger import resolve_eps, resolve_min_samples
+
+            csv_path = cfg.RESULTS_DIR / "实验结果记录(DBSCAN).csv"
+            # 优先使用运行时 KDE 解算出的真实 eps，否则按配置优先级解析
+            eps = ctx.state.computed_dbscan_eps or resolve_eps(
+                ctx.algo_params, cluster_cfg, ctx.state.gmm_config
+            )
+            min_s = resolve_min_samples(ctx.algo_params, cluster_cfg, ctx.state.gmm_config)
+            update_dbscan_csv(
+                csv_path=csv_path,
+                cluster=ctx.cluster_id,
+                eps=eps,
+                min_samples=min_s,
+                cross_stats=audit_result.get("stats", {}),
+                deep_stats_matched=audit_result.get("deep_stats_matched", {}),
+                deep_stats_pg_only=audit_result.get("deep_stats_pg_only", {}),
+                deep_stats_ref_only=audit_result.get("deep_stats_ref_only", {}),
+            )
+        except Exception:
+            self.logger.warning(
+                "[ResultLog] 记录实验结果 CSV 时出现异常（已静默，不影响主流程）",
+                exc_info=True,
+            )
+
+        return summary
 
     def _render_batch_summary(self, all_results: list[dict]):
         """批量运行汇总报告。"""

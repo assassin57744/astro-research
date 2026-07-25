@@ -64,6 +64,9 @@ class ClusterSeedExtractor:
         # 固定蒙特卡洛 KDE 重采样模拟深度（默认 30 次以达到科学无偏收敛）
         self.num_simulations = kwargs.get("num_simulations", 30)
 
+        # 存储运行时实际使用的 eps（"auto" 模式下 KDE 解算出的真实值）
+        self.computed_eps: float | None = None
+
     def extract_seeds(
         self, seed_field_df: pd.DataFrame, features: list
     ) -> pd.DataFrame:
@@ -155,6 +158,7 @@ class ClusterSeedExtractor:
             self.logger.info(
                 f"🗜️ 正在运行无监督物理截断扫描 (EPS={actual_eps:.4f}, minPts={self.min_pts})..."
             )
+            self.computed_eps = float(actual_eps)
             db = DBSCAN(eps=actual_eps, min_samples=self.min_pts, n_jobs=-1).fit(
                 X_scaled
             )
