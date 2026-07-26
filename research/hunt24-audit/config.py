@@ -290,7 +290,7 @@ CLUSTERS = {
         "TIDAL_RADIUS": 12.0,  # 单位：pc
         "TUBE_LENGTH": 12.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_WIDTH": 3.0,
-        "TUBE_LENGTH_MULTIPLIER": 4.3,  # 蜂巢星团较近，但外围扩散尺度不同，按需调整
+        "TUBE_LENGTH_MULTIPLIER": 1.6,  # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_WIDTH_MULTIPLIER": 1.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_SIGMA_CLIP": 5.0,  # 空间管后 Mahalanobis 运动学截断 (σ²阈值): 保留 MD² ≤ σ² 的星
         "DISTANCE_PC": 187.0,

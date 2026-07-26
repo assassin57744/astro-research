@@ -1,9 +1,13 @@
 import logging
+import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # 保证静默执行
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+from matplotlib.patches import Polygon, Circle  # 核心引入
 import os
 from datetime import datetime
-from matplotlib.patches import Circle  # 核心引入
 from astroquery.simbad import Simbad
 
 import config as cfg  # config.py 位于 modules/ 的上一级目录
@@ -14,12 +18,42 @@ from config import (  # config.py 位于 modules/ 的上一级目录
 )
 
 
+# =============================================================================
+# 🔧 PCA 元数据代理（供 _plot_tube_mask 反解管顶点）
+# =============================================================================
+
+
+class _PCAMeta:
+    """轻量级 PCA 代理，仅暴露 plot_spatial_tube 所需的三个接口。"""
+
+    __slots__ = ("cluster_center_", "tube_width_", "_components", "_mean")
+
+    def __init__(self, center, components, mean, tube_width):
+        self.cluster_center_ = center
+        self._components = components
+        self._mean = mean
+        self.tube_width_ = tube_width
+
+    def inverse_transform(self, X):
+        return np.dot(X, self._components) + self._mean
+
+
 class AstroAnalyzer:
-    def __init__(self, db_instance, target_cluster=None, target_category=None, mode="3d"):
+    def __init__(self, db_instance, ctx=None, target_cluster=None,
+                 target_category=None, mode="3d"):
         self.db = db_instance
-        self.target_cluster = target_cluster
-        self.target_category = target_category
-        self.mode = mode
+        # 新式：传入 RunContext（Phase 6 分析阶段）
+        # 旧式：直接传入 target_cluster/target_category/mode（向后兼容）
+        if ctx is not None:
+            self.ctx = ctx
+            self.target_cluster = ctx.cluster_id
+            self.target_category = ctx.category
+            self.mode = ctx.feature_space
+        else:
+            self.ctx = None
+            self.target_cluster = target_cluster
+            self.target_category = target_category
+            self.mode = mode
         self.logger = logging.getLogger(f"AstroPipeline.{__name__}")
 
         # 定义标准特征组，便于自动增强
@@ -902,3 +936,280 @@ class AstroAnalyzer:
         except Exception as e:
             self.logger.error(f"❌ Hunt24 审计流程失败: {str(e)}")
             return None
+
+    # =========================================================================
+    # Phase 6 统一入口：文本报告 + CSV + 诊断图
+    # =========================================================================
+
+    def run_phase6(self, post_result: dict, audit_result: dict) -> dict:
+        """Phase 6 统一入口：文本报告 → CSV 记录 → 可视化诊断图。
+
+        收编原 workflow._report_phase / _analysis_phase 的全部逻辑。
+        reporter.py 保持为无状态纯格式化模块。
+        """
+        from modules.reporter import render_final_report
+        from modules.result_logger import (
+            resolve_eps,
+            resolve_min_samples,
+            update_dbscan_csv,
+        )
+
+        ctx = self.ctx
+        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
+        cluster_cfg["id"] = ctx.cluster_id
+
+        # ── 1. 文本报告 ──
+        summary = render_final_report(
+            ctx.cluster_id,
+            ctx.category,
+            ctx.feature_space,
+            ctx.algorithm,
+            cluster_cfg,
+            ctx.state.gmm_config,
+            post_result,
+            audit_result,
+            audit_result.get("deep_stats_pg_only", {}),
+            audit_result.get("deep_stats_ref_only", {}),
+            audit_result.get("deep_stats_matched", {}),
+            audit_result.get(f"deep_stats_{ctx.category}", {}),
+            audit_result.get("deep_stats_pg_algo", {}),
+            self.logger,
+        )
+
+        # ── 2. DBSCAN 实验结果 CSV ──
+        try:
+            csv_path = cfg.RESULTS_DIR / "实验结果记录(DBSCAN).csv"
+            eps = ctx.state.computed_dbscan_eps or resolve_eps(
+                ctx.algo_params, cluster_cfg, ctx.state.gmm_config
+            )
+            min_s = resolve_min_samples(
+                ctx.algo_params, cluster_cfg, ctx.state.gmm_config
+            )
+            update_dbscan_csv(
+                csv_path=csv_path,
+                cluster=ctx.cluster_id,
+                eps=eps,
+                min_samples=min_s,
+                cross_stats=audit_result.get("stats", {}),
+                deep_stats_matched=audit_result.get("deep_stats_matched", {}),
+                deep_stats_pg_only=audit_result.get("deep_stats_pg_only", {}),
+                deep_stats_ref_only=audit_result.get("deep_stats_ref_only", {}),
+            )
+        except Exception:
+            self.logger.warning(
+                "[ResultLog] 记录实验结果 CSV 时出现异常（已静默，不影响主流程）",
+                exc_info=True,
+            )
+
+        # ── 3. 可视化诊断图（受 --skip-viz 控制）──
+        if not ctx.skip_viz:
+            self.run_all_diagnostics()
+
+        return summary
+
+    def run_all_diagnostics(self):
+        """基于 master 表绘制所有诊断图。"""
+        master = self.ctx.state.master_table
+        self.logger.info(f"🎨 [Phase 6] 可视化分析: {master}")
+
+        existing_cols = set(
+            row[0]
+            for row in self.db.con.execute(
+                f"SELECT column_name FROM information_schema.columns "
+                f"WHERE table_name = '{master}'"
+            ).fetchall()
+        )
+
+        # 1. 空间管掩模图（统一使用赤道坐标 ra,dec）
+        if (
+            self.ctx.state.tube_pca_center is not None
+            and "ra" in existing_cols
+            and "dec" in existing_cols
+            and "in_tube" in existing_cols
+        ):
+            self._plot_tube_mask(master)
+        else:
+            self.logger.info(
+                "⏩ [Phase 6] 跳过空间管掩模图（PCA 元数据或坐标列缺失）。"
+            )
+
+        # 2. 三通道概率分布直方图
+        prob_cols = {"prob", "core_prob", "tail_prob"}
+        if prob_cols.issubset(existing_cols):
+            self._plot_channel_probs(master)
+        else:
+            missing = prob_cols - existing_cols
+            self.logger.info(
+                f"⏩ [Phase 6] 跳过概率分布直方图（缺失列: {missing}）。"
+            )
+
+    def _plot_tube_mask(self, master: str):
+        """基于 master 表重建空间管掩模图（统一使用赤道坐标 ra,dec）。"""
+        df_all = self.db.query(f"SELECT ra, dec FROM {master}")
+        df_seeds = self.db.query(
+            f"SELECT ra, dec FROM {master} WHERE seed_type IS NOT NULL"
+        )
+        df_tube = self.db.query(
+            f"SELECT ra, dec FROM {master} WHERE in_tube = TRUE"
+        )
+
+        if df_tube.empty:
+            self.logger.info("⏩ [Phase 6] 管内无天体，跳过空间管图。")
+            return
+
+        state = self.ctx.state
+        pca_proxy = _PCAMeta(
+            center=np.array(state.tube_pca_center),
+            components=state.tube_pca_components,
+            mean=state.tube_pca_mean,
+            tube_width=state.tube_width,
+        )
+        length_deg = state.tube_length
+        width_deg = state.tube_width
+        output_dir = str(cfg.ANALYSIS_DIR)
+        cluster_id = self.target_cluster
+
+        # ── 以下为原 plot_spatial_tube 核心逻辑 ──
+        self.logger.info(
+            f"🎨 正在静默渲染 [{cluster_id}] 物理对齐场星背景与轨道管掩模..."
+        )
+
+        fig, ax = plt.subplots(figsize=(10, 10), dpi=150)
+
+        center = getattr(pca_proxy, "cluster_center_", np.array([0.0, 0.0]))
+        x0, y0 = float(center[0]), float(center[1])
+
+        def _tangent_proj(df):
+            if df.empty or "ra" not in df.columns or "dec" not in df.columns:
+                return np.array([]), np.array([])
+            dl = (df["ra"] - x0 + 180.0) % 360.0 - 180.0
+            return dl * np.cos(np.radians(y0)), df["dec"] - y0
+
+        x_all_p, y_all_p = _tangent_proj(df_all)
+        x_tube_p, y_tube_p = _tangent_proj(df_tube)
+        x_seeds_p, y_seeds_p = _tangent_proj(df_seeds)
+
+        x_all, y_all = x0 + x_all_p, y0 + y_all_p
+        x_tube, y_tube = x0 + x_tube_p, y0 + y_tube_p
+        x_seeds, y_seeds = x0 + x_seeds_p, y0 + y_seeds_p
+
+        if len(x_all) > 0:
+            hb = ax.hexbin(
+                x_all, y_all, gridsize=300, cmap="Greys",
+                norm=LogNorm(vmin=1, vmax=max(10, len(df_all) // 5000)),
+                alpha=0.6, zorder=1,
+            )
+            cb = fig.colorbar(hb, ax=ax, fraction=0.046, pad=0.04)
+            cb.set_label(r"Stellar Density ($\log_{10} N$)", fontsize=12)
+
+        if len(x_tube) > 0:
+            ax.scatter(x_tube, y_tube, s=1.5, c="dodgerblue", alpha=0.5,
+                       label="Tube Filtered", zorder=2)
+        if len(x_seeds) > 0:
+            ax.scatter(x_seeds, y_seeds, s=8, c="crimson", alpha=0.8,
+                       label="Seeds (PCA Anchor)", zorder=3)
+
+        actual_width = getattr(pca_proxy, "tube_width_", width_deg)
+        corners_pca = np.array([
+            [-length_deg, -actual_width],
+            [length_deg, -actual_width],
+            [length_deg, actual_width],
+            [-length_deg, actual_width],
+        ])
+        corners_proj = pca_proxy.inverse_transform(corners_pca)
+        corners_sky = corners_proj + np.array([x0, y0])
+
+        ax.add_patch(Polygon(
+            corners_sky, closed=True, fill=False,
+            edgecolor="darkorange", linewidth=2.5, linestyle="--",
+            label=f"Tidal Tube (±{length_deg:.1f}°)", zorder=4,
+        ))
+
+        if len(x_all_p) > 0:
+            view_margin = float(np.max(np.hypot(x_all_p, y_all_p))) * 1.03
+        else:
+            view_margin = max(length_deg, actual_width) * 1.2
+
+        ax.set_xlim(x0 + view_margin, x0 - view_margin)
+        ax.set_ylim(y0 - view_margin, y0 + view_margin)
+        ax.set_aspect("equal", adjustable="box")
+        ax.invert_xaxis()  # 天文惯例：RA 增加方向 = 东（天图左为东）
+        ax.set_xlabel("RA (deg)", fontsize=14)
+        ax.set_ylabel("Dec (deg)", fontsize=14)
+        ax.set_title(
+            f"{cluster_id.upper()} Spatial Masking: "
+            f"{length_deg * 2:.1f}° Tidal Tube Cut over Field Stars",
+            fontsize=16, pad=15,
+        )
+
+        legend = ax.legend(loc="upper right", frameon=True, fontsize=12)
+        for handle in legend.legend_handles:
+            if hasattr(handle, "set_sizes"):
+                handle.set_sizes([30.0])
+
+        plt.tight_layout()
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"{cluster_id.lower()}_spatial_tube.jpg")
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        self.logger.info(f"💾 [{cluster_id}] 成果图已保存至: {output_path}")
+
+    def _plot_channel_probs(self, master: str):
+        """基于 master 表绘制 prob / core_prob / tail_prob 三通道概率分布直方图。
+
+        整合了原 utils/tube.py:plot_prob_distributions 的全部逻辑。
+        """
+        df_res = self.db.query(
+            f"SELECT prob, core_prob, tail_prob FROM {master}"
+        )
+        cluster_id = self.target_cluster
+        output_dir = str(cfg.ANALYSIS_DIR)
+
+        self.logger.info(
+            f"📊 正在渲染 [{cluster_id}] 三通道概率分布直方图..."
+        )
+
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5), dpi=150)
+
+        titles = [
+            ("prob", "Union Prob", "#4C72B0"),
+            ("core_prob", "Core Channel Prob", "#DD8452"),
+            ("tail_prob", "Tail Channel Prob", "#55A868"),
+        ]
+
+        for ax, (col, title, color) in zip(axes, titles):
+            if col not in df_res.columns:
+                ax.text(0.5, 0.5, f"Missing: {col}",
+                        ha="center", va="center", transform=ax.transAxes)
+                ax.set_title(title, fontsize=13)
+                continue
+
+            data = df_res[col].dropna()
+            ax.hist(data, bins=80, range=(0, 1), color=color, alpha=0.8,
+                    edgecolor="white", linewidth=0.3)
+            ax.axvline(x=0.2, color="red", linestyle="--", linewidth=1.0,
+                       label="Member threshold (0.2)")
+            ax.axvline(x=0.5, color="darkred", linestyle="--", linewidth=1.0,
+                       label="High-conf threshold (0.5)")
+            ax.set_xlabel("Probability", fontsize=12)
+            ax.set_ylabel("Count", fontsize=12)
+            ax.set_title(title, fontsize=13, fontweight="bold")
+            ax.set_yscale("log")
+            ax.legend(fontsize=8, framealpha=0.7)
+            ax.text(
+                0.95, 0.95,
+                f"N={len(data):,}\nμ={data.mean():.3f}\nmed={data.median():.3f}",
+                transform=ax.transAxes, ha="right", va="top", fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.8),
+            )
+
+        fig.suptitle(
+            f"{cluster_id.upper()} — Probability Distribution: Core vs Tail Channels",
+            fontsize=15, fontweight="bold", y=1.02,
+        )
+        plt.tight_layout()
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"{cluster_id.lower()}_prob_dist.jpg")
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        self.logger.info(f"💾 [{cluster_id}] 概率分布直方图已保存至: {output_path}")

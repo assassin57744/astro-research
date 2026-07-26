@@ -11,8 +11,7 @@ from modules.db import AstroDB
 from modules.pg_core import PriorGMM
 from modules.validator import UnifiedMemberValidator
 from modules.transformer import AstroTransformer
-from modules.reporter import render_final_report, render_all_modes_comparison
-from modules.result_logger import update_dbscan_csv
+from modules.reporter import render_all_modes_comparison
 from modules.cluster import StarCluster
 
 import config as cfg
@@ -38,7 +37,7 @@ class PipelineState:
     computed_dbscan_eps: str | None = None  # 运行时 KDE 解算的真实 eps（非 "auto"）
 
     # ── Phase 6 可视化：空间管 PCA 元数据（从 _build_spatial_tube 提取）──
-    tube_pca_center: tuple | None = None       # (l0, b0) 管质心
+    tube_pca_center: tuple | None = None       # (x0, y0) 管质心（赤道坐标 ra,dec）
     tube_pca_components: "np.ndarray | None" = None  # 2×2 分量矩阵
     tube_pca_mean: "np.ndarray | None" = None  # PCA fit 均值
     tube_width: float | None = None             # 管自适应半宽 (°)
@@ -81,26 +80,6 @@ class RunContext:
 
 
 # =============================================================================
-# 🔧 PCA 元数据代理（供 Phase 6 可视化反解管顶点）
-# =============================================================================
-
-
-class _PCAMeta:
-    """轻量级 PCA 代理，仅暴露 plot_spatial_tube 所需的三个接口。"""
-
-    __slots__ = ("cluster_center_", "tube_width_", "_components", "_mean")
-
-    def __init__(self, center, components, mean, tube_width):
-        self.cluster_center_ = center
-        self._components = components
-        self._mean = mean
-        self.tube_width_ = tube_width
-
-    def inverse_transform(self, X):
-        return np.dot(X, self._components) + self._mean
-
-
-# =============================================================================
 # AstroWorkflow 主类
 # =============================================================================
 
@@ -117,8 +96,6 @@ class AstroWorkflow:
                      _load_and_transform_seeds() / _run_stable_pipeline() /
                      _run_experimental_pipeline() / _run_cross_match() / [A]
                      _run_phys_lit_fusion() / _audit_xmatch_subsets() / [B+C+D]
-                     _analysis_phase() / _plot_tube_from_master() /
-                     _plot_probs_from_master()
     """
 
     def __init__(self, db_instance: AstroDB | None = None):
@@ -364,13 +341,20 @@ class AstroWorkflow:
         cache_key = f"raw_{ctx.cluster_id}"
         df_raw = self._field_cache.get(cache_key)
         if df_raw is None:
-            # 只选 id + 坐标变换必需列，省去 70% 的列序列化开销
-            cols = [c for c in self._MIN_FIELD_COLS]
+            # 探测视图中实际存在的列，仅 SELECT 交集
+            view_cols = {
+                row[0] for row in self.db.con.execute(
+                    f"SELECT column_name FROM information_schema.columns "
+                    f"WHERE table_name = '{v_aln}'"
+                ).fetchall()
+            }
+            cols = [c for c in self._MIN_FIELD_COLS if c in view_cols]
             cols_str = ', '.join(cols)
             df_raw = self.db.query(f"SELECT {cols_str} FROM {v_aln}")
             self._field_cache[cache_key] = df_raw
             self.logger.info(
-                f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: {len(df_raw)} 颗 (7 列精简)"
+                f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: "
+                f"{len(df_raw)} 颗 ({len(df_raw.columns)} 列)"
             )
 
         df_ext = self._transform_and_bridge_features(
@@ -586,7 +570,7 @@ class AstroWorkflow:
             f"🔍 [Target Field Diagnosis] 传入天体总量: {len(df_all)} 颗 | "
             f"RA 范围: [{df_all['ra'].min():.2f}°, {df_all['ra'].max():.2f}°] | "
             f"Dec 范围: [{df_all['dec'].min():.2f}°, {df_all['dec'].max():.2f}°] | "
-            f"l 范围: [{df_all['l'].min():.2f}°, {df_all['l'].max():.2f}°]"
+            f"Dec 范围: [{df_all['dec'].min():.2f}°, {df_all['dec'].max():.2f}°]"
         )
 
         # ---------------------------------------------------------
@@ -710,9 +694,11 @@ class AstroWorkflow:
                 f"管长={length_deg}°, 管宽={width_deg}°"
             )
 
-        # 纯净 5D 特征切片提取
-        df_all_clean = df_all[ctx.state.required_features].copy()
-        df_seeds_clean = df_seeds_core[ctx.state.required_features].copy()
+        # 纯净特征切片 + 空间坐标列（管绘制必需 ra,dec）
+        tube_cols = [c for c in [*ctx.state.required_features, "ra", "dec"]
+                     if c in df_all.columns]
+        df_all_clean = df_all[tube_cols].copy()
+        df_seeds_clean = df_seeds_core[tube_cols].copy()
 
         # 🌟 4.2 构造空间管切片
         df_tube_clean, pca_model = self._build_spatial_tube(
@@ -935,17 +921,17 @@ class AstroWorkflow:
         """
         # 🌟 1. 自动寻找/校验空间坐标列
         if coord_cols is None:
-            if "l" in df_seeds.columns and "b" in df_seeds.columns:
-                coord_cols = ["l", "b"]
-            elif "ra" in df_seeds.columns and "dec" in df_seeds.columns:
+            if "ra" in df_seeds.columns and "dec" in df_seeds.columns:
                 coord_cols = ["ra", "dec"]
+            elif "l" in df_seeds.columns and "b" in df_seeds.columns:
+                coord_cols = ["l", "b"]
             else:
                 # 兼容全小写与大写
                 cols_lower = {col.lower(): col for col in df_seeds.columns}
-                if "l" in cols_lower and "b" in cols_lower:
-                    coord_cols = [cols_lower["l"], cols_lower["b"]]
-                elif "ra" in cols_lower and "dec" in cols_lower:
+                if "ra" in cols_lower and "dec" in cols_lower:
                     coord_cols = [cols_lower["ra"], cols_lower["dec"]]
+                elif "l" in cols_lower and "b" in cols_lower:
+                    coord_cols = [cols_lower["l"], cols_lower["b"]]
                 else:
                     raise KeyError(
                         "未在种子星 DataFrame 中找到 ['l', 'b'] 或 ['ra', 'dec'] 空间坐标列！"
@@ -1482,159 +1468,9 @@ class AstroWorkflow:
     def _report_phase(
         self, ctx: RunContext, post_result: dict, audit_result: dict
     ) -> dict:
-        """生成最终报告并返回绩效摘要。"""
-        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
-        cluster_cfg["id"] = ctx.cluster_id
-
-        summary = render_final_report(
-            ctx.cluster_id,
-            ctx.category,
-            ctx.feature_space,
-            ctx.algorithm,
-            cluster_cfg,
-            ctx.state.gmm_config,
-            post_result,
-            audit_result,
-            audit_result.get("deep_stats_pg_only", {}),
-            audit_result.get("deep_stats_ref_only", {}),
-            audit_result.get("deep_stats_matched", {}),
-            audit_result.get(f"deep_stats_{ctx.category}", {}),
-            audit_result.get("deep_stats_pg_algo", {}),
-            self.logger,
-        )
-
-        # ── 独立功能：记录 DBSCAN 实验结果到 CSV ──
-        try:
-            from modules.result_logger import resolve_eps, resolve_min_samples
-
-            csv_path = cfg.RESULTS_DIR / "实验结果记录(DBSCAN).csv"
-            # 优先使用运行时 KDE 解算出的真实 eps，否则按配置优先级解析
-            eps = ctx.state.computed_dbscan_eps or resolve_eps(
-                ctx.algo_params, cluster_cfg, ctx.state.gmm_config
-            )
-            min_s = resolve_min_samples(ctx.algo_params, cluster_cfg, ctx.state.gmm_config)
-            update_dbscan_csv(
-                csv_path=csv_path,
-                cluster=ctx.cluster_id,
-                eps=eps,
-                min_samples=min_s,
-                cross_stats=audit_result.get("stats", {}),
-                deep_stats_matched=audit_result.get("deep_stats_matched", {}),
-                deep_stats_pg_only=audit_result.get("deep_stats_pg_only", {}),
-                deep_stats_ref_only=audit_result.get("deep_stats_ref_only", {}),
-            )
-        except Exception:
-            self.logger.warning(
-                "[ResultLog] 记录实验结果 CSV 时出现异常（已静默，不影响主流程）",
-                exc_info=True,
-            )
-
-        # ── 可视化诊断图（受 --skip-viz 控制）──
-        if not ctx.skip_viz:
-            self._analysis_phase(ctx)
-
-        return summary
-
-    def _analysis_phase(self, ctx: RunContext):
-        """可视化分析 — 基于 master 表数据统一绘制诊断图。
-
-        从 master 表读取已持久化的成员概率、空间管几何、种子标签等字段，
-        生成：
-          1. 空间管掩模图（需 PCA 元数据，仅实验管线可用）
-          2. 三通道概率分布直方图（需 core_prob/tail_prob，仅实验管线可用）
-
-        若 master 中缺少必要列或 PCA 元数据未就绪，则静默跳过对应子图。
-        """
-        master = ctx.state.master_table
-        self.logger.info(f"🎨 [Phase 6] 可视化分析: {master}")
-
-        # ── 探测 master 可用列 ──
-        existing_cols = set(
-            row[0]
-            for row in self.db.con.execute(
-                f"SELECT column_name FROM information_schema.columns WHERE table_name = '{master}'"
-            ).fetchall()
-        )
-
-        # ── 1. 空间管掩模图 ──
-        if (
-            ctx.state.tube_pca_center is not None
-            and "l" in existing_cols
-            and "b" in existing_cols
-            and "in_tube" in existing_cols
-        ):
-            self._plot_tube_from_master(ctx, master, existing_cols)
-        else:
-            self.logger.info(
-                "⏩ [Phase 6] 跳过空间管掩模图（PCA 元数据或坐标列缺失）。"
-            )
-
-        # ── 2. 三通道概率分布直方图 ──
-        prob_cols = {"prob", "core_prob", "tail_prob"}
-        if prob_cols.issubset(existing_cols):
-            self._plot_probs_from_master(ctx, master)
-        else:
-            missing = prob_cols - existing_cols
-            self.logger.info(
-                f"⏩ [Phase 6] 跳过概率分布直方图（缺失列: {missing}）。"
-            )
-
-    def _plot_tube_from_master(
-        self, ctx: RunContext, master: str, existing_cols: set
-    ):
-        """从 master 表重建空间管掩模图所需 DataFrame，委托给 tube.plot_spatial_tube。"""
-        from utils.tube import plot_spatial_tube
-
-        coord_cols = "l, b"
-        df_all = self.db.query(
-            f"SELECT {coord_cols} FROM {master}"
-        )
-        df_seeds = self.db.query(
-            f"SELECT {coord_cols} FROM {master} WHERE seed_type IS NOT NULL"
-        )
-        df_tube = self.db.query(
-            f"SELECT {coord_cols} FROM {master} WHERE in_tube = TRUE"
-        )
-
-        if df_tube.empty:
-            self.logger.info("⏩ [Phase 6] 管内无天体，跳过空间管图。")
-            return
-
-        # 重建 PCA 元数据代理对象
-        center_arr = np.array(ctx.state.tube_pca_center)
-        comps = ctx.state.tube_pca_components
-        mean = ctx.state.tube_pca_mean
-
-        pca_proxy = _PCAMeta(
-            center=center_arr,
-            components=comps,
-            mean=mean,
-            tube_width=ctx.state.tube_width,
-        )
-
-        plot_spatial_tube(
-            df_all=df_all,
-            df_seeds=df_seeds,
-            df_tube=df_tube,
-            pca=pca_proxy,
-            length_deg=ctx.state.tube_length,
-            width_deg=ctx.state.tube_width,
-            cluster_id=ctx.cluster_id,
-            output_dir=cfg.ANALYSIS_DIR,
-        )
-
-    def _plot_probs_from_master(self, ctx: RunContext, master: str):
-        """从 master 表读取概率列，委托给 tube.plot_prob_distributions。"""
-        from utils.tube import plot_prob_distributions
-
-        df_res = self.db.query(
-            f"SELECT prob, core_prob, tail_prob FROM {master}"
-        )
-        plot_prob_distributions(
-            df_res,
-            cluster_id=ctx.cluster_id,
-            output_dir=cfg.ANALYSIS_DIR,
-        )
+        """Phase 6: 报告与可视化 — 委托给 AstroAnalyzer。"""
+        from modules.analysis import AstroAnalyzer
+        return AstroAnalyzer(self.db, ctx=ctx).run_phase6(post_result, audit_result)
 
     def _register_union_view(self, all_results: list[dict]):
         """注册跨星团 UNION ALL 联合视图。
