@@ -694,9 +694,11 @@ class AstroWorkflow:
                 f"管长={length_deg}°, 管宽={width_deg}°"
             )
 
-        # 纯净特征切片 + 空间坐标列（管绘制必需 ra,dec）
-        tube_cols = [c for c in [*ctx.state.required_features, "ra", "dec"]
-                     if c in df_all.columns]
+        # 纯净特征切片 + 空间坐标列（管绘制必需 ra,dec），去重
+        tube_cols = list(dict.fromkeys(
+            [*ctx.state.required_features, "ra", "dec"]
+        ))
+        tube_cols = [c for c in tube_cols if c in df_all.columns]
         df_all_clean = df_all[tube_cols].copy()
         df_seeds_clean = df_seeds_core[tube_cols].copy()
 
@@ -722,8 +724,11 @@ class AstroWorkflow:
         ctx.state.tube_width = float(pca_model.tube_width_)
         ctx.state.tube_length = length_deg
 
-        # 🌟 4.3 运动学 Sigma Clip (优先选用 Channel A 算出的高纯度 Core 作为基准源)
-        pm_cols = ["pm_l_cosb", "pm_b", "plx"]
+        # 🌟 4.3 运动学 Sigma Clip — 动态适配银河/赤道自行列
+        pm_cols_map = {c.lower(): c for c in df_all.columns}
+        x_col = next((pm_cols_map[k] for k in ["pm_l_cosb", "pmra"] if k in pm_cols_map), None)
+        y_col = next((pm_cols_map[k] for k in ["pm_b", "pmdec"] if k in pm_cols_map), None)
+        pm_cols = [x_col, y_col, "plx"] if x_col and y_col else ["plx"]
         sigma_clip = cl.get_param("TUBE_SIGMA_CLIP", 5.0)
 
         # 提取高置信 Core 天体的 ID 集合
@@ -740,27 +745,36 @@ class AstroWorkflow:
             ref_label = "Refined Seeds (Fallback)"
 
         if sigma_clip > 0 and not df_tube_clean.empty and not ref_df.empty:
-            ref_vals = ref_df[pm_cols].values.astype(np.float64)
+            # 仅当可用自行列 ≥ 2（+ plx = 3）时执行 Mahalanobis 裁剪
+            avail_pm = [c for c in pm_cols if c in ref_df.columns]
+            if len(avail_pm) >= 3:
+                ref_vals = ref_df[avail_pm].values.astype(np.float64)
+                n_dim = len(avail_pm)
 
-            # 使用矩估计并注入正则化因子，防止伪逆奇异
-            ref_mean = ref_vals.mean(axis=0)
-            ref_cov = np.cov(ref_vals, rowvar=False) + np.eye(3) * 1e-6
-            inv_cov = np.linalg.pinv(ref_cov)
+                # 使用矩估计并注入正则化因子，防止伪逆奇异
+                ref_mean = ref_vals.mean(axis=0)
+                ref_cov = np.cov(ref_vals, rowvar=False) + np.eye(n_dim) * 1e-6
+                inv_cov = np.linalg.pinv(ref_cov)
 
-            tube_vals = df_tube_clean[pm_cols].values.astype(np.float64)
-            diff = tube_vals - ref_mean
-            md_sq = np.sum((diff @ inv_cov) * diff, axis=1)
+                tube_vals = df_tube_clean[avail_pm].values.astype(np.float64)
+                diff = tube_vals - ref_mean
+                md_sq = np.sum((diff @ inv_cov) * diff, axis=1)
 
-            n_before = len(df_tube_clean)
-            clip_mask = md_sq <= sigma_clip**2
-            df_tube_clean = df_tube_clean[clip_mask].copy()
+                n_before = len(df_tube_clean)
+                clip_mask = md_sq <= sigma_clip**2
+                df_tube_clean = df_tube_clean[clip_mask].copy()
 
-            self.logger.info(
-                f"📐 [Tube Sigma Clip] 基准源: {ref_label} ({len(ref_df)} 颗) | "
-                f"σ_clip={sigma_clip} (Mahalanobis) | "
-                f"过滤: {n_before} → {len(df_tube_clean)} 颗 "
-                f"(剔除 {(n_before - len(df_tube_clean)) / n_before * 100:.1f}%)"
-            )
+                self.logger.info(
+                    f"📐 [Tube Sigma Clip] 基准源: {ref_label} ({len(ref_df)} 颗) | "
+                    f"σ_clip={sigma_clip} (Mahalanobis {n_dim}D) | "
+                    f"过滤: {n_before} → {len(df_tube_clean)} 颗 "
+                    f"(剔除 {(n_before - len(df_tube_clean)) / n_before * 100:.1f}%)"
+                )
+            else:
+                self.logger.info(
+                    f"⏩ [Tube Sigma Clip] 跳过：可用自行列不足 "
+                    f"({avail_pm}, 需要 ≥3)"
+                )
 
         # 提取管内完整天体视图
         valid_tube_indices = df_all.index.intersection(df_tube_clean.index)

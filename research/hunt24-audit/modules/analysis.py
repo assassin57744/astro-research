@@ -958,6 +958,25 @@ class AstroAnalyzer:
         cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
 
+        # ── 注入运行时实际参数（覆盖 config.py 静态默认值）──
+        gmm_cfg = ctx.state.gmm_config.copy()
+        # DBSCAN 参数：优先 CLI 覆盖 → computed_eps → 配置值
+        if "eps" in ctx.algo_params:
+            gmm_cfg["DBSCAN_EPS"] = ctx.algo_params["eps"]
+        elif ctx.state.computed_dbscan_eps:
+            gmm_cfg["DBSCAN_EPS"] = ctx.state.computed_dbscan_eps
+        if "min_samples" in ctx.algo_params:
+            gmm_cfg["DBSCAN_MIN_SAMPLES"] = ctx.algo_params["min_samples"]
+
+        # Pipeline 筛选参数：从 StarCluster 运行时属性获取
+        cl = ctx.star_cluster
+        for key in ("PM_RADIUS", "PLX_ERROR", "RV_ERROR", "CMD_DEV",
+                     "KINE_SCORE_LIMIT", "SEED_RADIUS", "SEED_PLX_LIM",
+                     "SEED_MAX_MAG", "SEED_MAX_RUWE"):
+            v = cl.get_param(key)
+            if v is not None:
+                cluster_cfg[key] = v
+
         # ── 1. 文本报告 ──
         summary = render_final_report(
             ctx.cluster_id,
@@ -965,7 +984,7 @@ class AstroAnalyzer:
             ctx.feature_space,
             ctx.algorithm,
             cluster_cfg,
-            ctx.state.gmm_config,
+            gmm_cfg,
             post_result,
             audit_result,
             audit_result.get("deep_stats_pg_only", {}),
@@ -980,10 +999,10 @@ class AstroAnalyzer:
         try:
             csv_path = cfg.RESULTS_DIR / "实验结果记录(DBSCAN).csv"
             eps = ctx.state.computed_dbscan_eps or resolve_eps(
-                ctx.algo_params, cluster_cfg, ctx.state.gmm_config
+                ctx.algo_params, cluster_cfg, gmm_cfg
             )
             min_s = resolve_min_samples(
-                ctx.algo_params, cluster_cfg, ctx.state.gmm_config
+                ctx.algo_params, cluster_cfg, gmm_cfg
             )
             update_dbscan_csv(
                 csv_path=csv_path,
@@ -1041,6 +1060,16 @@ class AstroAnalyzer:
             missing = prob_cols - existing_cols
             self.logger.info(
                 f"⏩ [Phase 6] 跳过概率分布直方图（缺失列: {missing}）。"
+            )
+
+        # 3. 交叉比对诊断三连图（CMD + 位置 + 自行）
+        diag_cols = {"ra", "dec", "pmra", "pmdec", "mag", "color", "x_match_tag"}
+        if diag_cols.issubset(existing_cols):
+            self._plot_cross_match_diagnostics(master)
+        else:
+            missing = diag_cols - existing_cols
+            self.logger.info(
+                f"⏩ [Phase 6] 跳过交叉比对诊断图（缺失列: {missing}）。"
             )
 
     def _plot_tube_mask(self, master: str):
@@ -1213,3 +1242,142 @@ class AstroAnalyzer:
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         self.logger.info(f"💾 [{cluster_id}] 概率分布直方图已保存至: {output_path}")
+
+    def _plot_cross_match_diagnostics(self, master: str):
+        """绘制交叉比对三连图：CMD + 赤道位置 + 自行（背景为灰色场星）。
+
+        Matched=蓝 / PG Only=橙红 / Ref Only=灰 / Field=浅灰背景。
+        """
+        cluster_id = self.target_cluster
+        output_dir = str(cfg.ANALYSIS_DIR)
+
+        self.logger.info(f"🔬 正在渲染 [{cluster_id}] 交叉比对诊断三连图...")
+
+        df = self.db.query(
+            f"SELECT ra, dec, pmra, pmdec, mag, color, x_match_tag "
+            f"FROM {master}"
+        )
+        x_tag = cfg.MASTER_COLS["X_MATCH"]
+
+        # ── 定义颜色映射 ──
+        colors = {
+            "Matched":  ("royalblue",   "Matched"),
+            "PG Only":  ("orangered",   "PG Only"),
+            "Ref Only": ("forestgreen",  "Ref Only"),
+        }
+
+        fig, axes = plt.subplots(1, 3, figsize=(22, 7), dpi=150)
+        fig.suptitle(
+            f"{cluster_id.upper()} — Cross-Match Diagnostics",
+            fontsize=15, fontweight="bold", y=1.02,
+        )
+
+        # ── 1. CMD (颜色-星等图) ──
+        ax = axes[0]
+        cmd_mask = (df["color"] > -0.5) & (df["color"] < 4.5) & (df["mag"] < 22)
+        df_cmd = df[cmd_mask]
+        for tag, (c, label) in colors.items():
+            sub = df_cmd[df_cmd[x_tag] == tag]
+            if not sub.empty:
+                ax.scatter(sub["color"], sub["mag"], c=c, s=12, alpha=0.8,
+                           edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
+        self._overlay_isochrones(ax, df_cmd)
+        ax.invert_yaxis()
+        ax.set_xlabel("G_BP − G_RP", fontsize=12)
+        ax.set_ylabel("G (mag)", fontsize=12)
+        ax.set_title("CMD", fontsize=13, fontweight="bold")
+        ax.legend(fontsize=7, framealpha=0.7, loc="upper right")
+
+        # ── 2. 赤道位置 (RA/Dec) ──
+        ax = axes[1]
+        ax.scatter(df["ra"], df["dec"], c="lightgrey", s=1, alpha=0.08, zorder=1)
+        for tag, (c, label) in colors.items():
+            sub = df[df[x_tag] == tag]
+            if not sub.empty:
+                ax.scatter(sub["ra"], sub["dec"], c=c, s=12, alpha=0.8,
+                           edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
+        ax.invert_xaxis()
+        # 物理正圆：RA 轴需 cos(Dec) 修正
+        cos_dec = np.cos(np.radians(abs(df["dec"].mean())))
+        ax.set_aspect(1.0 / cos_dec, adjustable="datalim")
+        ax.set_xlabel("RA (deg)", fontsize=12)
+        ax.set_ylabel("Dec (deg)", fontsize=12)
+        ax.set_title("Spatial Distribution", fontsize=13, fontweight="bold")
+        ax.legend(fontsize=7, framealpha=0.7, loc="upper right")
+
+        # ── 3. 自行矢量图 (VPD) ──
+        ax = axes[2]
+        for tag, (c, label) in colors.items():
+            sub = df[df[x_tag] == tag]
+            if not sub.empty:
+                ax.scatter(sub["pmra"], sub["pmdec"], c=c, s=12, alpha=0.8,
+                           edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
+        ax.set_xlabel("pmra (mas/yr)", fontsize=12)
+        ax.set_ylabel("pmdec (mas/yr)", fontsize=12)
+        ax.set_title("Proper Motion VPD", fontsize=13, fontweight="bold")
+        ax.legend(fontsize=7, framealpha=0.7, loc="upper right")
+
+        plt.tight_layout()
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(
+            output_dir, f"{cluster_id.lower()}_cross_match_diag.jpg"
+        )
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        self.logger.info(f"💾 [{cluster_id}] 交叉比对诊断三连图已保存至: {output_path}")
+
+    def _overlay_isochrones(self, ax, df_cmd=None):
+        """在 CMD 图上叠加星团标准等龄线，自动适配数据颜色范围。"""
+        cl = self.ctx.star_cluster
+        iso_df = getattr(cl, "isochrone_df", None)
+        if iso_df is None or iso_df.empty:
+            return
+
+        dist_pc = getattr(cl, "distance_pc", 100.0)
+        ext_ag = getattr(cl, "ext_ag", 0.0)
+        ebprp = getattr(cl, "e_bp_rp", ext_ag * cfg.REDDENING_RATIO_BP_RP)
+        dist_mod = 5.0 * np.log10(dist_pc) - 5.0
+
+        col_map = {}
+        for col in iso_df.columns:
+            c = col.lower()
+            if c in ("gmag", "g"):
+                col_map["G"] = col
+            if c in ("g_bpmag", "bpmag", "bp"):
+                col_map["BP"] = col
+            if c in ("g_rpmag", "rpmag", "rp"):
+                col_map["RP"] = col
+        if len(col_map) < 3:
+            return
+
+        age_col = next((c for c in iso_df.columns
+                        if c.lower() in ("logage", "logageyr")), None)
+        if age_col is None:
+            return
+
+        model_g = iso_df[col_map["G"]].values + dist_mod + ext_ag
+        model_color = (
+            iso_df[col_map["BP"]].values - iso_df[col_map["RP"]].values + ebprp
+        )
+
+        # 根据实际数据范围自动裁剪等龄线（颜色+星等双向截断）
+        if df_cmd is not None and len(df_cmd) > 0:
+            c_min = df_cmd["color"].min() - 0.2
+            c_max = df_cmd["color"].max() + 0.2
+            m_min = df_cmd["mag"].min() - 1.0
+            m_max = df_cmd["mag"].max() + 1.0
+        else:
+            c_min, c_max = model_color.min(), model_color.max()
+            m_min, m_max = model_g.min(), model_g.max()
+
+        ages = sorted(iso_df[age_col].unique())
+        step = max(1, len(ages) // 5)
+        for log_age in ages[::step]:
+            mask = iso_df[age_col] == log_age
+            mc = model_color[mask]
+            mg = model_g[mask]
+            seg = (mc >= c_min) & (mc <= c_max) & (mg >= m_min) & (mg <= m_max)
+            if seg.sum() < 5 or seg.sum() / max(len(mc), 1) < 0.05:
+                continue
+            ax.plot(mc[seg], mg[seg],
+                    "k-", linewidth=1.2, alpha=0.6, zorder=5)

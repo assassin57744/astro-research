@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
         "cluster",
         type=str,
         nargs="?",
-        help="目标星团名称 (运行管线模式下必填, 例如: M45, M44, M67)",
+        help="目标星团名称 (例如: M45, M44, M67; 逗号分隔多个: M44,M41; 或 all)",
     )
     parser.add_argument(
         "--category",
@@ -257,9 +257,13 @@ def main() -> None:
     target_cluster_ids = []
     if args.cluster.lower() == "all":
         target_cluster_ids = list(cfg.CLUSTERS.keys())
+    elif "," in args.cluster:
+        for c in args.cluster.split(","):
+            c = c.strip()
+            if c:
+                target_cluster_ids.append(_validate_cluster(c))
     else:
-        target_cluster_id = _validate_cluster(args.cluster)
-        target_cluster_ids = [target_cluster_id]
+        target_cluster_ids = [_validate_cluster(args.cluster)]
 
     # 确定特征空间列表
     if args.mode == "all":
