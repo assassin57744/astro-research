@@ -88,19 +88,31 @@ STD_COLS = {
 
 # Master 表专用标签列名
 MASTER_COLS = {
-    "SEED_TYPE": "seed_type",   # raw_seed
-    "DENSITY_TAG": "density_status", # core / noise
-    "GMM_PROB": "prob",         # 算法计算概率（并集后最终概率）
-    "CORE_PROB": "core_prob",   # Channel A 核心成员概率
-    "TAIL_PROB": "tail_prob",   # Channel B 潮汐尾成员概率
-    "SOURCE": "source",         # 来源: core / tail / both / field
-    "X_MATCH": "x_match_tag",   # Matched / PG_Only / Ref_Only
-    "AUDIT": "audit_status",    # Confirmed / Candidate / Contamination
-    "AUDIT_NOTE": "audit_note", # 审计备注（如：视差偏离、暗端漏检等）
-    "KINE_CHI2":"kine_chi2",
-    "PLX_CHI2":"plx_chi2",
-    "RV_CHI2":"rv_chi2",
-    "CMD_CHI2":"cmd_chi2",
+    # ── Phase 1-2: 种子提取 & 聚类 (Seed Extraction & Clustering) ──
+    "SEED_TYPE":   "seed_type",      # raw_seed / refined_seed
+    "DENSITY_TAG": "density_status",  # core / noise (DBSCAN 标签)
+
+    # ── Phase 2: GMM 成员概率 (Core + Tail Hierarchical) ──
+    "GMM_PROB":    "prob",            # 最终融合概率
+    "CORE_PROB":   "core_prob",       # Channel A: Core GMM 概率
+    "TAIL_PROB":   "tail_prob",       # Channel B: Tail GMM 概率
+    "SOURCE":      "source",          # core / tail / both / field
+
+    # ── Phase 2: 空间管几何 (Spatial Tube Geometry) ──
+    "IN_TUBE":     "in_tube",         # BOOLEAN: 是否落入空间管
+    "PCA_LONG":    "pca_long",        # DOUBLE:  沿管轴投影距离 (°)
+    "PCA_CROSS":   "pca_cross",       # DOUBLE:  垂直管轴距离 (°)
+
+    # ── Phase 4A: 文献交叉比对 (Cross-Match) ──
+    "X_MATCH":     "x_match_tag",     # Matched / PG_Only / Ref_Only
+
+    # ── Phase 4B+C: 物理 + 文献审计 (Physical & Literature Audit) ──
+    "KINE_CHI2":   "kine_chi2",       # 动力学卡方 (PM 2-dof)
+    "PLX_CHI2":    "plx_chi2",        # 视差卡方 (1-dof)
+    "RV_CHI2":     "rv_chi2",         # 视向速度卡方 (1-dof)
+    "CMD_CHI2":    "cmd_chi2",        # CMD 卡方
+    "AUDIT":       "audit_status",    # Confirmed / Candidate / Contamination
+    "AUDIT_NOTE":  "audit_note",      # 审计备注 (视差偏离、暗端漏检等)
 }
 
 class TMPL:

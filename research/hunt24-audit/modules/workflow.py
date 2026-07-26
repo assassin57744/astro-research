@@ -752,6 +752,17 @@ class AstroWorkflow:
             f"📊 [Channel B] 空间管内捕获有效候选天体: {len(df_tube_full)} 颗"
         )
 
+        # 🌟 回灌 Master 表：空间管几何信息
+        df_tube_tag = df_tube_full[[
+            cfg.STD_COLS["ID"], "pca_long", "pca_cross"
+        ]].copy()
+        df_tube_tag["in_tube"] = True
+        self.db.tag_master_table(ctx.state.master_table, df_tube_tag)
+        self.logger.info(
+            f"📥 [Master] 空间管几何标记已回灌: "
+            f"in_tube=True, pca_long/pca_cross ({len(df_tube_tag)} 颗)"
+        )
+
         # 🌟 4.4 防御性熔断：如管内为空，退回 Core 结果
         if df_tube_full.empty:
             self.logger.warning(
