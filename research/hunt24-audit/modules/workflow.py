@@ -37,6 +37,13 @@ class PipelineState:
     )  # raw_count / clean_count / refined_count
     computed_dbscan_eps: str | None = None  # 运行时 KDE 解算的真实 eps（非 "auto"）
 
+    # ── Phase 6 可视化：空间管 PCA 元数据（从 _build_spatial_tube 提取）──
+    tube_pca_center: tuple | None = None       # (l0, b0) 管质心
+    tube_pca_components: "np.ndarray | None" = None  # 2×2 分量矩阵
+    tube_pca_mean: "np.ndarray | None" = None  # PCA fit 均值
+    tube_width: float | None = None             # 管自适应半宽 (°)
+    tube_length: float | None = None            # 管半长 (°)
+
 
 # =============================================================================
 # 📦 运行上下文数据类（单次运行的调度身份 + 可变状态引用）
@@ -63,6 +70,7 @@ class RunContext:
     algorithm: str  # "dbscan", "hdbscan"
     result_mode: str  # "brief" | "detailed"
     param_source: str  # "file" | "db" — 用于构造 StarCluster，之后以 star_cluster.param_source 为准
+    skip_viz: bool = False  # 跳过可视化分析（Phase 6 子步骤）
 
     algo_params: dict = field(default_factory=dict)
     audit_params: dict = field(default_factory=dict)
@@ -70,6 +78,26 @@ class RunContext:
 
     star_cluster: StarCluster | None = None
     state: PipelineState = field(default_factory=PipelineState)
+
+
+# =============================================================================
+# 🔧 PCA 元数据代理（供 Phase 6 可视化反解管顶点）
+# =============================================================================
+
+
+class _PCAMeta:
+    """轻量级 PCA 代理，仅暴露 plot_spatial_tube 所需的三个接口。"""
+
+    __slots__ = ("cluster_center_", "tube_width_", "_components", "_mean")
+
+    def __init__(self, center, components, mean, tube_width):
+        self.cluster_center_ = center
+        self._components = components
+        self._mean = mean
+        self.tube_width_ = tube_width
+
+    def inverse_transform(self, X):
+        return np.dot(X, self._components) + self._mean
 
 
 # =============================================================================
@@ -81,7 +109,7 @@ class AstroWorkflow:
     """天文数据处理工作流编排引擎。
 
     方法层次：
-      - 一级 PUBLIC:  run()
+      - 一级 PUBLIC:  run() / _register_union_view()
       - 二级 阶段调度: _execute_single_pipeline() / _prepare_shared_data() /
                      _finalize_context() / _compute_members() / _post_process() /
                      _audit_phase() / _export_phase() / _report_phase()
@@ -89,6 +117,8 @@ class AstroWorkflow:
                      _load_and_transform_seeds() / _run_stable_pipeline() /
                      _run_experimental_pipeline() / _run_cross_match() / [A]
                      _run_phys_lit_fusion() / _audit_xmatch_subsets() / [B+C+D]
+                     _analysis_phase() / _plot_tube_from_master() /
+                     _plot_probs_from_master()
     """
 
     def __init__(self, db_instance: AstroDB | None = None):
@@ -120,6 +150,7 @@ class AstroWorkflow:
         algorithms: list[str],
         result_mode: str = "brief",
         param_source: str = "file",
+        skip_viz: bool = False,
         algo_params_override: dict | None = None,
         audit_params_override: dict | None = None,
         seed_params_override: dict | None = None,
@@ -144,6 +175,7 @@ class AstroWorkflow:
                     algorithm="",
                     result_mode=result_mode,
                     param_source=param_source,
+                    skip_viz=skip_viz,
                 )
                 self.logger.info(f"📦 [Batch] 准备共享数据: {cluster_id}/{category}")
                 self._prepare_shared_data(ctx_base)
@@ -162,6 +194,7 @@ class AstroWorkflow:
                             algorithm=algo,
                             result_mode=result_mode,
                             param_source=param_source,
+                            skip_viz=skip_viz,
                             algo_params=(algo_params_override or {}).copy(),
                             audit_params=(audit_params_override or {}).copy(),
                             seed_params=(seed_params_override or {}).copy(),
@@ -181,6 +214,7 @@ class AstroWorkflow:
                             )
 
         self._render_batch_summary(results)
+        self._register_union_view(results)
         return results
 
     # =========================================================================
@@ -219,7 +253,7 @@ class AstroWorkflow:
         # Phase 5: 导出
         self._export_phase(ctx, audit_result)
 
-        # Phase 6: 报告
+        # Phase 6: 报告与可视化
         return self._report_phase(ctx, post_result, audit_result)
 
     def _prepare_shared_data(self, ctx: RunContext):
@@ -643,7 +677,6 @@ class AstroWorkflow:
         # 4. 通道 B：构建类内空间管，抓取 Tidal Tail / 弥散外围成员
         # ---------------------------------------------------------
         self.logger.info("📐 [Channel B] 启动 Tidal Tail 空间管构建与抓取...")
-        from utils.tube import plot_spatial_tube
 
         cl = ctx.star_cluster
 
@@ -689,17 +722,19 @@ class AstroWorkflow:
             width_deg=width_deg,
         )
 
-        # 绘制质检图
-        plot_spatial_tube(
-            df_all=df_all_clean,
-            df_seeds=df_seeds_clean,
-            df_tube=df_tube_clean,
-            pca=pca_model,
-            length_deg=length_deg,
-            width_deg=pca_model.tube_width_,
-            cluster_id=ctx.cluster_id,
-            output_dir=cfg.ANALYSIS_DIR,
+        # 保存空间管 PCA 元数据，供后续 Phase 6 可视化阶段使用
+        ctx.state.tube_pca_center = (
+            float(pca_model.cluster_center_[0]),
+            float(pca_model.cluster_center_[1]),
         )
+        ctx.state.tube_pca_components = pca_model.components_.copy()
+        ctx.state.tube_pca_mean = (
+            pca_model.mean_.copy()
+            if hasattr(pca_model, "mean_")
+            else np.zeros(2)
+        )
+        ctx.state.tube_width = float(pca_model.tube_width_)
+        ctx.state.tube_length = length_deg
 
         # 🌟 4.3 运动学 Sigma Clip (优先选用 Channel A 算出的高纯度 Core 作为基准源)
         pm_cols = ["pm_l_cosb", "pm_b", "plx"]
@@ -748,6 +783,11 @@ class AstroWorkflow:
         for feat in ctx.state.required_features:
             if feat in df_tube_clean.columns:
                 df_tube_full[feat] = df_tube_clean.loc[valid_tube_indices, feat]
+
+        # 同步空间管几何列（pca_long / pca_cross）
+        for geo_col in ("pca_long", "pca_cross"):
+            if geo_col in df_tube_clean.columns:
+                df_tube_full[geo_col] = df_tube_clean.loc[valid_tube_indices, geo_col]
 
         self.logger.info(
             f"📊 [Channel B] 空间管内捕获有效候选天体: {len(df_tube_full)} 颗"
@@ -866,15 +906,6 @@ class AstroWorkflow:
             f"📋 [Source Breakdown] 来源分布: "
             f"core_only={n_src_core} | tail_only(接管救回)={n_src_tail} | both={n_src_both} | "
             f"total_member={(n_src_core + n_src_tail + n_src_both)}"
-        )
-
-        # 🌟 绘制三通道概率分布直方图
-        from utils.tube import plot_prob_distributions
-
-        plot_prob_distributions(
-            df_res_final,
-            cluster_id=ctx.cluster_id,
-            output_dir=cfg.ANALYSIS_DIR,
         )
 
         return df_res_final
@@ -1498,35 +1529,151 @@ class AstroWorkflow:
                 exc_info=True,
             )
 
+        # ── 可视化诊断图（受 --skip-viz 控制）──
+        if not ctx.skip_viz:
+            self._analysis_phase(ctx)
+
         return summary
 
-    def _materialize_wide_view(self, ctx: RunContext) -> str:
-        """创建分析用宽视图：Master 状态 × Field 全量观测列。
+    def _analysis_phase(self, ctx: RunContext):
+        """可视化分析 — 基于 master 表数据统一绘制诊断图。
 
-        将 master 表与场星对齐视图做 INNER JOIN，
-        产出可直接用于 HR 图、天球分布等分析的完整视图。
+        从 master 表读取已持久化的成员概率、空间管几何、种子标签等字段，
+        生成：
+          1. 空间管掩模图（需 PCA 元数据，仅实验管线可用）
+          2. 三通道概率分布直方图（需 core_prob/tail_prob，仅实验管线可用）
 
-        Returns:
-            注册的宽视图名称。
+        若 master 中缺少必要列或 PCA 元数据未就绪，则静默跳过对应子图。
         """
-        field_idx = ctx.star_cluster.get_param("FIELD_IDX")
-        field_table = self.manifest[field_idx]["aln_view"]
         master = ctx.state.master_table
-        wide_name = f"wide_{master}"
+        self.logger.info(f"🎨 [Phase 6] 可视化分析: {master}")
 
-        sql = f"""
-            CREATE OR REPLACE VIEW {wide_name} AS
-            SELECT m.*, f.mag, f.color, f.ra, f.dec,
-                   f.pmra, f.pmdec, f.plx, f.rv, f.ruwe
-            FROM {master} m
-            INNER JOIN {field_table} f ON m.id = f.id
+        # ── 探测 master 可用列 ──
+        existing_cols = set(
+            row[0]
+            for row in self.db.con.execute(
+                f"SELECT column_name FROM information_schema.columns WHERE table_name = '{master}'"
+            ).fetchall()
+        )
+
+        # ── 1. 空间管掩模图 ──
+        if (
+            ctx.state.tube_pca_center is not None
+            and "l" in existing_cols
+            and "b" in existing_cols
+            and "in_tube" in existing_cols
+        ):
+            self._plot_tube_from_master(ctx, master, existing_cols)
+        else:
+            self.logger.info(
+                "⏩ [Phase 6] 跳过空间管掩模图（PCA 元数据或坐标列缺失）。"
+            )
+
+        # ── 2. 三通道概率分布直方图 ──
+        prob_cols = {"prob", "core_prob", "tail_prob"}
+        if prob_cols.issubset(existing_cols):
+            self._plot_probs_from_master(ctx, master)
+        else:
+            missing = prob_cols - existing_cols
+            self.logger.info(
+                f"⏩ [Phase 6] 跳过概率分布直方图（缺失列: {missing}）。"
+            )
+
+    def _plot_tube_from_master(
+        self, ctx: RunContext, master: str, existing_cols: set
+    ):
+        """从 master 表重建空间管掩模图所需 DataFrame，委托给 tube.plot_spatial_tube。"""
+        from utils.tube import plot_spatial_tube
+
+        coord_cols = "l, b"
+        df_all = self.db.query(
+            f"SELECT {coord_cols} FROM {master}"
+        )
+        df_seeds = self.db.query(
+            f"SELECT {coord_cols} FROM {master} WHERE seed_type IS NOT NULL"
+        )
+        df_tube = self.db.query(
+            f"SELECT {coord_cols} FROM {master} WHERE in_tube = TRUE"
+        )
+
+        if df_tube.empty:
+            self.logger.info("⏩ [Phase 6] 管内无天体，跳过空间管图。")
+            return
+
+        # 重建 PCA 元数据代理对象
+        center_arr = np.array(ctx.state.tube_pca_center)
+        comps = ctx.state.tube_pca_components
+        mean = ctx.state.tube_pca_mean
+
+        pca_proxy = _PCAMeta(
+            center=center_arr,
+            components=comps,
+            mean=mean,
+            tube_width=ctx.state.tube_width,
+        )
+
+        plot_spatial_tube(
+            df_all=df_all,
+            df_seeds=df_seeds,
+            df_tube=df_tube,
+            pca=pca_proxy,
+            length_deg=ctx.state.tube_length,
+            width_deg=ctx.state.tube_width,
+            cluster_id=ctx.cluster_id,
+            output_dir=cfg.ANALYSIS_DIR,
+        )
+
+    def _plot_probs_from_master(self, ctx: RunContext, master: str):
+        """从 master 表读取概率列，委托给 tube.plot_prob_distributions。"""
+        from utils.tube import plot_prob_distributions
+
+        df_res = self.db.query(
+            f"SELECT prob, core_prob, tail_prob FROM {master}"
+        )
+        plot_prob_distributions(
+            df_res,
+            cluster_id=ctx.cluster_id,
+            output_dir=cfg.ANALYSIS_DIR,
+        )
+
+    def _register_union_view(self, all_results: list[dict]):
+        """注册跨星团 UNION ALL 联合视图。
+
+        在所有 pipeline 完成后，将各星团 master 表拼接为统一查询入口。
+        单星团运行时只有一段，多星团时自动合并。
         """
+        seen_tables: set[str] = set()
+        union_parts: list[str] = []
+        for r in all_results:
+            cluster = r.get("cluster", "?")
+            tbl = cfg.TMPL.T_MASTER.format(
+                cluster=cluster.lower(),
+                category=r.get("category", "hunt"),
+                feature_space=r.get("mode", "5d_h").lower(),
+                algo=r.get("algo", "dbscan").lower(),
+            )
+            exists = self.db.con.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [tbl]
+            ).fetchone() is not None
+            if exists and tbl not in seen_tables:
+                seen_tables.add(tbl)
+                union_parts.append(
+                    f"SELECT '{cluster}' AS cluster_id, t.* FROM {tbl} t"
+                )
+
+        if not union_parts:
+            self.logger.warning("⚠️ [UnionView] 无有效 master 表，跳过联合视图。")
+            return
+
+        sql = (
+            "CREATE OR REPLACE VIEW v_all_clusters AS\n"
+            + "\nUNION ALL\n".join(union_parts)
+        )
         self.db.execute(sql)
         self.logger.info(
-            f"📐 [WideView] 分析宽视图已注册: {wide_name} "
-            f"(master × {field_table})"
+            f"🌐 [UnionView] 跨星团联合视图已注册: v_all_clusters "
+            f"({len(union_parts)} 个星团)"
         )
-        return wide_name
 
     def _render_batch_summary(self, all_results: list[dict]):
         """批量运行汇总报告。"""

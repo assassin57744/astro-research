@@ -132,6 +132,12 @@ def parse_args() -> argparse.Namespace:
         choices=["file", "db"],
         help="配置来源: file (静态) 或 db (历史重建)",
     )
+    parser.add_argument(
+        "--skip-viz",
+        action="store_true",
+        default=False,
+        help="跳过 Phase 7 可视化分析阶段（空间管掩模图、概率分布直方图等）",
+    )
 
     # 🚀 扩展入口：算法/审计/种子参数覆盖
     parser.add_argument(
@@ -283,6 +289,7 @@ def main() -> None:
         algorithms=[args.algo],
         result_mode=args.result,
         param_source=args.reconstruct,
+        skip_viz=args.skip_viz,
         algo_params_override=algo_params,
         audit_params_override=audit_params,
         seed_params_override=seed_params,
