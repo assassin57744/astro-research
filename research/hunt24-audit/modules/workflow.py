@@ -316,8 +316,9 @@ class AstroWorkflow:
 
     # ── 特征工程 ──
 
-    # 场星查询的最小列集：id + 坐标变换所需的所有原始列
-    _MIN_FIELD_COLS = {'id', 'ra', 'dec', 'pmra', 'pmdec', 'plx', 'rv'}
+    # 场星查询列集：id + 坐标变换必需列 + HR图/天球分布所需观测列
+    _MIN_FIELD_COLS = {'id', 'ra', 'dec', 'pmra', 'pmdec', 'plx', 'rv',
+                       'mag', 'color', 'ruwe'}
 
     def _load_and_transform_field(self, ctx: RunContext) -> pd.DataFrame:
         """加载靶场数据 → 特征转换 → NaN清洗。"""
@@ -1498,6 +1499,34 @@ class AstroWorkflow:
             )
 
         return summary
+
+    def _materialize_wide_view(self, ctx: RunContext) -> str:
+        """创建分析用宽视图：Master 状态 × Field 全量观测列。
+
+        将 master 表与场星对齐视图做 INNER JOIN，
+        产出可直接用于 HR 图、天球分布等分析的完整视图。
+
+        Returns:
+            注册的宽视图名称。
+        """
+        field_idx = ctx.star_cluster.get_param("FIELD_IDX")
+        field_table = self.manifest[field_idx]["aln_view"]
+        master = ctx.state.master_table
+        wide_name = f"wide_{master}"
+
+        sql = f"""
+            CREATE OR REPLACE VIEW {wide_name} AS
+            SELECT m.*, f.mag, f.color, f.ra, f.dec,
+                   f.pmra, f.pmdec, f.plx, f.rv, f.ruwe
+            FROM {master} m
+            INNER JOIN {field_table} f ON m.id = f.id
+        """
+        self.db.execute(sql)
+        self.logger.info(
+            f"📐 [WideView] 分析宽视图已注册: {wide_name} "
+            f"(master × {field_table})"
+        )
+        return wide_name
 
     def _render_batch_summary(self, all_results: list[dict]):
         """批量运行汇总报告。"""

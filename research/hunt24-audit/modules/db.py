@@ -643,9 +643,13 @@ class AstroDB:
             self.logger.error(f"❌ [Registry] 物化物理表 {table_name} 失败: {e}")
 
     def init_master_table(self, table_name, df_base):
-        """初始化 Master 状态宽表。"""
+        """初始化 Master 状态宽表，包含基础观测列。"""
         self.logger.info(f"🏗️  [Master] 初始化状态追踪表: {table_name}")
-        df_init = df_base[[cfg.STD_COLS['ID']]].copy()
+        # 基础观测列：id + 天球坐标 + 运动学 + 测光
+        _BASE_OBS_COLS = ['id', 'ra', 'dec', 'pmra', 'pmdec', 'plx',
+                          'rv', 'mag', 'color', 'ruwe']
+        base_cols = [c for c in _BASE_OBS_COLS if c in df_base.columns]
+        df_init = df_base[base_cols].copy()
         self.register_table_from_df(table_name, df_init)
 
         # 🚀 [核心修复] 定义 Master 表字段的物理类型映射
