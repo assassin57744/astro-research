@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-modules/astro_membership/helpers.py
+modules/membership/helpers.py
 
 🧠 天体测量学与统计学底层核心辅助算子。
-定位：astro_membership 子包内专用的数理内核库，与上游业务流完全解耦。
+定位：membership 子包内专用的数理内核库，与上游业务流完全解耦。
 """
 
 import logging

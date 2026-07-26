@@ -5,7 +5,7 @@ modules/cluster_seed_extractor.py
 🎯 星团种子提取器（无监督前置粗筛引擎）。
 定位：Pipeline 的前置粗筛 Stage。
 重构要点：
-  1. 剥离了复杂的 KDE 数理算法和标准化逻辑，完全托管给 astro_membership 子包内的通用内核 helpers。
+  1. 剥离了复杂的 KDE 数理算法和标准化逻辑，完全托管给 membership 子包内的通用内核 helpers。
   2. 保持对外业务接口 `extract_seeds` 的完全兼容，确保上游主工作流零污染。
 """
 
@@ -15,7 +15,7 @@ import pandas as pd
 from sklearn.cluster import DBSCAN, HDBSCAN
 
 # 引入物理/数理辅助模块中的通用核心自适应算子
-from modules.astro_membership.helpers import calculate_adaptive_eps_kde
+from modules.membership.helpers import calculate_adaptive_eps_kde
 
 
 class ClusterSeedExtractor:

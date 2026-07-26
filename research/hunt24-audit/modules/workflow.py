@@ -625,13 +625,13 @@ class AstroWorkflow:
                 strategy_kwargs[key] = ctx.algo_params[key]
                 self.logger.info(f"✅ [Compute] 已覆盖设置策略参数 [{key}]")
 
-        from modules.astro_membership.disambiguation.bayesian import (
+        from modules.membership.disambiguation.bayesian import (
             BayesianGmmDisambiguation,
         )
-        from modules.astro_membership.disambiguation.blind import (
+        from modules.membership.disambiguation.blind import (
             BlindGmmDisambiguation,
         )
-        from modules.astro_membership.disambiguation.threshold import (
+        from modules.membership.disambiguation.threshold import (
             ThresholdGmmDisambiguation,
         )
 

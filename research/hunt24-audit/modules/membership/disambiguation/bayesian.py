@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-modules/astro_membership/disambiguation/bayesian.py
+modules/membership/disambiguation/bayesian.py
 
 独立子包策略：基于双模型贝叶斯对抗与极大似然 EMA 迭代的成员星歧义消除算法。
 专门用于处理银盘背景复杂、噪声严重的星团靶场（如 M44, M67）。
@@ -14,7 +14,7 @@ from sklearn.cluster import DBSCAN, HDBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
-from modules.astro_membership.base import BaseDisambiguation
+from modules.membership.base import BaseDisambiguation
 
 
 class BayesianGmmDisambiguation(BaseDisambiguation):

@@ -23,9 +23,9 @@ import numpy as np
 import pandas as pd
 
 # 显式导入三大重构完备的精筛策略算子
-from modules.astro_membership.disambiguation.bayesian import BayesianGmmDisambiguation
-from modules.astro_membership.disambiguation.threshold import ThresholdGmmDisambiguation
-from modules.astro_membership.disambiguation.blind import BlindGmmDisambiguation
+from modules.membership.disambiguation.bayesian import BayesianGmmDisambiguation
+from modules.membership.disambiguation.threshold import ThresholdGmmDisambiguation
+from modules.membership.disambiguation.blind import BlindGmmDisambiguation
 
 # 配置测试专用控制台高可读日志
 logging.basicConfig(
