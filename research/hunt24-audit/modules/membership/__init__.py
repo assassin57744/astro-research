@@ -3,9 +3,9 @@ import logging
 import pandas as pd
 
 # 内部绝对路径导入
-from .disambiguation.bayesian import BayesianGmmDisambiguation
-from .disambiguation.threshold import ThresholdGmmDisambiguation
-from .disambiguation.blind import BlindGmmDisambiguation
+from modules.pipelines.core.disambiguation.bayesian import BayesianGmmDisambiguation
+from modules.pipelines.core.disambiguation.threshold import ThresholdGmmDisambiguation
+from modules.pipelines.core.disambiguation.blind import BlindGmmDisambiguation
 
 # from .substructure.identity import IdentitySubstructure
 # from .substructure.dual_component import DualCompSubstructure

@@ -153,8 +153,11 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
             sigma2_pmdec = (pmdec_disp ** 2) + (e_pmdec ** 2)
 
             # 4. 计算动态中位数参考点与残差
-            pmra_ref = df["pmra"].median()
-            pmdec_ref = df["pmdec"].median()
+            # pmra_ref = df["pmra"].median()
+            # pmdec_ref = df["pmdec"].median()
+            pmra_ref = self.cluster.get_param("PMRA_REF", df["pmra"].median())
+            pmdec_ref = self.cluster.get_param("PMDEC_REF", df["pmdec"].median())
+
             res_pmra = df["pmra"].values - pmra_ref
             res_pmdec = df["pmdec"].values - pmdec_ref
 

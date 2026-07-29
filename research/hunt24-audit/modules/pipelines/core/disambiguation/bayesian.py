@@ -29,7 +29,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         self,
         cluster_algo: str = "dbscan",
         dbscan_eps: float = 0.3,
-        dbscan_min_samples: int = 100,
+        dbscan_min_samples: int = 20,
         hdbscan_min_cluster_size: int = 15,
         hdbscan_min_samples: Any = None,
         hdbscan_eps: float = 0.1,

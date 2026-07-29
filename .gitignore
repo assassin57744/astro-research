@@ -246,3 +246,7 @@ research/hunt24-audit-backup/
 
 *.backup
 
+.github
+
+research/hunt24-audit/utils/pyGaia.ipynb
+research/hunt24-audit/modules/plot/

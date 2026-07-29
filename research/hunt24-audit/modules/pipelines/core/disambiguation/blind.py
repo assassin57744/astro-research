@@ -5,7 +5,7 @@ import numpy as np
 import logging
 import pandas as pd  # 确保通用数据操作安全
 from sklearn.mixture import GaussianMixture
-from ..base import BaseDisambiguation
+from modules.membership.base import BaseDisambiguation
 
 logger = logging.getLogger(__name__)
 

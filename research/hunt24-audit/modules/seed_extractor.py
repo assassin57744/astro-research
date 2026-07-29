@@ -68,20 +68,20 @@ class ClusterSeedExtractor:
         self.computed_eps: float | None = None
 
     def extract_seeds(
-        self, seed_field_df: pd.DataFrame, features: list
+        self, df_field: pd.DataFrame, features: list
     ) -> pd.DataFrame:
         """
         从输入的混乱初始星表中，自适应提取出高纯度的凝聚种子（支持 DBSCAN 与 HDBSCAN 策略）。
 
         参数:
-        - field_stars_df (pd.DataFrame): 某星团靶场的初始全量观测星表（包含 id 和相空间各特征列）。
+        - df_field (pd.DataFrame): 某星团靶场的初始全量观测星表（包含 id 和相空间各特征列）。
         - features (list): 参与计算的相空间特征列名列表。
 
         返回:
         - pd.DataFrame: 筛选出的高纯度星团种子星子集，保持原数据帧的所有物理列，并附加 'cluster_label' 列。
         """
         # 浅拷贝防止破坏外层原始星表
-        working_df = seed_field_df.copy()
+        working_df = df_field.copy()
 
         # 1. 过滤由于高维特征残缺导致的 NaN 样本
         clean_mask = working_df[features].notna().all(axis=1)
@@ -91,7 +91,7 @@ class ClusterSeedExtractor:
             self.logger.warning(
                 "⚠️ 没有有效恒星样本满足相空间特征完整性，拒绝提取种子，返回空表。"
             )
-            return pd.DataFrame(columns=seed_field_df.columns)
+            return pd.DataFrame(columns=df_field.columns)
 
         # 统一执行特征空间归一化
         X_mean = X_raw.mean(axis=0)
@@ -175,7 +175,7 @@ class ClusterSeedExtractor:
             self.logger.warning(
                 "💥 核心拦截：当前天区未发现满足物理凝聚的超密度实体，前置种子库枯竭！"
             )
-            return pd.DataFrame(columns=seed_field_df.columns)
+            return pd.DataFrame(columns=df_field.columns)
 
         # 寻找点数最多的那个核心簇（非背景野星 -1）
         unique_labels, counts = np.unique(labels[labels != -1], return_counts=True)

@@ -1,6 +1,7 @@
 import logging
 import numpy as np
 import pandas as pd
+import subprocess
 import matplotlib
 matplotlib.use("Agg")  # 保证静默执行
 import matplotlib.pyplot as plt
@@ -9,6 +10,7 @@ from matplotlib.patches import Polygon, Circle  # 核心引入
 import os
 from datetime import datetime
 from astroquery.simbad import Simbad
+from pathlib import Path
 
 import config as cfg  # config.py 位于 modules/ 的上一级目录
 from config import (  # config.py 位于 modules/ 的上一级目录
@@ -1072,7 +1074,106 @@ class AstroAnalyzer:
                 f"⏩ [Phase 6] 跳过交叉比对诊断图（缺失列: {missing}）。"
             )
 
+    def _call_r_plotter(self, plot_type: str, master: str):
+        """标准 R 语言桥接"""
+        r_script = getattr(cfg, "R_SCRIPT_PATH", cfg.MODULES_DIR / "plot" / "analysis_plots.R")
+        rscript_exe = getattr(cfg, "RSCRIPT_PATH", "Rscript")
+
+        temp_parquet = (cfg.EXPORT_DIR / f"temp_{master}.parquet").resolve()
+        temp_parquet.parent.mkdir(parents=True, exist_ok=True)
+
+        # 🌟 修复：确保 DuckDB 内存数据完全落盘并刷新，防止回灌列丢失
+        self.db.con.execute("CHECKPOINT;")
+
+        # 🌟 修复：显式查询 master 表并确保包含最新回灌的标记列
+        export_sql = f"SELECT * FROM {master}"
+        self.db.con.execute(f"COPY ({export_sql}) TO '{temp_parquet.as_posix()}' (FORMAT PARQUET);")
+
+        output_dir = Path(cfg.ANALYSIS_DIR).resolve().as_posix()
+        cluster_id = str(self.target_cluster).lower()
+
+        file_map = {
+            "tube_mask": f"{cluster_id}_spatial_tube.jpg",
+            "channel_probs": f"{cluster_id}_prob_dist.jpg",
+            "cross_match": f"{cluster_id}_cross_match_diag.jpg",
+            "cross_match_diagnostics": f"{cluster_id}_cross_match_diag.jpg",
+        }
+        target_file_name = file_map.get(plot_type, f"{cluster_id}_{plot_type}.jpg")
+        expected_out_path = Path(output_dir) / target_file_name
+
+        if expected_out_path.exists():
+            try:
+                expected_out_path.unlink()
+            except Exception:
+                pass
+
+        cmd = [
+            str(rscript_exe),
+            str(Path(r_script).resolve().as_posix()),
+            "--plot_type", str(plot_type),
+            "--data_path", str(temp_parquet.as_posix()),
+            "--cluster_id", str(cluster_id),
+            "--output_dir", str(output_dir)
+        ]
+
+        try:
+            self.logger.info(f"🎨 [R-Plotter] 正在调用 R (ggplot2) 渲染 {plot_type} 图...")
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+            
+            if expected_out_path.exists() and expected_out_path.stat().st_size > 0:
+                self.logger.info(f"💾 [R-Plotter] {plot_type} 图渲染完成！文件已存至: {expected_out_path.resolve()}")
+            else:
+                if "跳过" in result.stderr or "跳过" in result.stdout:
+                    self.logger.warning(f"⚠️ [R-Plotter] R 脚本主动跳过 {plot_type} 绘图: {result.stderr.strip()}")
+                    return
+
+                self.logger.error(f"❌ [R-Plotter] R 脚本看似正常退出(Exit 0)，但未生成有效的图片文件: {expected_out_path}")
+                self.logger.error(f"R 脚本输出 (STDOUT):\n{result.stdout}")
+                self.logger.error(f"R 脚本输出 (STDERR):\n{result.stderr}")
+                raise FileNotFoundError("R 脚本未生成目标图片，主动放弃绘图或被提前中断。请检查上方日志。")
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"❌ [R-Plotter] R 脚本绝对路径: {Path(r_script).resolve()}")
+            self.logger.error(f"❌ [R-Plotter] R 脚本执行报错 (STDOUT):\n{e.stdout}")
+            self.logger.error(f"❌ [R-Plotter] R 脚本执行报错 (STDERR):\n{e.stderr}")
+            raise RuntimeError(f"R 脚本绘制 {plot_type} 失败，已阻止降级覆盖！")
+            
+        finally:
+            if temp_parquet.exists():
+                try:
+                    temp_parquet.unlink()
+                except Exception:
+                    pass
+
     def _plot_tube_mask(self, master: str):
+        """1. 空间管掩模图路由"""
+        if getattr(cfg, "USE_R_PLOTS", False):
+            self._call_r_plotter("tube_mask", master)
+        else:
+            self._plot_tube_mask_py(master)
+
+    def _plot_channel_probs(self, master: str):
+        """2. 三通道概率分布图路由"""
+        if getattr(cfg, "USE_R_PLOTS", False):
+            self._call_r_plotter("channel_probs", master)
+        else:
+            self._plot_channel_probs_py(master)
+
+    def _plot_cross_match_diagnostics(self, master: str):
+        """3. 交叉比对诊断图路由"""
+        if getattr(cfg, "USE_R_PLOTS", False):
+            self._call_r_plotter("cross_match_diagnostics", master)
+        else:
+            self._plot_cross_match_diagnostics_py(master)
+
+    def _plot_tube_mask_py(self, master: str):
         """基于 master 表重建空间管掩模图（统一使用赤道坐标 ra,dec）。"""
         df_all = self.db.query(f"SELECT ra, dec FROM {master}")
         df_seeds = self.db.query(
@@ -1183,7 +1284,7 @@ class AstroAnalyzer:
         plt.close(fig)
         self.logger.info(f"💾 [{cluster_id}] 成果图已保存至: {output_path}")
 
-    def _plot_channel_probs(self, master: str):
+    def _plot_channel_probs_py(self, master: str):
         """基于 master 表绘制 prob / core_prob / tail_prob 三通道概率分布直方图。
 
         整合了原 utils/tube.py:plot_prob_distributions 的全部逻辑。
@@ -1243,7 +1344,7 @@ class AstroAnalyzer:
         plt.close(fig)
         self.logger.info(f"💾 [{cluster_id}] 概率分布直方图已保存至: {output_path}")
 
-    def _plot_cross_match_diagnostics(self, master: str):
+    def _plot_cross_match_diagnostics_py(self, master: str):
         """绘制交叉比对三连图：CMD + 赤道位置 + 自行（背景为灰色场星）。
 
         Matched=蓝 / PG Only=橙红 / Ref Only=灰 / Field=浅灰背景。

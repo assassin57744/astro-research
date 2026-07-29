@@ -100,8 +100,8 @@ class UnifiedMemberValidator:
     def _fuse_audit_decisions(self, df: pd.DataFrame,
                                consensus_df: pd.DataFrame) -> pd.DataFrame:
         """5. 融合决策：物理 × 文献 → audit_status。"""
-        is_phys = df["is_phys_consistent"]
-        is_lit = consensus_df["is_lit_consensus"]
+        is_phys = df["is_phys_consistent"].values
+        is_lit = consensus_df["is_lit_consensus"].values
         df["audit_status"] = np.select(
             [
                 is_phys & is_lit,                         # Confirmed Member
@@ -138,12 +138,13 @@ class UnifiedMemberValidator:
         # CMD 残差提取防护
         cmd_res = df["cmd_residual"] if "cmd_residual" in df.columns else pd.Series(0.0, index=df.index)
 
+        # 统一在全量 Index 尺度上构建条件
+        cond1 = pm_outlier & (cmd_res > cfg.PHYS_LIT_CMD_LIMIT)
+        cond2 = df["distance_to_center"] > tidal_radius
+        cond3 = ruwe > cfg.AUDIT_RUWE_LIMIT
+
         df.loc[mask, "audit_note"] = np.select(
-            [
-                pm_outlier[mask] & (cmd_res[mask] > cfg.PHYS_LIT_CMD_LIMIT),
-                df.loc[mask, "distance_to_center"] > tidal_radius,
-                ruwe[mask] > cfg.AUDIT_RUWE_LIMIT,
-            ],
+            [cond1[mask], cond2[mask], cond3[mask]],
             ["CMD Outlier", "Tidal Tail Member", "Gaia Data Quality Issue"],
             default="Standard Literature Entry",
         )

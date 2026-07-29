@@ -16,8 +16,10 @@ LOG_DIR = (BASE_DIR / "logs").resolve()
 DATA_DIR = (BASE_DIR / "data").resolve()
 ANALYSIS_DIR = (BASE_DIR / "analysis").resolve()
 RESULTS_DIR = (ANALYSIS_DIR / "results").resolve()
+MODULES_DIR = (BASE_DIR / "modules").resolve()
 
 RAW_DIR    = (DATA_DIR / "raw").resolve()
+WAREHOUSE_DIR = (DATA_DIR / "warehouse").resolve()
 BACKUP_DIR = (DATA_DIR / "backups").resolve()
 EXPORT_DIR = (DATA_DIR / "exports").resolve()
 INTERNAL_DIR = (DATA_DIR / "internal").resolve()
@@ -33,6 +35,12 @@ DOWNLOAD_DIR     = RAW_DIR
 GAIA_USER = os.getenv("GAIA_USER", "jli21")
 GAIA_PWD  = os.getenv("GAIA_PWD") 
 
+# =============================================================================
+# 🎨 可视化引擎配置
+# =============================================================================
+USE_R_PLOTS = False  # True: 使用 R (ggplot2) 模块渲染诊断图; False: 使用 Python (Matplotlib) 原生绘图
+R_SCRIPT_PATH = MODULES_DIR / "plot" / "analysis_plots.R"  # R 绘图脚本路径
+RSCRIPT_PATH = r"C:/Program Files/R/R-4.6.1/bin/Rscript.exe"
 
 # =================================================================
 # 2. 科学计算门限与物理常数 (Thresholds & Physics)

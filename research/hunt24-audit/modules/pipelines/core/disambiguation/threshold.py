@@ -5,7 +5,7 @@ import pandas as pd  # 确保通用数据操作安全
 from scipy.stats import chi2
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler  # 引入管线标准归一化器
-from ..base import BaseDisambiguation
+from modules.membership.base import BaseDisambiguation
 
 # 引入管线标准日志器，保持与其他 Stage 日志行为高度一致
 import logging

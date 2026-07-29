@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 # CSV 中每个星团的交叉比对子行标签
 _CROSS_MATCH_LABELS = ["matched", "pg only", "ref only"]
 
+# 默认标准的 CSV 表头（当文件不存在时自动生成）
+_DEFAULT_HEADER = ["星团", "类型", "eps", "min_samples", "交叉比对结果", "通过物理验证个数"]
+
 
 # ── 辅助 ──
 
@@ -72,7 +75,7 @@ def update_dbscan_csv(
     以 (星团, 类型, eps, min_samples) 为键：
       1. 精确匹配 → 更新结果列
       2. 空模板行（星团+类型匹配，eps/min_samples 为空）→ 填充
-      3. 都不匹配 → 追加新行
+      3. 都不匹配或文件不存在 → 自动建表/追加新行
 
     Args:
         csv_path: CSV 文件完整路径。
@@ -84,19 +87,21 @@ def update_dbscan_csv(
     """
     csv_path = Path(csv_path)
 
-    if not csv_path.exists():
-        logger.warning(f"⚠️ [ResultLog] CSV 不存在: {csv_path}，跳过。")
-        return
-
     try:
-        # ── 读取 ──
-        with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
-            reader = csv.reader(f)
-            rows: list[list[str]] = list(reader)
+        # ── 1. 保证目录存在 ──
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if len(rows) < 1:
-            logger.warning("⚠️ [ResultLog] CSV 为空，跳过。")
-            return
+        # ── 2. 读取或初始化 CSV 行列表 ──
+        rows: list[list[str]] = []
+        if csv_path.exists():
+            with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+
+        # 如果文件不存在或为空，使用默认表头初始化
+        if not rows:
+            logger.info(f"✨ [ResultLog] 文件不存在或为空，新建 CSV 模板: {csv_path.name}")
+            rows = [_DEFAULT_HEADER]
 
         header = rows[0]
 
@@ -108,12 +113,12 @@ def update_dbscan_csv(
             col_cross = header.index("交叉比对结果")
             col_phys = header.index("通过物理验证个数")
         except ValueError as e:
-            logger.warning(f"⚠️ [ResultLog] CSV 缺少预期列头: {e}，跳过。")
+            logger.warning(f"⚠️ [ResultLog] CSV 缺少预期列头: {e}，跳过更新。")
             return
 
         max_col = max(col_type, col_eps, col_ms, col_cross, col_phys)
 
-        # ── 计算物理验证通过数 ──
+        # ── 3. 计算物理验证通过数 ──
         def _phys_pass(ds: dict) -> int:
             return ds.get("Confirmed Member", 0) + ds.get("New Candidate", 0)
 
@@ -123,7 +128,7 @@ def update_dbscan_csv(
             "ref only": _phys_pass(deep_stats_ref_only),
         }
 
-        # ── 逐类型处理 ──
+        # ── 4. 逐类型匹配与更新 ──
         updated = False
 
         for label in _CROSS_MATCH_LABELS:
@@ -187,11 +192,11 @@ def update_dbscan_csv(
 
         if not updated:
             logger.warning(
-                f"⚠️ [ResultLog] 未找到星团 {cluster} 的可更新行，跳过。"
+                f"⚠️ [ResultLog] 未能更新星团 {cluster} 的记录，跳过写回。"
             )
             return
 
-        # ── 写回 ──
+        # ── 5. 安全写回 CSV 文件 ──
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerows(rows)

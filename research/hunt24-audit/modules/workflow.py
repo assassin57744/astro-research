@@ -8,7 +8,7 @@ from sklearn.decomposition import PCA
 from utils.decorators import astro_checkpoint
 
 from modules.db import AstroDB
-from modules.pg_core import PriorGMM
+from modules.pipelines.core.prior_gmm import PriorGMM
 from modules.validator import UnifiedMemberValidator
 from modules.transformer import AstroTransformer
 from modules.reporter import render_all_modes_comparison
@@ -496,44 +496,35 @@ class AstroWorkflow:
         force_refresh=True,
     )
     def _compute_members(self, ctx: RunContext) -> str | None:
-        """统一的成员识别调度器。"""
-        self.logger.info(
-            f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}"
-        )
+        """统一的成员识别调度器 (Phase 2)"""
+        self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}")
 
+        # 1. 准备数据
         df_target_final = self._load_and_transform_field(ctx)
-        self.logger.info(
-            f"✅ [Compute] 算法内核计算完成，目标天区共计 {len(df_target_final)} 颗天体。top N: \n{df_target_final.head()}"
-        )
-
-        # 🚀 必须先建表，再加载种子（_load_and_transform_seeds 内部会调用 tag_master_table 回灌标签）
         self.db.init_master_table(ctx.state.master_table, df_target_final)
         df_seeds_final = self._load_and_transform_seeds(ctx)
-        self.logger.info(
-            f"✅ [Compute] 算法内核计算完成，种子星共计 {len(df_seeds_final)} 颗。top N: \n{df_seeds_final.head()}"
-        )
 
-        use_experimental = ctx.state.gmm_config.get("use_experimental", False)
-        if not use_experimental:
-            df_res = self._run_stable_pipeline(ctx, df_target_final, df_seeds_final)
-        else:
-            df_res = self._run_experimental_pipeline(
-                ctx, df_target_final, df_seeds_final
-            )
+        # 2. 统一委托给 pipelines 模块分发执行（常规轨 vs 实验轨）
+        from modules.pipelines import run_pipeline
+        df_res = run_pipeline(
+            ctx=ctx,
+            db_instance=self.db,
+            df_all_field=df_target_final,
+            df_seed_field=df_seeds_final
+        )
 
         if df_res is None or df_res.empty:
             raise ValueError("❌ [Compute] 算法内核异常：结果 DataFrame 为空！")
 
-        self.logger.info(
-            f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。"
-        )
+        self.logger.info(f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。")
         self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
 
-        # 回灌概率及分通道信息（若存在 core_prob / tail_prob / source 则一并写入）
+        # 3. 回灌 Master 表（概率及多通道属性）
         update_cols = [cfg.STD_COLS["ID"], "prob"]
         for extra in ("core_prob", "tail_prob", "source"):
             if extra in df_res.columns:
                 update_cols.append(extra)
+                
         updates = df_res[update_cols].copy()
         self.db.tag_master_table(ctx.state.master_table, updates)
 
@@ -555,530 +546,21 @@ class AstroWorkflow:
         engine = PriorGMM(config=cluster_cfg)
         model_params = engine.fit(df_seeds_final, df_target_final)
         return engine.predict(df_target_final, model_params)
-
+    
     def _run_experimental_pipeline(
-        self, ctx: RunContext, df_all: pd.DataFrame, df_seeds: pd.DataFrame
+        self, ctx: RunContext, df_all_field: pd.DataFrame, df_seed_field: pd.DataFrame
     ) -> pd.DataFrame:
-        """实验新轨：Core 核心识别 + Spatial Tube 潮汐尾捕捉 + 分层互斥决策融合。"""
-        strategy_name = ctx.algo_params.get("strategy", "bayesian")
-        self.logger.info(
-            f"🚀 [Compute] 启动双通道分层捕捉管线 | 策略: [{strategy_name.upper()}]"
-        )
-
-        # 🌟 物理空间全景诊断
-        self.logger.info(
-            f"🔍 [Target Field Diagnosis] 传入天体总量: {len(df_all)} 颗 | "
-            f"RA 范围: [{df_all['ra'].min():.2f}°, {df_all['ra'].max():.2f}°] | "
-            f"Dec 范围: [{df_all['dec'].min():.2f}°, {df_all['dec'].max():.2f}°] | "
-            f"Dec 范围: [{df_all['dec'].min():.2f}°, {df_all['dec'].max():.2f}°]"
-        )
-
-        # ---------------------------------------------------------
-        # 1. 第一阶段：种子星精炼 (ClusterSeedExtractor)
-        # ---------------------------------------------------------
-        self.logger.info("🧬 [Compute] 正在调度 ClusterSeedExtractor...")
-        from modules.seed_extractor import ClusterSeedExtractor
-
-        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
-        cluster_cfg["id"] = ctx.cluster_id
-        extractor = ClusterSeedExtractor(cluster_profile=cluster_cfg)
-        df_seeds_core = extractor.extract_seeds(
-            seed_field_df=df_seeds,
-            features=ctx.state.required_features,
-        )
-
-        if df_seeds_core is None or df_seeds_core.empty:
-            raise ValueError("❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！")
-
-        # 记录种子统计信息并回写 Master 表
-        ctx.state.seed_stats["refined_count"] = len(df_seeds_core)
-        # 保存运行时实际使用的 eps（"auto" 模式下为 KDE 解算值）
-        if extractor.computed_eps is not None:
-            ctx.state.computed_dbscan_eps = f"{extractor.computed_eps:.4f}"
-        self.logger.info(f"✅ [Compute] 种子星粗筛成功！共 {len(df_seeds_core)} 颗。")
-
-        df_tag_refined = df_seeds_core[[cfg.STD_COLS["ID"]]].copy()
-        df_tag_refined["seed_type"] = "refined_seed"
-        self.db.tag_master_table(ctx.state.master_table, df_tag_refined)
-
-        # ---------------------------------------------------------
-        # 2. 第二阶段：实例化消歧引擎策略
-        # ---------------------------------------------------------
-        strategy_params = (
-            cfg.CLUSTERS[ctx.cluster_id.upper()]
-            .get("STRATEGY_PARAMS", {})
-            .get(strategy_name, {})
-        )
-        strategy_kwargs = {**strategy_params}
-        strategy_kwargs.setdefault("spatial_cols", ["l", "b"])
-        strategy_kwargs.setdefault("scale_col", "plx")
-
-        # 背景降采样与 EMA 收敛参数：优先星团配置，回退全局 GMM_CONFIG
-        cl_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()]
-        gmm_cfg = ctx.state.gmm_config
-        for key in ("enable_subsampling", "subsampling_limit", "bayesian_ema_rtol"):
-            strategy_kwargs.setdefault(key,
-                cl_cfg.get(key, gmm_cfg.get(key)))
-
-        for key in ("eps", "min_samples", "sigma_cutoff"):
-            if key in ctx.algo_params:
-                strategy_kwargs[key] = ctx.algo_params[key]
-                self.logger.info(f"✅ [Compute] 已覆盖设置策略参数 [{key}]")
-
-        from modules.membership.disambiguation.bayesian import (
-            BayesianGmmDisambiguation,
-        )
-        from modules.membership.disambiguation.blind import (
-            BlindGmmDisambiguation,
-        )
-        from modules.membership.disambiguation.threshold import (
-            ThresholdGmmDisambiguation,
-        )
-
-        STRATEGY_CLASSES = {
-            "bayesian": BayesianGmmDisambiguation,
-            "threshold": ThresholdGmmDisambiguation,
-            "blind": BlindGmmDisambiguation,
-        }
-
-        if strategy_name not in STRATEGY_CLASSES:
-            raise ValueError(f"未知的策略类型 [{strategy_name}]")
-
-        engine_class = STRATEGY_CLASSES[strategy_name]
-        self.logger.info(f"🧠 [Compute] 路由至消歧拟合引擎 [{engine_class.__name__}]")
-        engine = engine_class(**strategy_kwargs)
-
-        # ---------------------------------------------------------
-        # 3. 通道 A：抓取星团 Core 核心成员
-        # ---------------------------------------------------------
-        self.logger.info("🎯 [Channel A] 启动星团 Core 核心区域抓取...")
-        df_res_core = engine.fit_predict(
-            df_all, df_seeds_core, ctx.state.required_features
-        )
-        prob_col = cfg.STD_COLS["PROB"]
-
-        # ---------------------------------------------------------
-        # 4. 通道 B：构建类内空间管，抓取 Tidal Tail / 弥散外围成员
-        # ---------------------------------------------------------
-        self.logger.info("📐 [Channel B] 启动 Tidal Tail 空间管构建与抓取...")
-
-        cl = ctx.star_cluster
-
-        # 🌟 4.1 自适应管尺寸 (含 PCA 15 度 Hard Cap 防护)
-        tidal_radius_pc = cl.get_param("TIDAL_RADIUS", None)
-        distance_pc = cl.get_param("DISTANCE_PC", None)
-        if tidal_radius_pc and distance_pc and distance_pc > 0:
-            angular_tidal = np.degrees(tidal_radius_pc / distance_pc)
-            # 管长乘数：可从 config 覆盖（默认 1.6），M45 等扩散星团需更大值
-            length_mult = cl.get_param("TUBE_LENGTH_MULTIPLIER", 1.6)
-            # 管宽乘数：可从 config 覆盖（默认 0.3）
-            width_mult = cl.get_param("TUBE_WIDTH_MULTIPLIER", 0.3)
-
-            raw_length_deg = angular_tidal * length_mult
-            # 🌟 增加 Hard Cap 防护，防止 M45 等近邻星团空间管过长膨胀
-            max_half_length_deg = cl.get_param("MAX_TUBE_HALF_LENGTH", 15.0)
-            length_deg = min(raw_length_deg, max_half_length_deg)
-
-            width_deg = max(1.0, angular_tidal * width_mult)
-            self.logger.info(
-                f"📐 [Adaptive Tube] TIDAL_RADIUS={tidal_radius_pc}pc, "
-                f"DISTANCE={distance_pc:.0f}pc → 角尺度={angular_tidal:.2f}° → "
-                f"管长={length_deg:.1f}°(硬门限截断 $\\le${max_half_length_deg}°), "
-                f"管宽={width_deg:.1f}°"
-            )
-        else:
-            length_deg = cl.get_param("TUBE_LENGTH", 5.0)
-            width_deg = cl.get_param("TUBE_WIDTH", 1.0)
-            self.logger.info(
-                f"📐 [Fallback Tube] 物理参数缺失，使用配置值: "
-                f"管长={length_deg}°, 管宽={width_deg}°"
-            )
-
-        # 纯净特征切片 + 空间坐标列（管绘制必需 ra,dec），去重
-        tube_cols = list(dict.fromkeys(
-            [*ctx.state.required_features, "ra", "dec"]
-        ))
-        tube_cols = [c for c in tube_cols if c in df_all.columns]
-        df_all_clean = df_all[tube_cols].copy()
-        df_seeds_clean = df_seeds_core[tube_cols].copy()
-
-        # 🌟 4.2 构造空间管切片
-        df_tube_clean, pca_model = self._build_spatial_tube(
-            df_all_clean,
-            df_seeds_clean,
-            length_deg=length_deg,
-            width_deg=width_deg,
-        )
-
-        # 保存空间管 PCA 元数据，供后续 Phase 6 可视化阶段使用
-        ctx.state.tube_pca_center = (
-            float(pca_model.cluster_center_[0]),
-            float(pca_model.cluster_center_[1]),
-        )
-        ctx.state.tube_pca_components = pca_model.components_.copy()
-        ctx.state.tube_pca_mean = (
-            pca_model.mean_.copy()
-            if hasattr(pca_model, "mean_")
-            else np.zeros(2)
-        )
-        ctx.state.tube_width = float(pca_model.tube_width_)
-        ctx.state.tube_length = length_deg
-
-        # 🌟 4.3 运动学 Sigma Clip — 动态适配银河/赤道自行列
-        pm_cols_map = {c.lower(): c for c in df_all.columns}
-        x_col = next((pm_cols_map[k] for k in ["pm_l_cosb", "pmra"] if k in pm_cols_map), None)
-        y_col = next((pm_cols_map[k] for k in ["pm_b", "pmdec"] if k in pm_cols_map), None)
-        pm_cols = [x_col, y_col, "plx"] if x_col and y_col else ["plx"]
-        sigma_clip = cl.get_param("TUBE_SIGMA_CLIP", 5.0)
-
-        # 提取高置信 Core 天体的 ID 集合
-        core_high_conf_mask = df_res_core[prob_col] >= cfg.THRESHOLD_HIGH_CONF
-        pure_core_ids = set(df_res_core.loc[core_high_conf_mask, "id"].values)
-
-        # 🌟 核心修复：基于 id 字段从 df_all 中安全提取 pure core 5D 特征
-        if len(pure_core_ids) >= 20:
-            core_mask_in_all = df_all["id"].isin(pure_core_ids)
-            ref_df = df_all.loc[core_mask_in_all, ctx.state.required_features]
-            ref_label = f"Pure Core (GMM P >= {cfg.THRESHOLD_HIGH_CONF})"
-        else:
-            ref_df = df_seeds_clean
-            ref_label = "Refined Seeds (Fallback)"
-
-        if sigma_clip > 0 and not df_tube_clean.empty and not ref_df.empty:
-            # 仅当可用自行列 ≥ 2（+ plx = 3）时执行 Mahalanobis 裁剪
-            avail_pm = [c for c in pm_cols if c in ref_df.columns]
-            if len(avail_pm) >= 3:
-                ref_vals = ref_df[avail_pm].values.astype(np.float64)
-                n_dim = len(avail_pm)
-
-                # 使用矩估计并注入正则化因子，防止伪逆奇异
-                ref_mean = ref_vals.mean(axis=0)
-                ref_cov = np.cov(ref_vals, rowvar=False) + np.eye(n_dim) * 1e-6
-                inv_cov = np.linalg.pinv(ref_cov)
-
-                tube_vals = df_tube_clean[avail_pm].values.astype(np.float64)
-                diff = tube_vals - ref_mean
-                md_sq = np.sum((diff @ inv_cov) * diff, axis=1)
-
-                n_before = len(df_tube_clean)
-                clip_mask = md_sq <= sigma_clip**2
-                df_tube_clean = df_tube_clean[clip_mask].copy()
-
-                self.logger.info(
-                    f"📐 [Tube Sigma Clip] 基准源: {ref_label} ({len(ref_df)} 颗) | "
-                    f"σ_clip={sigma_clip} (Mahalanobis {n_dim}D) | "
-                    f"过滤: {n_before} → {len(df_tube_clean)} 颗 "
-                    f"(剔除 {(n_before - len(df_tube_clean)) / n_before * 100:.1f}%)"
-                )
-            else:
-                self.logger.info(
-                    f"⏩ [Tube Sigma Clip] 跳过：可用自行列不足 "
-                    f"({avail_pm}, 需要 ≥3)"
-                )
-
-        # 提取管内完整天体视图
-        valid_tube_indices = df_all.index.intersection(df_tube_clean.index)
-        df_tube_full = df_all.loc[valid_tube_indices].copy()
-
-        for feat in ctx.state.required_features:
-            if feat in df_tube_clean.columns:
-                df_tube_full[feat] = df_tube_clean.loc[valid_tube_indices, feat]
-
-        # 同步空间管几何列（pca_long / pca_cross）
-        for geo_col in ("pca_long", "pca_cross"):
-            if geo_col in df_tube_clean.columns:
-                df_tube_full[geo_col] = df_tube_clean.loc[valid_tube_indices, geo_col]
-
-        self.logger.info(
-            f"📊 [Channel B] 空间管内捕获有效候选天体: {len(df_tube_full)} 颗"
-        )
-
-        # 🌟 回灌 Master 表：空间管几何信息
-        df_tube_tag = df_tube_full[[
-            cfg.STD_COLS["ID"], "pca_long", "pca_cross"
-        ]].copy()
-        df_tube_tag["in_tube"] = True
-        self.db.tag_master_table(ctx.state.master_table, df_tube_tag)
-        self.logger.info(
-            f"📥 [Master] 空间管几何标记已回灌: "
-            f"in_tube=True, pca_long/pca_cross ({len(df_tube_tag)} 颗)"
-        )
-
-        # 🌟 4.4 防御性熔断：如管内为空，退回 Core 结果
-        if df_tube_full.empty:
-            self.logger.warning(
-                "⚠️ [Channel B] 空间管内未捕获到任何有效天体，跳过 Tidal Tail 洗涤，返回 Core 结果。"
-            )
-            df_res_core["core_prob"] = df_res_core[prob_col]
-            df_res_core["tail_prob"] = 0.0
-            df_res_core["source"] = "core"
-            return df_res_core
-
-        # 从去核管星中构建 Tail 种子模板
-        core_prob_map = df_res_core.set_index("id")[prob_col]
-        tube_ids_from_idx = df_all.loc[df_tube_clean.index, "id"]
-        tube_core_probs = tube_ids_from_idx.map(core_prob_map)
-
-        tail_template_mask = tube_core_probs < cfg.THRESHOLD_BASE
-        df_tail_template = df_tube_clean[tail_template_mask].copy()
-        n_removed = len(df_tube_clean) - len(df_tail_template)
-
-        self.logger.info(
-            f"📐 [Tail Template] σ={sigma_clip} 管星: {len(df_tube_clean)} → "
-            f"{len(df_tail_template)} 颗 (剔除 {n_removed} 颗 Core 成员)"
-        )
-
-        # 🌟 4.5 两阶段推导 (管内 fit + 管内 predict)
-        tail_params = engine.fit(
-            df_field=df_tube_full,
-            df_seeds=df_tail_template,
-            features=ctx.state.required_features,
-            use_density_prune=False,
-        )
-
-        df_res_tail = engine.predict(
-            df_all=df_tube_full,
-            model_params=tail_params,
-            features=ctx.state.required_features,
-        )
-
-        self.logger.info(
-            f"📊 [Channel B] 管内(σ={sigma_clip})全量: {len(df_tube_full)} 颗 | "
-            f"Tail 候选(prob>{cfg.THRESHOLD_BASE}): {(df_res_tail[prob_col] > cfg.THRESHOLD_BASE).sum()} 颗 | "
-            f"Tail 候选(prob>{cfg.THRESHOLD_HIGH_CONF}): {(df_res_tail[prob_col] > cfg.THRESHOLD_HIGH_CONF).sum()} 颗"
-        )
-
-        # ---------------------------------------------------------
-        # 5. 第五阶段：核心（Core）与潮汐尾（Tail）分层决策融合 (Hierarchical Union)
-        # ---------------------------------------------------------
-        m_thresh = cfg.THRESHOLD_HIGH_CONF  # 成员判定统一使用 0.5 门限
-
-        df_res_final = df_res_core.copy()
-        df_res_final["core_prob"] = df_res_core[prob_col].values
-        df_res_final["tail_prob"] = 0.0
-
-        # 仅更新处于 Spatial Tube 管内天体的 tail_prob
-        tail_prob_map = df_res_tail.set_index("id")[prob_col]
-        tube_ids_set = set(df_tube_full["id"].values)
-        is_in_tube_mask = df_res_final["id"].isin(tube_ids_set)
-
-        df_res_final.loc[is_in_tube_mask, "tail_prob"] = (
-            df_res_final.loc[is_in_tube_mask, "id"]
-            .map(tail_prob_map)
-            .fillna(0.0)
-            .values
-        )
-
-        # 🌟 核心分层互斥逻辑：
-        # 1. Channel A 优先：只要 core_prob >= 0.5，继承 core_prob，标为 'core'
-        # 2. Channel B 接管：仅当 (core_prob < 0.5) 且 (在管内) 且 (tail_prob >= 0.5)，继承 tail_prob，标为 'tail'
-        # 3. 双方均符合：若 core_prob >= 0.5 且 tail_prob >= 0.5，标为 'both'，概率继承 core_prob
-
-        is_core_member = df_res_final["core_prob"] >= m_thresh
-        is_tail_member = df_res_final["tail_prob"] >= m_thresh
-
-        # 默认使用 Core 概率作为主概率
-        df_res_final[prob_col] = df_res_final["core_prob"].values
-
-        # 触发 Channel B 救回接管（仅对 core 被拒绝且 tail 认可的天体覆盖概率）
-        tail_takeover_mask = (~is_core_member) & is_in_tube_mask & is_tail_member
-        df_res_final.loc[tail_takeover_mask, prob_col] = df_res_final.loc[
-            tail_takeover_mask, "tail_prob"
-        ].values
-
-        # 标记成员来源 metadata
-        df_res_final["source"] = "field"
-        df_res_final.loc[is_core_member & (~is_tail_member), "source"] = "core"
-        df_res_final.loc[tail_takeover_mask, "source"] = "tail"
-        df_res_final.loc[is_core_member & is_tail_member, "source"] = "both"
-
-        # 统计并打印最终结果
-        n_total_candidates = (df_res_final[prob_col] >= m_thresh).sum()
-        n_src_core = (df_res_final["source"] == "core").sum()
-        n_src_tail = (df_res_final["source"] == "tail").sum()
-        n_src_both = (df_res_final["source"] == "both").sum()
-
-        self.logger.info(
-            f"🎯 [Union Complete] 核心与潮汐尾分层融合完成！"
-            f"全区高置信成员星总数 (prob >= {m_thresh}): {n_total_candidates} 颗"
-        )
-        self.logger.info(
-            f"📋 [Source Breakdown] 来源分布: "
-            f"core_only={n_src_core} | tail_only(接管救回)={n_src_tail} | both={n_src_both} | "
-            f"total_member={(n_src_core + n_src_tail + n_src_both)}"
-        )
-
-        return df_res_final
-
-    import numpy as np
-    import pandas as pd
-    from sklearn.decomposition import PCA
-
-    def _build_spatial_tube(
-        self,
-        df_all: pd.DataFrame,
-        df_seeds: pd.DataFrame,
-        length_deg: float = 5.0,
-        width_deg: float = 1.0,
-        coord_cols: list[str] = None,
-        sigma_multiplier: float = 3.0,
-        anisotropy_threshold: float = 0.60,
-    ) -> tuple[pd.DataFrame, object]:
-        """基于标准的物理正交切面投影（Tangential Projection）锁定空间主轴，并在全量天区中切割出轨道管。
-
-        防退化逻辑：
-        - 若种子星形态存在各向异性（PCA 第一主成分方差占比 >= anisotropy_threshold），使用 PCA
-        空间主轴；
-        - 若种子星呈圆团状/各向同性（PCA 方差占比 < anisotropy_threshold），降级使用【自行矢量 (PM
-        Vector)】作为主轴，
-        确保空间管方向严格贴合天体物理上的切向运动轨道。
         """
-        # 🌟 1. 自动寻找/校验空间坐标列
-        if coord_cols is None:
-            if "ra" in df_seeds.columns and "dec" in df_seeds.columns:
-                coord_cols = ["ra", "dec"]
-            elif "l" in df_seeds.columns and "b" in df_seeds.columns:
-                coord_cols = ["l", "b"]
-            else:
-                # 兼容全小写与大写
-                cols_lower = {col.lower(): col for col in df_seeds.columns}
-                if "ra" in cols_lower and "dec" in cols_lower:
-                    coord_cols = [cols_lower["ra"], cols_lower["dec"]]
-                elif "l" in cols_lower and "b" in cols_lower:
-                    coord_cols = [cols_lower["l"], cols_lower["b"]]
-                else:
-                    raise KeyError(
-                        "未在种子星 DataFrame 中找到 ['l', 'b'] 或 ['ra', 'dec'] 空间坐标列！"
-                    )
-
-        col_x, col_y = coord_cols[0], coord_cols[1]
-        self.logger.info(f"🌟 [Compute] 空间坐标列: {coord_cols}")
-        self.logger.info(f"🌟 [Compute] 空间主轴长度：{length_deg}°")
-        self.logger.info(f"🌟 [Compute] 空间主轴宽度：{width_deg}°")
-
-        # 🌟 2. 精确计算种子星物理质心 (x0, y0)
-        # 1. 计算种子星质心
-
-        # 2. 精确计算种子星物理质心 (x0, y0)
-        y0 = float(np.mean(df_seeds[col_y]))
-        x_rad = np.radians(df_seeds[col_x])
-        x0_rad = np.arctan2(np.mean(np.sin(x_rad)), np.mean(np.cos(x_rad)))
-        x0 = float(np.degrees(x0_rad) % 360.0)
-
-        # 3. 转换为相对质心的正交切面平面坐标 (X_proj, Y_proj)
-        dx_seeds = (df_seeds[col_x] - x0 + 180.0) % 360.0 - 180.0
-        x_seeds_proj = dx_seeds * np.cos(np.radians(y0))
-        y_seeds_proj = df_seeds[col_y] - y0
-        coords_seeds_centered = np.column_stack((x_seeds_proj, y_seeds_proj))
-
-        # 4. 拟合 PCA 模型并评估各向异性
-        pca = PCA(n_components=2)
-        pca.fit(coords_seeds_centered)
-        explained_ratio = float(pca.explained_variance_ratio_[0])
-
-        # 🌟 5. 动态探测自行列名（兼容银道 pm_l_cosb/pm_b 与赤道 pmra/pmdec，兼容大小写）
-        cols_map = {col.lower(): col for col in df_seeds.columns}
-
-        pm_x_col = next(
-            (
-                cols_map[k]
-                for k in [
-                    "pm_l_cosb",
-                    "pml_cosb",
-                    "pm_l",
-                    "pmra",
-                    "pmra_cosdec",
-                    "pm_ra",
-                ]
-                if k in cols_map
-            ),
-            None,
-        )
-        pm_y_col = next(
-            (cols_map[k] for k in ["pm_b", "pmb", "pmdec", "pm_dec"] if k in cols_map),
-            None,
-        )
-
-        has_pm_cols = (pm_x_col is not None) and (pm_y_col is not None)
-
-        # 🌟 6. 核心防退化重构：检查 Seeds 形态是否发生各向同性退化
-        if explained_ratio < anisotropy_threshold and has_pm_cols:
-            pm_x_mean = float(df_seeds[pm_x_col].mean())
-            pm_y_mean = float(df_seeds[pm_y_col].mean())
-            pm_speed = np.hypot(pm_x_mean, pm_y_mean)
-
-            if pm_speed > 1e-3:
-                # 计算自行矢量的夹角
-                pm_angle = np.arctan2(pm_y_mean, pm_x_mean)
-
-                # 强制覆盖 PCA 的旋转矩阵 components_ (Row 0 为主轴方向，Row 1 为横轴正交方向)
-                pca.components_ = np.array(
-                    [
-                        [np.cos(pm_angle), np.sin(pm_angle)],
-                        [-np.sin(pm_angle), np.cos(pm_angle)],
-                    ]
-                )
-                self.logger.warning(
-                    f"⚠️ [Tube Degeneration Guard] 种子星形态呈各向同性 (PCA 占比 {explained_ratio:.2f} < {anisotropy_threshold})，"
-                    f"自动切换至【自行矢量 (PM Vector)】引导主轴！"
-                    f"使用自行列: [{pm_x_col}, {pm_y_col}] | 均值: pm_x={pm_x_mean:.2f}, pm_y={pm_y_mean:.2f} "
-                    f"(切向轨道角={np.degrees(pm_angle):.1f}°)"
-                )
-            else:
-                self.logger.info(
-                    f"📐 [Tube Alignment] 种子形态 PCA 方差占比: {explained_ratio:.3f} (自行速度过小，沿用 2D PCA)"
-                )
-        else:
-            self.logger.info(
-                f"📐 [Tube Alignment] 种子形态 PCA 方差占比: {explained_ratio:.3f} "
-                f"({'形态各向异性良好，采用 2D PCA' if explained_ratio >= anisotropy_threshold else '缺失自行数据，沿用 2D PCA'})"
-            )
-
-        # 7. 计算自适应管宽 (取种子横轴散布的 3σ，下限 0.8°，上限 width_deg)
-        coords_seeds_pca = pca.transform(coords_seeds_centered)
-        seed_cross_std = float(np.std(coords_seeds_pca[:, 1]))
-        actual_width = float(
-            np.clip(sigma_multiplier * seed_cross_std, a_min=0.8, a_max=width_deg)
-        )
-
-        self.logger.info(
-            f"📐 [Adaptive Width] 种子 PCA 横轴 σ={seed_cross_std:.3f}° | "
-            f"实际生效半宽={actual_width:.3f}° (配置上限={width_deg}°)"
-        )
-
-        # 8. 全量天区正交切面投影与旋转
-        dx_all = (df_all[col_x] - x0 + 180.0) % 360.0 - 180.0
-        x_all_proj = dx_all * np.cos(np.radians(y0))
-        y_all_proj = df_all[col_y] - y0
-        coords_all_centered = np.column_stack((x_all_proj, y_all_proj))
-
-        coords_pca = pca.transform(coords_all_centered)
-
-        pca_long = pd.Series(coords_pca[:, 0], index=df_all.index, name="pca_long")
-        pca_cross = pd.Series(coords_pca[:, 1], index=df_all.index, name="pca_cross")
-
-        # 9. 构建切片掩模
-        tube_mask = (
-            (pca_long.abs() <= length_deg)
-            & (pca_cross.abs() <= actual_width)
-            & (~pca_long.isna())
-        )
-
-        df_tube = df_all[tube_mask].copy()
-        df_tube["pca_long"] = pca_long[tube_mask]
-        df_tube["pca_cross"] = pca_cross[tube_mask]
-
-        # 10. 附带绘制与反解所需的关键元数据
-        pca.cluster_center_ = np.array([x0, y0])
-        pca.tube_width_ = actual_width
-
-        self.logger.info(
-            f"🔍 [Tube Internal] 质心: ({x0:.2f}°, {y0:.2f}°) | "
-            f"管长半长: ±{length_deg:.1f}° | 半宽: ±{actual_width:.2f}° | "
-            f"切片锁定天体: {len(df_tube)} 颗"
-        )
-
-        return df_tube, pca
+        实验新轨：委托给独立执行器 ExperimentalPipelineRunner 执行双通道策略。
+        """
+        # ⚠️ 局部导入以避免潜在的循环依赖
+        from modules.pipelines.experimental_pipeline import ExperimentalPipelineRunner
+        
+        self.logger.info("⚙️ [Workflow] 将管线执行权移交至 ExperimentalPipelineRunner")
+        runner = ExperimentalPipelineRunner(db_instance=self.db, logger=self.logger)
+        
+        # 纯净的输入输出交互
+        return runner.run(ctx, df_all_field, df_seed_field)
 
     # ── 后处理 ──
 
