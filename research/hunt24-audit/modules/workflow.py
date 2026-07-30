@@ -356,11 +356,13 @@ class AstroWorkflow:
                 f"{len(df_raw)} 颗 ({len(df_raw.columns)} 列)"
             )
 
-        df_ext = self._transform_and_bridge_features(
-            df_raw, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
-        )
-        return self._defensive_nan_purge(
-            df_ext, ctx.state.required_features, label="Target_field"
+        # 实例化封装后的 Transformer 并一键处理
+        transformer = self._get_transformer_instance(ctx)
+        return transformer.process_features(
+            df_raw=df_raw,
+            feature_space=ctx.feature_space,
+            required_features=ctx.state.required_features,
+            label="Target_field"
         )
 
     def _load_and_transform_seeds(self, ctx: RunContext) -> pd.DataFrame:
@@ -386,12 +388,14 @@ class AstroWorkflow:
 
         self.logger.info(f"✅ [Process] 种子星提取完成，有效样本: {len(df_seeds)} 颗")
 
-        df_ext = self._transform_and_bridge_features(
-            df_seeds, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
+        transformer = self._get_transformer_instance(ctx)
+        df_clean = transformer.process_features(
+            df_raw=df_seeds,
+            feature_space=ctx.feature_space,
+            required_features=ctx.state.required_features,
+            label="Seeds"
         )
-        df_clean = self._defensive_nan_purge(
-            df_ext, ctx.state.required_features, label="Seeds"
-        )
+        
         ctx.state.seed_stats["clean_count"] = len(df_clean)
 
         # 🎯 标签回写必须在特征清洗之后，确保只标记最终实际使用的种子
@@ -401,92 +405,20 @@ class AstroWorkflow:
 
         return df_clean
 
-    def _transform_and_bridge_features(
-        self,
-        df_raw: pd.DataFrame,
-        feature_space: str,
-        required_features: list[str],
-        star_cluster: StarCluster | None = None,
-    ) -> pd.DataFrame:
-        """特征转换网关。"""
-        if df_raw is None:
-            self.logger.error("❌ [Compute] 输入的原始 DataFrame 为 None！")
-            return None
+    
 
-        self.logger.debug(
-            f"🚀 [Compute] 正在执行特征转换，特征空间: {required_features}"
-        )
-
-        cl = star_cluster
+    def _get_transformer_instance(self, ctx: RunContext) -> AstroTransformer:
+        """[辅助方法] 根据上下文星团资产，初始化配置好的 AstroTransformer。"""
+        cl = ctx.star_cluster
         cluster_rv = cl.get_param("RV_REF", None)
         c_ra = cl.get_param("CENTER_RA", None)
         c_dec = cl.get_param("CENTER_DEC", None)
         cluster_center = (
             (c_ra, c_dec) if (c_ra is not None and c_dec is not None) else None
         )
-
-        transformer = AstroTransformer(
+        return AstroTransformer(
             cluster_rv=cluster_rv, cluster_center_icrs=cluster_center
         )
-        X_array = transformer.fit_transform(df_raw, feature_space=feature_space)
-
-        if X_array.shape[1] != len(required_features):
-            raise KeyError(f"Transformer 转换矩阵列数与配置不匹配！")
-
-        cols_upper = [col.upper() for col in required_features]
-        cols_lower = [col.lower() for col in required_features]
-
-        df_features = pd.DataFrame(
-            X_array, columns=required_features, index=df_raw.index
-        )
-
-        dup_cols = [col for col in df_raw.columns if col in (cols_upper + cols_lower)]
-        if dup_cols:
-            self.logger.info(
-                f"🔄 [Compute] 模式 [{feature_space}] 移除重复列: {dup_cols}"
-            )
-            df_raw = df_raw.drop(columns=dup_cols)
-        return pd.concat([df_raw, df_features], axis=1)
-
-    def _defensive_nan_purge(
-        self, df_extended: pd.DataFrame, required_features: list[str], label: str
-    ) -> pd.DataFrame:
-        """特征清洗。"""
-        if df_extended is None or df_extended.empty:
-            self.logger.error(f"❌ [Compute] [{label}] 数据为空！")
-            return pd.DataFrame()
-
-        initial_count = len(df_extended)
-
-        # 🌟 防护 1：校验 required_features 是否存在于 DataFrame 中
-        missing_cols = [f for f in required_features if f not in df_extended.columns]
-        if missing_cols:
-            self.logger.error(f"❌ [Compute] [{label}] 缺失必要特征列: {missing_cols}")
-            raise KeyError(f"Missing required feature columns: {missing_cols}")
-
-        # 🌟 防护 2：打印具体是哪一列导致了 NaN 剔除（极其关键的诊断日志）
-        nan_counts = df_extended[required_features].isna().sum()
-        culprit_cols = nan_counts[nan_counts > 0].to_dict()
-        if culprit_cols:
-            self.logger.warning(
-                f"🔍 [Compute] [{label}] 特征列 NaN 分布细目: {culprit_cols}"
-            )
-
-        # 执行核心 Dropna
-        df_clean = df_extended.dropna(subset=required_features).copy()
-        dropped = initial_count - len(df_clean)
-
-        if dropped > 0:
-            self.logger.warning(
-                f"⚠️ [Compute] [防御性过滤 - {label}]: 剔除 {dropped} 颗, "
-                f"剩余 {len(df_clean)}。"
-            )
-        else:
-            self.logger.info(
-                f"✅ [Compute] [数据预检 - {label}] 共计 {len(df_clean)} 颗。"
-            )
-
-        return df_clean
 
     # ── GMM 成员识别 ──
 

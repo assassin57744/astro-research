@@ -332,3 +332,77 @@ class AstroTransformer:
         elapsed_time = time.time() - start_time
         self.logger.info(f"✨ 特征矩阵构建成功 | Shape: {res.shape} | 耗时: {elapsed_time:.2f}s")
         return res
+
+    def process_features(
+        self, 
+        df_raw: pd.DataFrame, 
+        feature_space: str, 
+        required_features: list[str], 
+        label: str = "Data"
+    ) -> pd.DataFrame:
+        """
+        [特征工程管线] 端到端处理：维度转换 -> 特征桥接 (Bridging) -> 防御性清洗 (NaN Purge)。
+        
+        Args:
+            df_raw (pd.DataFrame): 输入的原始观测数据。
+            feature_space (str): 目标特征空间 (如 '5d_h', '6d_p')。
+            required_features (list[str]): 下游算法实际需要的特征列名列表。
+            label (str): 日志标识，用于区分靶场(Field)或种子(Seeds)。
+            
+        Returns:
+            pd.DataFrame: 拼接完备、无 NaN 且直接可用作模型输入的纯净 DataFrame。
+        """
+        if df_raw is None or df_raw.empty:
+            self.logger.error(f"❌ [Compute] [{label}] 输入的原始 DataFrame 为空！")
+            return pd.DataFrame()
+
+        self.logger.debug(f"🚀 [Compute] 正在执行特征转换，特征空间: {required_features}")
+
+        # 1. 核心维度转换 (获取 numpy 特征矩阵)
+        X_array = self.fit_transform(df_raw, feature_space=feature_space)
+
+        if X_array.shape[1] != len(required_features):
+            raise KeyError(f"Transformer 转换矩阵列数与配置不匹配！期望 {len(required_features)}，实际 {X_array.shape[1]}")
+
+        # 2. 特征桥接 (Bridging)
+        cols_upper = [col.upper() for col in required_features]
+        cols_lower = [col.lower() for col in required_features]
+
+        df_features = pd.DataFrame(X_array, columns=required_features, index=df_raw.index)
+
+        dup_cols = [col for col in df_raw.columns if col in (cols_upper + cols_lower)]
+        if dup_cols:
+            self.logger.info(f"🔄 [Compute] 模式 [{feature_space}] 移除重复列: {dup_cols}")
+            df_raw_clean = df_raw.drop(columns=dup_cols)
+        else:
+            df_raw_clean = df_raw
+            
+        df_extended = pd.concat([df_raw_clean, df_features], axis=1)
+
+        # 3. 防御性 NaN 清洗 (Purging)
+        initial_count = len(df_extended)
+        
+        # 校验 required_features 是否存在
+        missing_cols = [f for f in required_features if f not in df_extended.columns]
+        if missing_cols:
+            self.logger.error(f"❌ [Compute] [{label}] 缺失必要特征列: {missing_cols}")
+            raise KeyError(f"Missing required feature columns: {missing_cols}")
+
+        # 打印导致 NaN 剔除的具体列
+        nan_counts = df_extended[required_features].isna().sum()
+        culprit_cols = nan_counts[nan_counts > 0].to_dict()
+        if culprit_cols:
+            self.logger.warning(f"🔍 [Compute] [{label}] 特征列 NaN 分布细目: {culprit_cols}")
+
+        df_clean = df_extended.dropna(subset=required_features).copy()
+        dropped = initial_count - len(df_clean)
+
+        if dropped > 0:
+            self.logger.warning(
+                f"⚠️ [Compute] [防御性过滤 - {label}]: 剔除 {dropped} 颗, "
+                f"剩余 {len(df_clean)}。"
+            )
+        else:
+            self.logger.info(f"✅ [Compute] [数据预检 - {label}] 共计 {len(df_clean)} 颗。")
+
+        return df_clean
