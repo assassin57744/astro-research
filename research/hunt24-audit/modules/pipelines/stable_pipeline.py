@@ -17,7 +17,7 @@ class StablePipelineRunner:
 
         cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
-        cluster_cfg["dim_mode"] = ctx.feature_space
+        cluster_cfg["FEATURE_SPACE"] = ctx.feature_space
 
         engine = PriorGMM(config=cluster_cfg)
         model_params = engine.fit(df_seed_field, df_all_field)

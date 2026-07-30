@@ -52,7 +52,7 @@ class PriorGMM:
         self.config = config or {}
 
         # 确定特征维度模式，无缝对接升级后的特征工程
-        self.feature_space = self.config.get("dim_mode", "3d").lower()
+        self.feature_space = self.config.get("FEATURE_SPACE", "3d").lower()
 
         # 动态映射 6 大特征空间对应的特征列名，严格匹配大一统规范（短键名 plx 与 rv）
         feature_map = {
@@ -67,7 +67,7 @@ class PriorGMM:
 
         if self.feature_space not in feature_map:
             self.logger.error(
-                f"❌ [🧪测试核] 无法识别未知的 dim_mode: '{self.feature_space}'"
+                f"❌ [🧪测试核] 无法识别未知的 FEATURE_SPACE: '{self.feature_space}'"
             )
             raise ValueError(f"❌ 未知的特征维度模式: '{self.feature_space}'")
 

@@ -260,7 +260,7 @@ class AstroWorkflow:
     def _finalize_context(self, ctx: RunContext):
         """填充依赖于特征空间/算法的上下文属性。"""
         gmm_cfg = cfg.GMM_CONFIG.copy()
-        gmm_cfg["dim_mode"] = ctx.feature_space
+        gmm_cfg["FEATURE_SPACE"] = ctx.feature_space
 
         fmap = gmm_cfg.get("feature_map", {})
         if ctx.feature_space not in fmap:
@@ -472,7 +472,7 @@ class AstroWorkflow:
 
         cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
         cluster_cfg["id"] = ctx.cluster_id
-        cluster_cfg["dim_mode"] = ctx.feature_space
+        cluster_cfg["FEATURE_SPACE"] = ctx.feature_space
 
         engine = PriorGMM(config=cluster_cfg)
         model_params = engine.fit(df_seeds_final, df_target_final)

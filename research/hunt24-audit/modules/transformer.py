@@ -326,8 +326,8 @@ class AstroTransformer:
             )
 
         else:
-            self.logger.error(f"❌ 特征工程无法识别未知的 dim_mode: '{feature_space}'")
-            raise ValueError(f"❌ 未知的特征维度模式 (dim_mode): '{feature_space}'。")
+            self.logger.error(f"❌ 特征工程无法识别未知的 FEATURE_SPACE: '{feature_space}'")
+            raise ValueError(f"❌ 未知的特征维度模式 (FEATURE_SPACE): '{feature_space}'。")
 
         elapsed_time = time.time() - start_time
         self.logger.info(f"✨ 特征矩阵构建成功 | Shape: {res.shape} | 耗时: {elapsed_time:.2f}s")

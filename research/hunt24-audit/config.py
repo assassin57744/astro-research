@@ -436,7 +436,7 @@ CLUSTERS = {
         "CAT_NAME": "NGC_2682",
         "SIMBAD_NAME": "M 67",
         "ISO_FILE": "m67_4000myr.dat",
-        "DIM_MODE": "5d_h",
+        "FEATURE_SPACE": "5d_h",
         "CENTER_RA": 132.8452564476688, "CENTER_DEC": 11.826338504396249, "RADIUS": 2.5,
         "RA_MIN": 128.0, "RA_MAX": 138.0, "DEC_MIN": 7.0, "DEC_MAX": 17.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.2,  # 单位：pc
@@ -511,7 +511,7 @@ CLUSTERS = {
     #     "ID_NAME": "ngc_6205",
     #     "CAT_NAME": "NGC_6205",
     #     "ISO_FILE": "m13_12gyr.dat",
-    #     "DIM_MODE": "2d",
+    #     "FEATURE_SPACE": "2d",
     #     "CENTER_RA": 250.42, "CENTER_DEC": 36.46, "RADIUS": 3.28,
     #     "RA_MIN": 248.0, "RA_MAX": 253.0, "DEC_MIN": 34.5, "DEC_MAX": 38.5, "MAX_MAG": 21.0,
     #     "CORE_RADIUS": 1.3,  # 单位：pc (核心致密)
@@ -984,7 +984,7 @@ GMM_CONFIG = {
         "3d_v": ["U", "V", "W"],  # 物理速度空间（纯动力学）
         "6d_p": ["X", "Y", "Z", "U", "V", "W"],  # 完整物理相空间
     },
-    "dim_mode": "5d_h",
+    "FEATURE_SPACE": "5d_h",
     "ruwe_limit": 1.4,
     "cluster_algo": "dbscan", # 可选: dbscan, hdbscan
     "DBSCAN_EPS": 0.3,  # 从 0.3 调大，补偿高维空间距离
