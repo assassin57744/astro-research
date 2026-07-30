@@ -327,9 +327,7 @@ class AstroWorkflow:
 
     # ── 特征工程 ──
 
-    # 场星查询列集：id + 坐标变换必需列 + HR图/天球分布所需观测列
-    _MIN_FIELD_COLS = {'id', 'ra', 'dec', 'pmra', 'pmdec', 'plx', 'rv',
-                       'mag', 'color', 'ruwe'}
+    
 
     def _load_and_transform_field(self, ctx: RunContext) -> pd.DataFrame:
         """加载靶场数据 → 特征转换 → NaN清洗。"""
@@ -348,7 +346,8 @@ class AstroWorkflow:
                     f"WHERE table_name = '{v_aln}'"
                 ).fetchall()
             }
-            cols = [c for c in self._MIN_FIELD_COLS if c in view_cols]
+            # 选择最小必要列
+            cols = [c for c in cfg.MIN_FIELD_COLS if c in view_cols]
             cols_str = ', '.join(cols)
             df_raw = self.db.query(f"SELECT {cols_str} FROM {v_aln}")
             self._field_cache[cache_key] = df_raw

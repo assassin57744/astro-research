@@ -219,8 +219,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 research/hunt24-audit_bak/
-
-
 research/hunt24-audit/data/
 research/hunt24-audit/logs/
 research/hunt24-audit/analysis/
@@ -233,13 +231,16 @@ research/hunt24-audit/modules/-operators_bak.py
 research/hunt24-audit/modules/-schema_aligner_tmp_del.py
 # research/hunt24-audit/modules/operators.py
 # research/hunt24-audit/modules/schema_aligner.py
+research/hunt24-audit-backup/
+research/hunt24-audit/utils/pyGaia.ipynb
+research/hunt24-audit/modules/plot/
 
 # 彻底屏蔽根目录下的 NOTES.md 及任何敏感信息备份
 NOTES.md
 
 # 排除大型外部工具和二进制文件
 tools/external/
-research/hunt24-audit-backup/
+
 
 *.zip
 *.pdf
@@ -249,8 +250,12 @@ research/hunt24-audit-backup/
 .github
 .claude
 .codeartsdoer
-.vscode
+.vscode/
+.aiexclude
+.clineignore
+.codeiumignore
 
-research/hunt24-audit/utils/pyGaia.ipynb
-research/hunt24-audit/modules/plot/
+
+
+
 

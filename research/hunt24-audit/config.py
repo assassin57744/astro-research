@@ -123,6 +123,20 @@ MASTER_COLS = {
     "AUDIT_NOTE":  "audit_note",      # 审计备注 (视差偏离、暗端漏检等)
 }
 
+# 场星查询列集：id + 坐标变换必需列 + HR图/天球分布所需观测列
+MIN_FIELD_COLS = {
+    "id",
+    "ra",
+    "dec",
+    "pmra",
+    "pmdec",
+    "plx",
+    "rv",
+    "mag",
+    "color",
+    "ruwe",
+}
+
 class TMPL:
     # --- 数据库表/视图名 ---
     T_RAW = "raw_{idx}"  # L1: 原始物理表
