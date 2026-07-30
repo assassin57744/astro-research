@@ -30,8 +30,8 @@ import numpy as np
 import pandas as pd
 import config  # 导入你的标准配置文件
 
-from modules.cluster_seed_extractor import ClusterSeedExtractor
-from modules.membership.disambiguation.bayesian import BayesianGmmDisambiguation
+from modules.seed_extractor import ClusterSeedExtractor
+from modules.pipelines.core.disambiguation.bayesian import BayesianGmmDisambiguation
 
 # 配置控制台输出日志
 logging.basicConfig(
