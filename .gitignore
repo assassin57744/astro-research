@@ -247,6 +247,10 @@ research/hunt24-audit-backup/
 *.backup
 
 .github
+.claude
+.codeartsdoer
+.vscode
 
 research/hunt24-audit/utils/pyGaia.ipynb
 research/hunt24-audit/modules/plot/
+
