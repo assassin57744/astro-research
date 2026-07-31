@@ -562,7 +562,12 @@ class AstroWorkflow:
             self.logger.info(f"  🔹 种子集核心样本 (Core): {n_seed_core} 颗")
             self.logger.info("=" * 60)
 
-            v_candidates = f"v_candidates_{ctx.cluster_id.lower()}"
+            v_candidates = cfg.TMPL.V_CANDIDATES.format(
+                cluster=ctx.cluster_id.lower(),
+                category=ctx.category,
+                feature_space=ctx.feature_space,
+                algo=ctx.algorithm,
+            )
             self.db.register_view_from_sql(
                 v_candidates,
                 f"SELECT * FROM {ctx.state.master_table} WHERE is_candidate = TRUE",
@@ -921,9 +926,11 @@ class AstroWorkflow:
 
         在所有 pipeline 完成后，将各星团 master 表拼接为统一查询入口。
         单星团运行时只有一段，多星团时自动合并。
+        视图名包含 category/feature_space/algo 维度，避免批量运行时冲突。
         """
         seen_tables: set[str] = set()
         union_parts: list[str] = []
+        canonical = all_results[0] if all_results else {}
         for r in all_results:
             cluster = r.get("cluster", "?")
             tbl = cfg.TMPL.T_MASTER.format(
@@ -945,13 +952,18 @@ class AstroWorkflow:
             self.logger.warning("⚠️ [UnionView] 无有效 master 表，跳过联合视图。")
             return
 
+        v_union = cfg.TMPL.V_UNION.format(
+            category=canonical.get("category", "hunt"),
+            feature_space=canonical.get("mode", "5d_h").lower(),
+            algo=canonical.get("algo", "dbscan").lower(),
+        )
         sql = (
-            "CREATE OR REPLACE VIEW v_all_clusters AS\n"
+            f"CREATE OR REPLACE VIEW {v_union} AS\n"
             + "\nUNION ALL\n".join(union_parts)
         )
         self.db.execute(sql)
         self.logger.info(
-            f"🌐 [UnionView] 跨星团联合视图已注册: v_all_clusters "
+            f"🌐 [UnionView] 跨星团联合视图已注册: {v_union} "
             f"({len(union_parts)} 个星团)"
         )
 

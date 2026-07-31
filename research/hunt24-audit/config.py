@@ -154,6 +154,8 @@ class TMPL:
     V_DIFF = "v_diff_{cluster}_{category}_{mode}_{algo}_vs_{idx}"  # 分歧源
     V_NEW = "v_new_{cluster}_{category}_{mode}_{algo}_vs_{idx}"  # 全新发现源
     V_MISS = "v_miss_{cluster}_{category}_{mode}_{algo}_vs_{idx}"  # 漏检源
+    V_CANDIDATES = "v_candidates_{cluster}_{category}_{feature_space}_{algo}"  # 候选星视图
+    V_UNION = "v_all_clusters_{category}_{feature_space}_{algo}"  # 跨星团联合视图
     V_ADT = "v_audit_{category}_{cluster}_{mode}_{algo}"  # 审计专用视图
     V_ADT_INPUT = "v_audit_input_{src}"  # 审计输入增强视图
     V_AUDITED = "{src}_audited"  # 审计完成后的物化表名
