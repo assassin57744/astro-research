@@ -202,7 +202,8 @@ class AstroWorkflow:
         self, ctx: RunContext, skip_data_prep: bool = False
     ) -> dict | None:
         """[核心调度器] 串联完整管线 6 个阶段。"""
-        # Phase 1: 数据准备
+        # Phase 1: 数据准备与状态初始化
+        self.logger.info(f"📦 [Phase 1] 数据准备与状态初始化: {ctx.cluster_id}")
         if not skip_data_prep:
             self._prepare_shared_data(ctx)
         self._finalize_context(ctx)
@@ -224,7 +225,7 @@ class AstroWorkflow:
             return None
 
         # Phase 4: 审计
-        self.logger.info(f"⚖️ [Phase 4] 交叉审计, 参考类别: {ctx.category}")
+        self.logger.info(f"⚖️ [Phase 4] 交叉审计, 参考星表: {ctx.category}")
         audit_result = self._audit_phase(ctx, post_result)
 
         # Phase 5: 导出
@@ -235,7 +236,8 @@ class AstroWorkflow:
 
     def _prepare_shared_data(self, ctx: RunContext):
         """执行可跨特征空间复用的数据准备：数据导入 + 星团实体 + 标准化。"""
-        self.logger.info(f"📦 [Phase 1] 数据准备: {ctx.cluster_id}")
+        # self.logger.info(f"📦 [Phase 1] 数据准备: {ctx.cluster_id}")
+        self.logger.info(f"💾 [DataPrep] 开始加载与标准化星团数据: {ctx.cluster_id}")
 
         self.db.import_raw(target_cluster=ctx.cluster_id, force=False)
 
@@ -255,10 +257,11 @@ class AstroWorkflow:
             f"距离: {1000.0 / ctx.star_cluster.get_param('PLX_REF'):.1f} pc"
         )
 
-        self.logger.info("✅ [Phase 1] 数据准备阶段完成。")
+        self.logger.info("✅ [DataPrep] 加载与标准化星团数据加载完成。")
 
     def _finalize_context(self, ctx: RunContext):
         """填充依赖于特征空间/算法的上下文属性。"""
+        self.logger.info(f"📦 [DataPrep] 填充依赖于特征空间/算法的上下文属性: {ctx.cluster_id}")
         gmm_cfg = cfg.GMM_CONFIG.copy()
         gmm_cfg["FEATURE_SPACE"] = ctx.feature_space
 
@@ -450,8 +453,22 @@ class AstroWorkflow:
         self.logger.info(f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。")
         self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
 
+        # 🚀  计算金标成员和普通成员
+        df_res["is_golden"] = df_res["prob"] >= cfg.THRESHOLD_GOLDEN
+        df_res["is_candidate"] = df_res["prob"] > cfg.THRESHOLD_BASE
+
+        # 🚀 确保数据库表里有这两列 (把 ALTER TABLE 搬到这里)
+        self.db.execute(
+            f"ALTER TABLE {ctx.state.master_table} "
+            f"ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
+        )
+        self.db.execute(
+            f"ALTER TABLE {ctx.state.master_table} "
+            f"ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
+        )
+
         # 3. 回灌 Master 表（概率及多通道属性）
-        update_cols = [cfg.STD_COLS["ID"], "prob"]
+        update_cols = [cfg.STD_COLS["ID"], "prob", "is_golden", "is_candidate"]
         for extra in ("core_prob", "tail_prob", "source"):
             if extra in df_res.columns:
                 update_cols.append(extra)
@@ -499,24 +516,24 @@ class AstroWorkflow:
         """算法后处理流水线。"""
         self.logger.info(f"📊 [Process] [{ctx.cluster_id}] 启动后处理...")
         try:
-            self.db.execute(
-                f"ALTER TABLE {ctx.state.master_table} "
-                f"ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
-            )
-            self.db.execute(
-                f"ALTER TABLE {ctx.state.master_table} "
-                f"ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
-            )
+            # self.db.execute(
+            #     f"ALTER TABLE {ctx.state.master_table} "
+            #     f"ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
+            # )
+            # self.db.execute(
+            #     f"ALTER TABLE {ctx.state.master_table} "
+            #     f"ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
+            # )
 
-            condi_golden = f"{cfg.STD_COLS['PROB']} >= {cfg.THRESHOLD_GOLDEN}"
-            condi_candidates = f"{cfg.STD_COLS['PROB']} > {cfg.THRESHOLD_BASE}"
+            # condi_golden = f"{cfg.STD_COLS['PROB']} >= {cfg.THRESHOLD_GOLDEN}"
+            # condi_candidates = f"{cfg.STD_COLS['PROB']} > {cfg.THRESHOLD_BASE}"
 
-            self.db.execute(
-                f"UPDATE {ctx.state.master_table} SET is_golden = TRUE WHERE {condi_golden}"
-            )
-            self.db.execute(
-                f"UPDATE {ctx.state.master_table} SET is_candidate = TRUE WHERE {condi_candidates}"
-            )
+            # self.db.execute(
+            #     f"UPDATE {ctx.state.master_table} SET is_golden = TRUE WHERE {condi_golden}"
+            # )
+            # self.db.execute(
+            #     f"UPDATE {ctx.state.master_table} SET is_candidate = TRUE WHERE {condi_candidates}"
+            # )
 
             stats_sql = f"""
                 SELECT 
