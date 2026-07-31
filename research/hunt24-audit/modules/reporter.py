@@ -181,6 +181,7 @@ def _format_deep_audit_section(
 
 def build_summary(
     target_cluster_id: str,
+    target_category: str,
     mode: str,
     algo: str,
     v_all_audit_data: dict,
@@ -200,6 +201,7 @@ def build_summary(
 
     summary = {
         "cluster": target_cluster_id,
+        "category": target_category,
         "mode": mode.upper(),
         "algo": algo.upper(),
         "candidates": p_stats.get("n_candidates", 0),
@@ -371,7 +373,7 @@ def render_final_report(
         logger.error(f"❌ 无法保存最终报告副本: {e}")
 
     return build_summary(
-        target_cluster_id, mode, algo, v_all_audit_data, audit_res, deep_stats_pg,
+        target_cluster_id, target_category, mode, algo, v_all_audit_data, audit_res, deep_stats_pg,
         deep_stats_category=deep_stats_category,
     )
 
