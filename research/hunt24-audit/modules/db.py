@@ -882,46 +882,65 @@ class AstroDB:
             f"修复/新增同步 {len(df_online_results)} 颗"
         )
 
-        # 7. 🌟 物理文件同步：加固后的文件保存逻辑
-        if not df_online_results.empty or not df_valid_cached.empty:
+        # 7. 🌟 物理文件同步：增量合并策略
+        if not df_online_results.empty:
             simbad_cfg = self.data_manifest.get(cfg.IDX_IDS_SIMBAD, {})
             rel_path = simbad_cfg.get("params", {}).get("file_pattern")
             
             if rel_path:
                 source_file = self.dirs["raw"] / rel_path
                 try:
-                    # 确保文件夹存在
                     source_file.parent.mkdir(parents=True, exist_ok=True)
 
-                    # A. 备份当前旧文件
-                    if source_file.exists():
-                        self._rotate_backups(source_file)
+                    new_ids = set(df_online_results["gaia_dr3_id"].astype(str))
+                    self.logger.info(
+                        f"📦 [Storage] 增量合并: {len(new_ids)} 条新记录 -> {source_file.name}"
+                    )
 
-                    # B. 生成临时文件 (使用 Pandas 写入，绕过 DuckDB COPY 限制)
+                    if source_file.exists():
+                        df_existing = pd.read_parquet(source_file)
+                        existing_ids = set(df_existing["gaia_dr3_id"].astype(str))
+                        overlap = new_ids & existing_ids
+                        if overlap:
+                            df_existing = df_existing[
+                                ~df_existing["gaia_dr3_id"].astype(str).isin(overlap)
+                            ]
+                        df_merged = pd.concat(
+                            [df_existing, df_online_results], ignore_index=True
+                        )
+                        self.logger.info(
+                            f"  ∟ 合并前: {len(df_existing)} 条 (去重后) | "
+                            f"新增: {len(new_ids) - len(overlap)} 条 | "
+                            f"覆盖: {len(overlap)} 条 | "
+                            f"合并后: {len(df_merged)} 条"
+                        )
+                    else:
+                        df_merged = df_online_results
+                        self.logger.info(f"  ∟ 首次创建，写入 {len(df_merged)} 条")
+
+                    self._rotate_backups(source_file)
+
                     temp_file = source_file.parent / f"{source_file.stem}_tmp{source_file.suffix}"
-                    
-                    # 清理可能残留的临时文件
                     if temp_file.exists():
                         os.remove(temp_file)
 
-                    # 从数据库拉取最新全量缓存
-                    df_all_cache = self.con.execute(f"SELECT * FROM {cache_table_name}").df()
-                    df_all_cache.to_parquet(temp_file, index=False)
+                    df_merged.to_parquet(temp_file, index=False)
 
-                    # C. 原子化替换文件
                     if temp_file.exists():
-                        # 在 Windows 上，显式删除目标文件后再 rename 是最稳妥的
                         if source_file.exists():
                             os.remove(source_file)
                         shutil.move(str(temp_file), str(source_file))
-                        self.logger.info(f"💾 [Storage] 已同步更新 SIMBAD 原始数据源并保留备份: {source_file.name}")
+                        self.logger.info(
+                            f"💾 [Storage] 增量合并完成: {source_file.name} ({len(df_merged)} 条)"
+                        )
                     else:
-                        self.logger.error(f"❌ [Storage] 写入失败：临时文件 {temp_file} 未能生成。")
+                        self.logger.error(
+                            f"❌ [Storage] 写入失败：临时文件 {temp_file} 未能生成。"
+                        )
 
                 except Exception as io_err:
-                    self.logger.error(f"❌ [Storage] 同步到物理文件时发生错误: {str(io_err)}")
+                    self.logger.error(f"❌ [Storage] 增量合并到物理文件时发生错误: {str(io_err)}")
 
-            # 2. 更新数仓快照
             try:
                 self.save_to_warehouse(cache_table_name, storage_type="snapshots", filename=cfg.IDX_IDS_SIMBAD)
             except Exception as e:
