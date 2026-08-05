@@ -56,7 +56,7 @@ class PriorGMM:
 
         # 动态映射 6 大特征空间对应的特征列名，严格匹配大一统规范（短键名 plx 与 rv）
         feature_map = {
-            "2d": ["pmra", "pmdec"],
+            # "2d": ["pmra", "pmdec"],
             "3d": ["pmra", "pmdec", "plx"],
             "5d": ["ra", "dec", "pmra", "pmdec", "plx"],
             "6d_o": ["ra", "dec", "pmra", "pmdec", "plx", "rv"],

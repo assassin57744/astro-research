@@ -976,7 +976,8 @@ GMM_CONFIG = {
     "FULL_NAME": "SeedGMM",
     "SHORT_NAME": "SG",
     "feature_map": {
-        "2d": ["pmra", "pmdec"],
+        # 识别精度太差, 舍弃2d
+        # "2d": ["pmra", "pmdec"],
         "3d": ["pmra", "pmdec", "plx"],
         "5d": ["ra", "dec", "pmra", "pmdec", "plx"],
         "6d_o": ["ra", "dec", "pmra", "pmdec", "plx", "rv"],
