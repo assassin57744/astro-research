@@ -246,3 +246,6 @@ research/hunt24-audit-backup/
 
 *.backup
 
+tools/topcat/
+tools/stilts/
+research/hunt24-audit/utils/pyGaia.ipynb

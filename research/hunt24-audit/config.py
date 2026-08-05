@@ -89,8 +89,9 @@ STD_COLS = {
 # Master 表专用标签列名
 MASTER_COLS = {
     # ── Phase 1-2: 种子提取 & 聚类 (Seed Extraction & Clustering) ──
-    "SEED_TYPE":   "seed_type",      # raw_seed / refined_seed
-    "DENSITY_TAG": "density_status",  # core / noise (DBSCAN 标签)
+    "SEED_TYPE":           "seed_type",           # raw_seed / refined_seed
+    "SEED_CLUSTER_LABEL":  "seed_cluster_label",  # DBSCAN / HDBSCAN 聚类标签 (-1=噪声, 0/1/2…=各簇)
+    "DENSITY_TAG":         "density_status",       # core / noise (DBSCAN 标签)
 
     # ── Phase 2: GMM 成员概率 (Core + Tail Hierarchical) ──
     "GMM_PROB":    "prob",            # 最终融合概率
@@ -99,9 +100,14 @@ MASTER_COLS = {
     "SOURCE":      "source",          # core / tail / both / field
 
     # ── Phase 2: 空间管几何 (Spatial Tube Geometry) ──
-    "IN_TUBE":     "in_tube",         # BOOLEAN: 是否落入空间管
+    "IN_TUBE":     "in_tube",         # BOOLEAN: 是否落入空间管 (几何+运动学)
     "PCA_LONG":    "pca_long",        # DOUBLE:  沿管轴投影距离 (°)
     "PCA_CROSS":   "pca_cross",       # DOUBLE:  垂直管轴距离 (°)
+
+    # ── Phase 2: 通道 B 诊断 (Channel B Diagnostics) ──
+    "TUBE_STATUS": "tube_status",     # outside / geometric / kinematic
+    "TAIL_SEED":   "tail_seed",       # true = Channel B Tail GMM 去核种子模板
+    "CORE_REF":    "core_ref",        # true = 运动学 σ-clip 参考集 (Pure Core)
 
     # ── Phase 4A: 文献交叉比对 (Cross-Match) ──
     "X_MATCH":     "x_match_tag",     # Matched / PG_Only / Ref_Only

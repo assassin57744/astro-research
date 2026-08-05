@@ -601,6 +601,17 @@ class AstroWorkflow:
         df_tag_refined["seed_type"] = "refined_seed"
         self.db.tag_master_table(ctx.state.master_table, df_tag_refined)
 
+        # 回灌无监督聚类标签（全体输入恒星的 DBSCAN/HDBSCAN 标签）
+        if extractor.df_labeled_ is not None:
+            df_label_tag = extractor.df_labeled_[[cfg.STD_COLS["ID"], "cluster_label"]].copy()
+            df_label_tag = df_label_tag.rename(columns={"cluster_label": cfg.MASTER_COLS["SEED_CLUSTER_LABEL"]})
+            df_label_tag[cfg.MASTER_COLS["SEED_CLUSTER_LABEL"]] = df_label_tag[cfg.MASTER_COLS["SEED_CLUSTER_LABEL"]].astype(str)
+            self.db.tag_master_table(ctx.state.master_table, df_label_tag)
+            self.logger.info(
+                f"📋 [Master] 已回灌 {len(df_label_tag)} 条聚类标签至 seed_cluster_label 列 "
+                f"(簇数: {extractor.df_labeled_['cluster_label'].nunique()})"
+            )
+
         # ---------------------------------------------------------
         # 2. 第二阶段：实例化消歧引擎策略
         # ---------------------------------------------------------
@@ -696,7 +707,7 @@ class AstroWorkflow:
 
         # 纯净特征切片 + 空间坐标列（管绘制必需 ra,dec），去重
         tube_cols = list(dict.fromkeys(
-            [*ctx.state.required_features, "ra", "dec"]
+            [cfg.STD_COLS["ID"], *ctx.state.required_features, "ra", "dec"]
         ))
         tube_cols = [c for c in tube_cols if c in df_all.columns]
         df_all_clean = df_all[tube_cols].copy()
@@ -709,6 +720,7 @@ class AstroWorkflow:
             length_deg=length_deg,
             width_deg=width_deg,
         )
+        geo_tube_ids = set(df_tube_clean["id"].values)  # 几何管成员（运动学裁剪前）
 
         # 保存空间管 PCA 元数据，供后续 Phase 6 可视化阶段使用
         ctx.state.tube_pca_center = (
@@ -793,15 +805,34 @@ class AstroWorkflow:
             f"📊 [Channel B] 空间管内捕获有效候选天体: {len(df_tube_full)} 颗"
         )
 
-        # 🌟 回灌 Master 表：空间管几何信息
+        # 🌟 回灌 Master 表：空间管几何 + 通道 B 诊断信息
         df_tube_tag = df_tube_full[[
             cfg.STD_COLS["ID"], "pca_long", "pca_cross"
         ]].copy()
         df_tube_tag["in_tube"] = True
         self.db.tag_master_table(ctx.state.master_table, df_tube_tag)
+
+        # tube_status: 三层管状态 (geometric → 全量几何管; kinematic → 运动学裁剪后)
+        kin_tube_ids = set(df_tube_clean["id"].values)
+        df_status = pd.DataFrame({
+            cfg.STD_COLS["ID"]: list(geo_tube_ids),
+            "tube_status": "geometric",
+        })
+        df_status.loc[df_status[cfg.STD_COLS["ID"]].isin(kin_tube_ids), "tube_status"] = "kinematic"
+        self.db.tag_master_table(ctx.state.master_table, df_status)
+
+        # core_ref: 运动学 σ-clip 参考集 (Pure Core, P >= THRESHOLD_HIGH_CONF)
+        if pure_core_ids:
+            df_core_ref = pd.DataFrame({
+                cfg.STD_COLS["ID"]: list(pure_core_ids),
+                "core_ref": "true",
+            })
+            self.db.tag_master_table(ctx.state.master_table, df_core_ref)
+
         self.logger.info(
-            f"📥 [Master] 空间管几何标记已回灌: "
-            f"in_tube=True, pca_long/pca_cross ({len(df_tube_tag)} 颗)"
+            f"📥 [Master] 空间管标记已回灌: in_tube=True ({len(df_tube_tag)} 颗), "
+            f"tube_status (geometric={len(geo_tube_ids)}, kinematic={len(kin_tube_ids)}), "
+            f"core_ref ({len(pure_core_ids)} 颗)"
         )
 
         # 🌟 4.4 防御性熔断：如管内为空，退回 Core 结果
@@ -827,6 +858,15 @@ class AstroWorkflow:
             f"📐 [Tail Template] σ={sigma_clip} 管星: {len(df_tube_clean)} → "
             f"{len(df_tail_template)} 颗 (剔除 {n_removed} 颗 Core 成员)"
         )
+
+        # tail_seed: Channel B 去核种子模板标记
+        if not df_tail_template.empty:
+            df_tail_seed_tag = df_tail_template[[cfg.STD_COLS["ID"]]].copy()
+            df_tail_seed_tag["tail_seed"] = "true"
+            self.db.tag_master_table(ctx.state.master_table, df_tail_seed_tag)
+            self.logger.info(
+                f"📥 [Master] tail_seed 标记已回灌: {len(df_tail_seed_tag)} 颗"
+            )
 
         # 🌟 4.5 两阶段推导 (管内 fit + 管内 predict)
         tail_params = engine.fit(
