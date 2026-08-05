@@ -97,8 +97,9 @@ STD_COLS = {
 # Master 表专用标签列名
 MASTER_COLS = {
     # ── Phase 1-2: 种子提取 & 聚类 (Seed Extraction & Clustering) ──
-    "SEED_TYPE":   "seed_type",      # raw_seed / refined_seed
-    "DENSITY_TAG": "density_status",  # core / noise (DBSCAN 标签)
+    "SEED_TYPE":           "seed_type",           # raw_seed / refined_seed
+    "SEED_CLUSTER_LABEL":  "seed_cluster_label",  # DBSCAN / HDBSCAN 聚类标签 (-1=噪声, 0/1/2…=各簇)
+    "DENSITY_TAG":         "density_status",       # core / noise (DBSCAN 标签)
 
     # ── Phase 2: GMM 成员概率 (Core + Tail Hierarchical) ──
     "GMM_PROB":    "prob",            # 最终融合概率

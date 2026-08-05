@@ -80,9 +80,21 @@ class ExperimentalPipelineRunner:
 
         self.logger.info(f"✅ [Compute] Core 种子星精炼成功！共 {len(df_core_seeds)} 颗。")
 
+        # ① 标记种子类型
         df_tag_refined = df_core_seeds[[cfg.STD_COLS["ID"]]].copy()
         df_tag_refined["seed_type"] = "refined_seed"
         self.db.tag_master_table(ctx.state.master_table, df_tag_refined)
+
+        # ② 回灌无监督聚类标签（全体输入恒星的 DBSCAN/HDBSCAN 标签）
+        if extractor.df_labeled_ is not None:
+            df_label_tag = extractor.df_labeled_[[cfg.STD_COLS["ID"], "cluster_label"]].copy()
+            df_label_tag = df_label_tag.rename(columns={"cluster_label": cfg.MASTER_COLS["SEED_CLUSTER_LABEL"]})
+            df_label_tag[cfg.MASTER_COLS["SEED_CLUSTER_LABEL"]] = df_label_tag[cfg.MASTER_COLS["SEED_CLUSTER_LABEL"]].astype(str)
+            self.db.tag_master_table(ctx.state.master_table, df_label_tag)
+            self.logger.info(
+                f"📋 [Master] 已回灌 {len(df_label_tag)} 条聚类标签至 seed_cluster_label 列 "
+                f"(簇数: {extractor.df_labeled_['cluster_label'].nunique()})"
+            )
 
         return df_core_seeds
 

@@ -67,6 +67,9 @@ class ClusterSeedExtractor:
         # 存储运行时实际使用的 eps（"auto" 模式下 KDE 解算出的真实值）
         self.computed_eps: float | None = None
 
+        # 存储上一次 extract_seeds 的完整聚类标签 DataFrame（全体输入恒星 + cluster_label 列）
+        self.df_labeled_: pd.DataFrame | None = None
+
     def extract_seeds(
         self, df_field: pd.DataFrame, features: list
     ) -> pd.DataFrame:
@@ -175,6 +178,7 @@ class ClusterSeedExtractor:
             self.logger.warning(
                 "💥 核心拦截：当前天区未发现满足物理凝聚的超密度实体，前置种子库枯竭！"
             )
+            self.df_labeled_ = working_df  # 即使无簇，仍暴露全噪声标签供上游审计
             return pd.DataFrame(columns=df_field.columns)
 
         # 寻找点数最多的那个核心簇（非背景野星 -1）
@@ -188,5 +192,8 @@ class ClusterSeedExtractor:
             f"🎯 [{self.cluster_algo.upper()} 种子粗筛成功] 目标星团标识: {best_cluster_label} | "
             f"大范围剔除银盘背景野星噪声后，成功出库高纯度初始种子星: {len(df_seeds)} 颗。"
         )
+
+        # 🌟 暴露完整聚类标签 DataFrame，供上游回灌 Master 表
+        self.df_labeled_ = working_df
 
         return df_seeds
