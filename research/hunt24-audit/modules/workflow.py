@@ -34,6 +34,10 @@ class PipelineState:
     )  # raw_count / clean_count / refined_count
     computed_dbscan_eps: str | None = None  # 运行时 KDE 解算的真实 eps（非 "auto"）
 
+    # ── 阶段产出归集（统一数据流动入口）──
+    compute_result: dict = field(default_factory=dict)  # Phase 2 产出
+    audit_result: dict = field(default_factory=dict)    # Phase 3 产出
+
     # ── Phase 6 可视化：空间管 PCA 元数据（从 _build_spatial_tube 提取）──
     tube_pca_center: tuple | None = None       # (x0, y0) 管质心（赤道坐标 ra,dec）
     tube_pca_components: "np.ndarray | None" = None  # 2×2 分量矩阵
@@ -88,7 +92,7 @@ class AstroWorkflow:
     方法层次：
       - 一级 PUBLIC:  run() / _register_union_view()
       - 二级 阶段调度: _execute_single_pipeline() / _prepare_shared_data() /
-                     _finalize_context() / _compute_members() / _post_process() /
+                     _finalize_context() / _compute_members() /
                      _audit_phase() / _export_phase() / _report_phase()
       - 三级 功能单元: _standardize_ref_tables() / _load_and_transform_field() /
                      _load_and_transform_seeds() / _run_stable_pipeline() /
@@ -199,14 +203,14 @@ class AstroWorkflow:
     def _execute_single_pipeline(
         self, ctx: RunContext, skip_data_prep: bool = False
     ) -> dict | None:
-        """[核心调度器] 串联完整管线 6 个阶段。"""
+        """[核心调度器] 串联完整管线 5 个阶段。"""
         # Phase 1: 数据准备与状态初始化
         self.logger.info(f"📦 [Phase 1] 数据准备与状态初始化: {ctx.cluster_id}")
         if not skip_data_prep:
             self._prepare_shared_data(ctx)
         self._finalize_context(ctx)
 
-        # Phase 2: GMM 成员识别 & 候选集生成 (合并了原 Phase 3)
+        # Phase 2: GMM 成员识别 & 候选集生成
         self.logger.info(
             f"🧠 [Phase 2] GMM 成员识别: {ctx.cluster_id} [{ctx.feature_space}]"
         )
@@ -215,19 +219,21 @@ class AstroWorkflow:
             self.logger.error("❌ [Phase 2] 成员识别失败")
             return None
 
-        # Phase 3: 审计 (原 Phase 4)
+        # Phase 3: 交叉审计
         self.logger.info(f"⚖️ [Phase 3] 交叉审计, 参考星表: {ctx.category}")
-        audit_result = self._audit_phase(ctx, compute_result)
+        audit_result = self._audit_phase(ctx)
+        if not audit_result:
+            self.logger.error("❌ [Phase 3] 审计失败")
+            return None
 
-        # Phase 4: 导出 (原 Phase 5)
-        self._export_phase(ctx, audit_result)
+        # Phase 4: 导出
+        self._export_phase(ctx)
 
-        # Phase 5: 报告与可视化 (原 Phase 6)
-        return self._report_phase(ctx, compute_result, audit_result)
+        # Phase 5: 报告与可视化
+        return self._report_phase(ctx)
 
     def _prepare_shared_data(self, ctx: RunContext):
         """执行可跨特征空间复用的数据准备：数据导入 + 星团实体 + 标准化。"""
-        # self.logger.info(f"📦 [Phase 1] 数据准备: {ctx.cluster_id}")
         self.logger.info(f"💾 [DataPrep] 开始加载与标准化星团数据: {ctx.cluster_id}")
 
         self.db.import_raw(target_cluster=ctx.cluster_id, force=False)
@@ -321,8 +327,6 @@ class AstroWorkflow:
 
     # ── 特征工程 ──
 
-    
-
     def _load_and_transform_field(self, ctx: RunContext) -> pd.DataFrame:
         """加载靶场数据 → 特征转换 → NaN清洗。"""
         field_idx = ctx.star_cluster.get_param("FIELD_IDX")
@@ -399,8 +403,6 @@ class AstroWorkflow:
 
         return df_clean
 
-    
-
     def _get_transformer_instance(self, ctx: RunContext) -> AstroTransformer:
         """[辅助方法] 根据上下文星团资产，初始化配置好的 AstroTransformer。"""
         cl = ctx.star_cluster
@@ -416,11 +418,7 @@ class AstroWorkflow:
 
     # ── GMM 成员识别 ──
 
-    # @astro_checkpoint(
-    #     cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
-    #     force_refresh=True,
-    # )
-    def _compute_members(self, ctx: RunContext) -> str | None:
+    def _compute_members(self, ctx: RunContext) -> dict:
         """统一的成员识别调度器 (Phase 2)"""
         self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}")
 
@@ -509,13 +507,15 @@ class AstroWorkflow:
         self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {n_candidates} 颗")
         self.logger.info("=" * 60)
 
-        # 返回包含 view 和 stats 的完整结果（原 post_result 结构）
-        return {
+        compute_result = {
             "status": "success",
             "v_candidates": v_candidates,
             "stats": compute_stats,
         }
 
+        # 🎯 写入状态集中枢
+        ctx.state.compute_result = compute_result
+        return compute_result
 
     # ── 审计 ──
     # Phase 4 分为三个核心审计 + 一个交叉比对辅助步骤:
@@ -524,7 +524,7 @@ class AstroWorkflow:
     #   [C] 文献审计     (同上, validator.run 内部) — SIMBAD 文献共识
     #   [D] 融合决策     (同上, validator.run 内部) — 物理 × 文献 → audit_status
 
-    def _audit_phase(self, ctx: RunContext, post_result: dict) -> dict:
+    def _audit_phase(self, ctx: RunContext) -> dict:
         """审计阶段：[A] 交叉比对 → [B+C+D] 物理+文献+融合。"""
         audit_res = self._run_cross_match(ctx)
         if audit_res.get("status") != "success":
@@ -536,6 +536,9 @@ class AstroWorkflow:
         self.logger.info("✅ [Audit] 交叉比对完成。")
         audit_stats = self._audit_xmatch_subsets(ctx, audit_res)
         audit_res.update(audit_stats)
+
+        # 🎯 写入状态集中枢
+        ctx.state.audit_result = audit_res
         return audit_res
 
     # ── [A] 交叉比对 ──
@@ -801,7 +804,7 @@ class AstroWorkflow:
 
     # ── 导出 ──
 
-    def _export_phase(self, ctx: RunContext, audit_result: dict):
+    def _export_phase(self, ctx: RunContext):
         """按需导出结果。"""
         if ctx.result_mode != "detailed":
             self.logger.info("⏩ [Export] 跳过物理文件导出。")
@@ -818,6 +821,7 @@ class AstroWorkflow:
 
         self.db.export_table(ctx.state.master_table, export_dir=cfg.RESULTS_DIR)
 
+        audit_result = ctx.state.audit_result
         if audit_result.get("v_audit_pg_only"):
             self.db.export_table(
                 audit_result["v_audit_pg_only"],
@@ -840,12 +844,13 @@ class AstroWorkflow:
 
     # ── 报告 ──
 
-    def _report_phase(
-        self, ctx: RunContext, post_result: dict, audit_result: dict
-    ) -> dict:
-        """Phase 6: 报告与可视化 — 委托给 AstroAnalyzer。"""
+    def _report_phase(self, ctx: RunContext) -> dict:
+        """Phase 5: 报告与可视化 — 委托给 AstroAnalyzer。"""
         from modules.analysis import AstroAnalyzer
-        return AstroAnalyzer(self.db, ctx=ctx).run_phase6(post_result, audit_result)
+        return AstroAnalyzer(self.db, ctx=ctx).run_phase6(
+            post_result=ctx.state.compute_result,
+            audit_result=ctx.state.audit_result,
+        )
 
     def _register_union_view(self, all_results: list[dict]):
         """注册跨星团 UNION ALL 联合视图。
