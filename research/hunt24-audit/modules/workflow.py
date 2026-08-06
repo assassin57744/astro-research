@@ -5,8 +5,6 @@ import numpy as np
 from dataclasses import dataclass, field
 from sklearn.decomposition import PCA
 
-from utils.decorators import astro_checkpoint
-
 from modules.db import AstroDB
 from modules.pipelines.core.prior_gmm import PriorGMM
 from modules.validator import UnifiedMemberValidator
@@ -208,31 +206,24 @@ class AstroWorkflow:
             self._prepare_shared_data(ctx)
         self._finalize_context(ctx)
 
-        # Phase 2: GMM 成员识别
+        # Phase 2: GMM 成员识别 & 候选集生成 (合并了原 Phase 3)
         self.logger.info(
             f"🧠 [Phase 2] GMM 成员识别: {ctx.cluster_id} [{ctx.feature_space}]"
         )
-        result_table = self._compute_members(ctx)
-        if not result_table:
+        compute_result = self._compute_members(ctx)
+        if not compute_result or compute_result.get("status") != "success":
             self.logger.error("❌ [Phase 2] 成员识别失败")
             return None
 
-        # Phase 3: 后处理
-        self.logger.info("📊 [Phase 3] 后处理...")
-        post_result = self._post_process(ctx, result_table)
-        if post_result.get("status") != "success":
-            self.logger.error(f"❌ [Phase 3] 后处理失败: {post_result.get('message')}")
-            return None
+        # Phase 3: 审计 (原 Phase 4)
+        self.logger.info(f"⚖️ [Phase 3] 交叉审计, 参考星表: {ctx.category}")
+        audit_result = self._audit_phase(ctx, compute_result)
 
-        # Phase 4: 审计
-        self.logger.info(f"⚖️ [Phase 4] 交叉审计, 参考星表: {ctx.category}")
-        audit_result = self._audit_phase(ctx, post_result)
-
-        # Phase 5: 导出
+        # Phase 4: 导出 (原 Phase 5)
         self._export_phase(ctx, audit_result)
 
-        # Phase 6: 报告与可视化
-        return self._report_phase(ctx, post_result, audit_result)
+        # Phase 5: 报告与可视化 (原 Phase 6)
+        return self._report_phase(ctx, compute_result, audit_result)
 
     def _prepare_shared_data(self, ctx: RunContext):
         """执行可跨特征空间复用的数据准备：数据导入 + 星团实体 + 标准化。"""
@@ -425,10 +416,10 @@ class AstroWorkflow:
 
     # ── GMM 成员识别 ──
 
-    @astro_checkpoint(
-        cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
-        force_refresh=True,
-    )
+    # @astro_checkpoint(
+    #     cache_table_template="cache_{cluster}_{category}_{mode}_{algo}_res",
+    #     force_refresh=True,
+    # )
     def _compute_members(self, ctx: RunContext) -> str | None:
         """统一的成员识别调度器 (Phase 2)"""
         self.logger.info(f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}")
@@ -476,120 +467,55 @@ class AstroWorkflow:
         updates = df_res[update_cols].copy()
         self.db.tag_master_table(ctx.state.master_table, updates)
 
-        return ctx.state.master_table
+        # 5. [原 Phase 3 合并点 1] 注册候选星视图
+        v_candidates = cfg.TMPL.V_CANDIDATES.format(
+            cluster=ctx.cluster_id.lower(),
+            category=ctx.category,
+            feature_space=ctx.feature_space,
+            algo=ctx.algorithm,
+        )
+        self.db.register_view_from_sql(
+            v_candidates,
+            f"SELECT * FROM {ctx.state.master_table} WHERE is_candidate = TRUE",
+        )
 
-    # def _run_stable_pipeline(
-    #     self,
-    #     ctx: RunContext,
-    #     df_target_final: pd.DataFrame,
-    #     df_seeds_final: pd.DataFrame,
-    # ) -> pd.DataFrame:
-    #     """稳定生产轨：使用传统 PriorGMM。"""
-    #     self.logger.warning("🔒 [Compute] 稳定生产模式：执行 PriorGMM 老轨行为")
+        # 6. [原 Phase 3 合并点 2] 汇总成员计算统计
+        stats_sql = f"""
+            SELECT 
+                count(*) FILTER (WHERE is_golden = TRUE) AS n_golden,
+                count(*) FILTER (WHERE is_candidate = TRUE) AS n_candidates,
+                count(*) FILTER (WHERE seed_type = 'refined_seed') AS n_seeds_refined,
+                count(*) FILTER (WHERE density_status = 'core') AS n_seed_core,
+                count(*) FILTER (WHERE density_status = 'noise') AS n_seed_noise
+            FROM {ctx.state.master_table}
+        """
+        n_golden, n_candidates, n_seeds_refined, n_seed_core, n_seed_noise = self.db.execute(stats_sql).fetchone()
 
-    #     cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
-    #     cluster_cfg["id"] = ctx.cluster_id
-    #     cluster_cfg["FEATURE_SPACE"] = ctx.feature_space
+        sd = ctx.state.seed_stats
+        compute_stats = {
+            "n_golden": n_golden,
+            "n_candidates": n_candidates,
+            "n_seeds_raw": sd.get("raw_count", 0),
+            "n_seeds_clean": sd.get("clean_count", 0),
+            "n_seed_core": n_seed_core,
+            "n_seed_noise": n_seed_noise,
+            "n_seeds_refined": n_seeds_refined,
+            **sd,
+        }
 
-    #     engine = PriorGMM(config=cluster_cfg)
-    #     model_params = engine.fit(df_seeds_final, df_target_final)
-    #     return engine.predict(df_target_final, model_params)
-    
-    # def _run_experimental_pipeline(
-    #     self, ctx: RunContext, df_all_field: pd.DataFrame, df_seed_field: pd.DataFrame
-    # ) -> pd.DataFrame:
-    #     """
-    #     实验新轨：委托给独立执行器 ExperimentalPipelineRunner 执行双通道策略。
-    #     """
-    #     # ⚠️ 局部导入以避免潜在的循环依赖
-    #     from modules.pipelines.experimental_pipeline import ExperimentalPipelineRunner
-        
-    #     self.logger.info("⚙️ [Workflow] 将管线执行权移交至 ExperimentalPipelineRunner")
-    #     runner = ExperimentalPipelineRunner(db_instance=self.db, logger=self.logger)
-        
-    #     # 纯净的输入输出交互
-    #     return runner.run(ctx, df_all_field, df_seed_field)
+        self.logger.info("=" * 60)
+        self.logger.info(f"📊 [Compute] [{ctx.cluster_id}] 成员识别与统计完成:")
+        self.logger.info(f"  🔹 高置信金种子星 (is_golden): {n_golden} 颗")
+        self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {n_candidates} 颗")
+        self.logger.info("=" * 60)
 
-    # ── 后处理 ──
+        # 返回包含 view 和 stats 的完整结果（原 post_result 结构）
+        return {
+            "status": "success",
+            "v_candidates": v_candidates,
+            "stats": compute_stats,
+        }
 
-    def _post_process(self, ctx: RunContext, t_main_results: str) -> dict:
-        """算法后处理流水线。"""
-        self.logger.info(f"📊 [Process] [{ctx.cluster_id}] 启动后处理...")
-        try:
-            # self.db.execute(
-            #     f"ALTER TABLE {ctx.state.master_table} "
-            #     f"ADD COLUMN IF NOT EXISTS is_golden BOOLEAN DEFAULT FALSE"
-            # )
-            # self.db.execute(
-            #     f"ALTER TABLE {ctx.state.master_table} "
-            #     f"ADD COLUMN IF NOT EXISTS is_candidate BOOLEAN DEFAULT FALSE"
-            # )
-
-            # condi_golden = f"{cfg.STD_COLS['PROB']} >= {cfg.THRESHOLD_GOLDEN}"
-            # condi_candidates = f"{cfg.STD_COLS['PROB']} > {cfg.THRESHOLD_BASE}"
-
-            # self.db.execute(
-            #     f"UPDATE {ctx.state.master_table} SET is_golden = TRUE WHERE {condi_golden}"
-            # )
-            # self.db.execute(
-            #     f"UPDATE {ctx.state.master_table} SET is_candidate = TRUE WHERE {condi_candidates}"
-            # )
-
-            stats_sql = f"""
-                SELECT 
-                    count(*) FILTER (WHERE is_golden = TRUE) AS n_golden,
-                    count(*) FILTER (WHERE is_candidate = TRUE) AS n_candidates,
-                    count(*) FILTER (WHERE seed_type = 'refined_seed') AS n_seeds_refined,
-                    count(*) FILTER (WHERE density_status = 'core') AS n_seed_core,
-                    count(*) FILTER (WHERE density_status = 'noise') AS n_seed_noise
-                FROM {ctx.state.master_table}
-            """
-            stats = self.db.execute(stats_sql).fetchone()
-            n_golden, n_candidates, n_seeds_refined, n_seed_core, n_seed_noise = stats
-
-            # 种子计数从 seed_stats 取（不受 tag_master_table UPDATE 限制影响）
-            sd = ctx.state.seed_stats
-            n_seeds_raw = sd.get("raw_count", 0)
-            n_seeds_clean = sd.get("clean_count", 0)
-
-            self.logger.info("=" * 60)
-            self.logger.info(f"📊 [Process] [{ctx.cluster_id}] 后处理标签同步完成:")
-            self.logger.info(f"  🔹 高置信金种子星 (is_golden): {n_golden} 颗")
-            self.logger.info(f"  🔹 成员星候选总数 (is_candidate): {n_candidates} 颗")
-            self.logger.info(f"  🔹 原始种子星目录总数 (Raw): {n_seeds_raw} 颗")
-            self.logger.info(f"  🔹 有效输入种子星 (Clean): {n_seeds_clean} 颗")
-            self.logger.info(f"  🔹 DBSCAN 精炼种子星 (Refined): {n_seeds_refined} 颗")
-            self.logger.info(f"  🔹 种子集核心样本 (Core): {n_seed_core} 颗")
-            self.logger.info("=" * 60)
-
-            v_candidates = cfg.TMPL.V_CANDIDATES.format(
-                cluster=ctx.cluster_id.lower(),
-                category=ctx.category,
-                feature_space=ctx.feature_space,
-                algo=ctx.algorithm,
-            )
-            self.db.register_view_from_sql(
-                v_candidates,
-                f"SELECT * FROM {ctx.state.master_table} WHERE is_candidate = TRUE",
-            )
-
-            return {
-                "status": "success",
-                "v_candidates": v_candidates,
-                "stats": {
-                    "n_golden": n_golden,
-                    "n_candidates": n_candidates,
-                    "n_seeds_raw": n_seeds_raw,
-                    "n_seeds_clean": n_seeds_clean,
-                    "n_seed_core": n_seed_core,
-                    "n_seed_noise": n_seed_noise,
-                    "n_seeds_refined": n_seeds_refined,
-                    **ctx.state.seed_stats,
-                },
-            }
-        except Exception as e:
-            self.logger.error(f"❌ [Process] 后处理失败: {str(e)}")
-            return {"status": "error", "message": str(e)}
 
     # ── 审计 ──
     # Phase 4 分为三个核心审计 + 一个交叉比对辅助步骤:

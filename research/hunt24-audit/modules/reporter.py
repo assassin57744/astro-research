@@ -414,5 +414,5 @@ def render_all_modes_comparison(
 
     logger.info("═" * 158)
     logger.info(
-        " 💡 注: RECALL 基于文献已知成员的找回率; PRECISION 基于算法独有源通过物理深度审计的比例。\n"
+        " 💡 注: RECALL 基于文献已知成员的找回率; PRECISION 基于算法独有源通过物理深度审计的比例。"
     )

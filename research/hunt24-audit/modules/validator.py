@@ -219,15 +219,15 @@ class UnifiedMemberValidator:
         lit_pos_total = tp + fn
         lit_neg_total = fp + tn
         # 1. 打印基础摘要
-        self.logger.info("=" * 72)
-        self.logger.info(
+        self.logger.debug("=" * 72)
+        self.logger.debug(
             f"📊 [验证结果摘要] 星团: {self.cluster_name} | 样本总数: {total}"
         )
-        self.logger.info(f"  ✨ 物理验证通过总数 (TP+FP): {phys_pos_total}")
-        self.logger.info(f"      --其中文献也证实 (TP):    {tp}")
-        self.logger.info(f"      --其中文献缺失 (FP):      {fp}")
-        self.logger.info(f"  ⚠️ 文献通过但物理偏离 (FN): {fn}")
-        self.logger.info(f"  ❌ 双验证均未通过(背景污染):  {tn}")
+        self.logger.debug(f"  ✨ 物理验证通过总数 (TP+FP): {phys_pos_total}")
+        self.logger.debug(f"      --其中文献也证实 (TP):    {tp}")
+        self.logger.debug(f"      --其中文献缺失 (FP):      {fp}")
+        self.logger.debug(f"  ⚠️ 文献通过但物理偏离 (FN): {fn}")
+        self.logger.debug(f"  ❌ 双验证均未通过(背景污染):  {tn}")
         # 2. 打印二维判别矩阵 (Contingency Matrix)
         self.logger.info("-" * 72)
         self.logger.info("深度审计判别矩阵 (物理检查 vs 文献共识):")

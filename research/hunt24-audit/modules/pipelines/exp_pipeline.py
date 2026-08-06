@@ -1,4 +1,4 @@
-# modules/pipelines/experimental_pipeline.py
+# modules/pipelines/exp_pipeline.py
 import logging
 import pandas as pd
 import numpy as np
