@@ -478,37 +478,37 @@ class AstroWorkflow:
 
         return ctx.state.master_table
 
-    def _run_stable_pipeline(
-        self,
-        ctx: RunContext,
-        df_target_final: pd.DataFrame,
-        df_seeds_final: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """稳定生产轨：使用传统 PriorGMM。"""
-        self.logger.warning("🔒 [Compute] 稳定生产模式：执行 PriorGMM 老轨行为")
+    # def _run_stable_pipeline(
+    #     self,
+    #     ctx: RunContext,
+    #     df_target_final: pd.DataFrame,
+    #     df_seeds_final: pd.DataFrame,
+    # ) -> pd.DataFrame:
+    #     """稳定生产轨：使用传统 PriorGMM。"""
+    #     self.logger.warning("🔒 [Compute] 稳定生产模式：执行 PriorGMM 老轨行为")
 
-        cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
-        cluster_cfg["id"] = ctx.cluster_id
-        cluster_cfg["FEATURE_SPACE"] = ctx.feature_space
+    #     cluster_cfg = cfg.CLUSTERS[ctx.cluster_id].copy()
+    #     cluster_cfg["id"] = ctx.cluster_id
+    #     cluster_cfg["FEATURE_SPACE"] = ctx.feature_space
 
-        engine = PriorGMM(config=cluster_cfg)
-        model_params = engine.fit(df_seeds_final, df_target_final)
-        return engine.predict(df_target_final, model_params)
+    #     engine = PriorGMM(config=cluster_cfg)
+    #     model_params = engine.fit(df_seeds_final, df_target_final)
+    #     return engine.predict(df_target_final, model_params)
     
-    def _run_experimental_pipeline(
-        self, ctx: RunContext, df_all_field: pd.DataFrame, df_seed_field: pd.DataFrame
-    ) -> pd.DataFrame:
-        """
-        实验新轨：委托给独立执行器 ExperimentalPipelineRunner 执行双通道策略。
-        """
-        # ⚠️ 局部导入以避免潜在的循环依赖
-        from modules.pipelines.experimental_pipeline import ExperimentalPipelineRunner
+    # def _run_experimental_pipeline(
+    #     self, ctx: RunContext, df_all_field: pd.DataFrame, df_seed_field: pd.DataFrame
+    # ) -> pd.DataFrame:
+    #     """
+    #     实验新轨：委托给独立执行器 ExperimentalPipelineRunner 执行双通道策略。
+    #     """
+    #     # ⚠️ 局部导入以避免潜在的循环依赖
+    #     from modules.pipelines.experimental_pipeline import ExperimentalPipelineRunner
         
-        self.logger.info("⚙️ [Workflow] 将管线执行权移交至 ExperimentalPipelineRunner")
-        runner = ExperimentalPipelineRunner(db_instance=self.db, logger=self.logger)
+    #     self.logger.info("⚙️ [Workflow] 将管线执行权移交至 ExperimentalPipelineRunner")
+    #     runner = ExperimentalPipelineRunner(db_instance=self.db, logger=self.logger)
         
-        # 纯净的输入输出交互
-        return runner.run(ctx, df_all_field, df_seed_field)
+    #     # 纯净的输入输出交互
+    #     return runner.run(ctx, df_all_field, df_seed_field)
 
     # ── 后处理 ──
 
