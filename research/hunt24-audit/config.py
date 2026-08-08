@@ -64,7 +64,8 @@ REDDENING_RATIO_BP_RP = 0.52  # E(BP-RP) / A_G 比例系数 (基于 Gaia DR3 经
 #   "chi2_upmask"       — 默认：卡方假设检验 + pyUPMASK 聚类 CMD, p ≥ 0.50
 #   "chi2_cmd_residual" — 实验 A：卡方假设检验 + 等龄线插值残差 CMD, p ≥ 0.05
 #   "weighted_penalty"  — 实验 B：启发式加权惩罚分（修正 BP/RP 距离模数 bug 后的 backup 版本）
-VALIDATION_STRATEGY = "chi2_upmask"
+#   "pure_upmask"       — 实验C：仅用pyUPMASK
+VALIDATION_STRATEGY = "pure_upmask"
 
 
 # =================================================================
@@ -246,8 +247,8 @@ CLUSTERS = {
         "SEED_PLX_LIM": 4.0,# 单位：mas, 源星种子搜索视差容忍度(第一次实验取值:1.5, 第二次实验取值:0.5)
         "SEED_MAX_MAG": 19.5, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
         "SEED_MAX_RUWE": 1.4,
-        "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2,
+        "UPMASK_ITERATIONS": 25,
+        "UPMASK_MAX_CLUSTERS": 25,
         # 🌟 核心算法路由策略集成
         # "DISAMBIGUATION_MODE": "threshold_gmm",  # 年轻星团，卡方一刀切高效高纯
         # "SUBSTRUCTURE_MODE": "identity",         # 无显著潮汐尾，保持单高斯

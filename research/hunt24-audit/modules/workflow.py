@@ -502,16 +502,11 @@ class AstroWorkflow:
         )
 
         df_target_final = self._load_and_transform_field(ctx)
-        self.logger.info(
-            f"✅ [Compute] 算法内核计算完成，目标天区共计 {len(df_target_final)} 颗天体。top N: \n{df_target_final.head()}"
-        )
-
-        # 🚀 必须先建表，再加载种子（_load_and_transform_seeds 内部会调用 tag_master_table 回灌标签）
+        
+        # 正常建表（按 config 中的默认模板）
         self.db.init_master_table(ctx.state.master_table, df_target_final)
+        
         df_seeds_final = self._load_and_transform_seeds(ctx)
-        self.logger.info(
-            f"✅ [Compute] 算法内核计算完成，种子星共计 {len(df_seeds_final)} 颗。top N: \n{df_seeds_final.head()}"
-        )
 
         use_experimental = ctx.state.gmm_config.get("use_experimental", False)
         if not use_experimental:
@@ -524,16 +519,26 @@ class AstroWorkflow:
         if df_res is None or df_res.empty:
             raise ValueError("❌ [Compute] 算法内核异常：结果 DataFrame 为空！")
 
-        self.logger.info(
-            f"✅ [Compute] 算法内核计算完成，结果集共计 {len(df_res)} 颗天体。"
-        )
         self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
 
-        # 回灌概率及分通道信息（若存在 core_prob / tail_prob / source 则一并写入）
+        # 💥 核心防线：在回写前，强制向数据库表追加这两个浮点数列
+        # 这保证了数据一定能写进物理表（即便它们会被排在最后面）
+        for new_col in ("p_cl_raw", "p_tail_raw"):
+            if new_col in df_res.columns:
+                try:
+                    self.db.execute(
+                        f"ALTER TABLE {ctx.state.master_table} "
+                        f"ADD COLUMN IF NOT EXISTS {new_col} DOUBLE PRECISION"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"⚠️ 无法创建列 {new_col}: {str(e)}")
+
+        # 组装并执行回写
         update_cols = [cfg.STD_COLS["ID"], "prob"]
-        for extra in ("core_prob", "tail_prob", "source"):
+        for extra in ("core_prob", "p_cl_raw", "tail_prob", "p_tail_raw", "source"):
             if extra in df_res.columns:
                 update_cols.append(extra)
+                
         updates = df_res[update_cols].copy()
         self.db.tag_master_table(ctx.state.master_table, updates)
 
@@ -888,43 +893,56 @@ class AstroWorkflow:
             f"Tail 候选(prob>{cfg.THRESHOLD_HIGH_CONF}): {(df_res_tail[prob_col] > cfg.THRESHOLD_HIGH_CONF).sum()} 颗"
         )
 
-        # ---------------------------------------------------------
+       # ---------------------------------------------------------
         # 5. 第五阶段：核心（Core）与潮汐尾（Tail）分层决策融合 (Hierarchical Union)
         # ---------------------------------------------------------
         m_thresh = cfg.THRESHOLD_HIGH_CONF  # 成员判定统一使用 0.5 门限
 
         df_res_final = df_res_core.copy()
         df_res_final["core_prob"] = df_res_core[prob_col].values
-        df_res_final["tail_prob"] = 0.0
+        
+        # 🌟 通道 A 产出的模型似然，就是核心似然 (p_cl_raw)
+        if "p_cl_raw" not in df_res_final.columns:
+            df_res_final["p_cl_raw"] = 0.0
 
-        # 仅更新处于 Spatial Tube 管内天体的 tail_prob
+        # 初始化 Tail 概率和原始似然坑位
+        df_res_final["tail_prob"] = 0.0
+        df_res_final["p_tail_raw"] = 0.0
+
+        # 仅更新处于 Spatial Tube 管内天体
         tail_prob_map = df_res_tail.set_index("id")[prob_col]
+        # 🌟 通道 B 产出的模型似然，就是潮汐尾似然 (p_tail_raw)
+        if "p_cl_raw" in df_res_tail.columns:
+            tail_raw_map = df_res_tail.set_index("id")["p_cl_raw"]
+        else:
+            tail_raw_map = pd.Series(0.0, index=df_res_tail["id"])
+
         tube_ids_set = set(df_tube_full["id"].values)
         is_in_tube_mask = df_res_final["id"].isin(tube_ids_set)
 
+        # 填入管内推导概率
         df_res_final.loc[is_in_tube_mask, "tail_prob"] = (
-            df_res_final.loc[is_in_tube_mask, "id"]
-            .map(tail_prob_map)
-            .fillna(0.0)
-            .values
+            df_res_final.loc[is_in_tube_mask, "id"].map(tail_prob_map).fillna(0.0).values
+        )
+        # 填入管内原始似然
+        df_res_final.loc[is_in_tube_mask, "p_tail_raw"] = (
+            df_res_final.loc[is_in_tube_mask, "id"].map(tail_raw_map).fillna(0.0).values
         )
 
         # 🌟 核心分层互斥逻辑：
-        # 1. Channel A 优先：只要 core_prob >= 0.5，继承 core_prob，标为 'core'
-        # 2. Channel B 接管：仅当 (core_prob < 0.5) 且 (在管内) 且 (tail_prob >= 0.5)，继承 tail_prob，标为 'tail'
-        # 3. 双方均符合：若 core_prob >= 0.5 且 tail_prob >= 0.5，标为 'both'，概率继承 core_prob
-
         is_core_member = df_res_final["core_prob"] >= m_thresh
         is_tail_member = df_res_final["tail_prob"] >= m_thresh
 
         # 默认使用 Core 概率作为主概率
         df_res_final[prob_col] = df_res_final["core_prob"].values
 
-        # 触发 Channel B 救回接管（仅对 core 被拒绝且 tail 认可的天体覆盖概率）
+        # 触发 Channel B 救回接管（仅对 core 被拒绝且 tail 认可的天体覆盖主概率）
         tail_takeover_mask = (~is_core_member) & is_in_tube_mask & is_tail_member
         df_res_final.loc[tail_takeover_mask, prob_col] = df_res_final.loc[
             tail_takeover_mask, "tail_prob"
         ].values
+        
+        # 注意：两列似然现已独立并存，发生接管时不再需要互相覆盖似然列！
 
         # 标记成员来源 metadata
         df_res_final["source"] = "field"

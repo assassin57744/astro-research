@@ -1,0 +1,67 @@
+SELECT 
+    rmf."source",
+    mmhdd.x_match_tag,
+    mmhdd.audit_status,
+    mmhdd.kine_chi2,
+	mmhdd.plx_chi2,
+	mmhdd.rv_chi2,
+	mmhdd.cmd_chi2,
+    rmf.ra_icrs,
+    rmf.de_icrs,
+    rmf.pmra,
+    rmf.pmde,
+    rmf.e_pmra,
+    rmf.e_pmde,
+    rmf.gmag,
+    rmf.color,
+    rmf.e_color,
+    rmf.corrected_color_excess,
+    rmf.corrected_color_excess_sigma 
+FROM astrodb_internal.main.raw_m45_field rmf
+INNER JOIN astrodb_internal.main.master_m45_hunt_5d_dbscan mmhdd
+    ON rmf."source" = mmhdd.id
+	AND mmhdd.x_match_tag IS NOT NULL; 
+
+SELECT *
+FROM astrodb_internal.main.raw_m67_field rmf 
+WHERE rmf.ra_icrs BETWEEN 132.8452564476688 - 1 AND 132.8452564476688 + 1
+AND rmf.de_icrs BETWEEN 11.826338504396249 - 1 AND 11.826338504396249 + 1
+	AND rmf.pmra BETWEEN -15 AND -7
+	AND rmf.pmde BETWEEN -8 AND 2
+	AND rmf.color < 4
+	AND rmf.gmag < 20;
+
+ra: 56.613989974206454,
+dec: 24.090295960849986
+plx: 7.329882161533993
+pmra: 19.81609122603138
+pmdec: -45.024817547937246
+pmra_disp: 1.7281474664230885
+pmdec_disp: 3.0058558498873795
+plx_disp: 0.49717813080342926
+
+CENTER_RA = 56.613989974206454,
+CENTER_DE = 24.090295960849986,
+PLX_REF = 7.329882161533993,
+PLX_ERROR = 0.49717813080342926,
+PMRA_REF = 19.81609122603138
+PMDEC_REF = -45.024817547937246,
+PMRA_DISPERSION = 1.7281474664230885,
+PMDEC_DISPERSION = 3.0058558498873795,
+DISTANCE_PC = 137.0555136960446.
+
+SELECT *
+FROM astrodb_internal.main.raw_m45_field rmf 
+WHERE rmf.Plx > 4
+	AND rmf.pmRA BETWEEN 0 AND 40
+	AND rmf.pmDE BETWEEN -60 AND -20
+	AND rmf.RUWE < 1.4
+
+SELECT 
+    ROUND(FLOOR(mmhdhd.prob / 0.1) * 0.1, 1) AS bin_start,
+    CONCAT(ROUND(FLOOR(mmhdhd.prob / 0.1) * 0.1, 1), ' - ', ROUND(FLOOR(mmhdhd.prob / 0.1) * 0.1 + 0.09, 2)) AS bin_range,
+    COUNT(*) AS frequency
+FROM astrodb_internal.main.master_m45_hunt_5d_h_dbscan mmhdhd 
+WHERE mmhdhd.prob IS NOT NULL
+GROUP BY FLOOR(mmhdhd.prob / 0.1)
+ORDER BY bin_start;

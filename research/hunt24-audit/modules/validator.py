@@ -33,7 +33,7 @@ class UnifiedMemberValidator:
         self.cluster_name = CLUSTERS[cluster_id]["ID_NAME"]
         self.cache_table = MANIFEST[IDX_IDS_SIMBAD]["raw_table"]
         # 物理审计器（策略由 cfg.VALIDATION_STRATEGY 决定，构造时一次性选定）
-        strategy = getattr(cfg, "VALIDATION_STRATEGY", "chi2_upmask")
+        strategy = getattr(cfg, "VALIDATION_STRATEGY", "pure_upmask")
         self._phys_auditor = create_auditor(
             strategy, self.cluster_obj, self.logger,
             cluster_id=self.cluster_id, feature_space=feature_space,
@@ -56,7 +56,7 @@ class UnifiedMemberValidator:
         self._compute_spatial_features(audit_matrix)
 
         # ── 3. 物理一致性审计 ──
-        self._audit_physical_consistency(audit_matrix)
+        audit_matrix = self._audit_physical_consistency(audit_matrix)
 
         # ── 4. 文献共识审计 ──
         consensus_df = self._audit_literature_consistency(audit_matrix)
@@ -198,6 +198,7 @@ class UnifiedMemberValidator:
         if "id_str" in df.columns:
             df.drop(columns=["id_str"], inplace=True)
         self._phys_auditor._log_stats(df)
+        return df
 
     def _audit_literature_consistency(self, audit_matrix: pd.DataFrame) -> pd.DataFrame:
         """[委托] 文献共识审计，由构造时绑定的 LiteratureAuditor 执行。"""

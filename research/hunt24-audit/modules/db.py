@@ -652,18 +652,30 @@ class AstroDB:
         df_init = df_base[base_cols].copy()
         self.register_table_from_df(table_name, df_init)
 
-        # 🚀 [核心修复] 定义 Master 表字段的物理类型映射
-        # 默认全部为 VARCHAR，但算法概率列必须为 DOUBLE 以支持后续的数值比较和逻辑运算
+        # 🚀 [核心修复] 定义 Master 表字段的物理类型映射，加入新增的原始似然列
         type_map = {
-            cfg.MASTER_COLS['GMM_PROB']: "DOUBLE",
-            cfg.MASTER_COLS['CORE_PROB']: "DOUBLE",
-            cfg.MASTER_COLS['TAIL_PROB']: "DOUBLE",
+            cfg.MASTER_COLS.get('GMM_PROB', 'prob'): "DOUBLE",
+            cfg.MASTER_COLS.get('CORE_PROB', 'core_prob'): "DOUBLE",
+            cfg.MASTER_COLS.get('TAIL_PROB', 'tail_prob'): "DOUBLE",
+            "p_cl_raw": "DOUBLE",
+            "p_tail_raw": "DOUBLE"
         }
 
-        # 预添加标准状态列
+        # 🌟 动态重组建列顺序：确保似然概率列紧贴在推导概率列之后
+        ordered_cols = []
         for col in cfg.MASTER_COLS.values():
+            ordered_cols.append(col)
+            # 遇到核心推导概率，立刻追加核心原始似然
+            if col == cfg.MASTER_COLS.get('CORE_PROB', 'core_prob'):
+                ordered_cols.append("p_cl_raw")
+            # 遇到潮汐尾推导概率，立刻追加潮汐尾原始似然
+            if col == cfg.MASTER_COLS.get('TAIL_PROB', 'tail_prob'):
+                ordered_cols.append("p_tail_raw")
+
+        # 预添加标准状态列 (增加 IF NOT EXISTS 防止冲突)
+        for col in ordered_cols:
             col_type = type_map.get(col, "VARCHAR")
-            self.execute(f"ALTER TABLE {table_name} ADD COLUMN {col} {col_type}")
+            self.execute(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col} {col_type}")
 
     def tag_master_table(self, master_name, df_updates, key_col='id'):
         """ 执行增量标签/结果回灌。"""

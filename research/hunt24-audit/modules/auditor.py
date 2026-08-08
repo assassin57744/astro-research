@@ -319,8 +319,9 @@ class _Chi2Auditor(BasePhysicalAuditor, ABC):
 # =============================================================================
 
 class Chi2UpmaskAuditor(_Chi2Auditor):
-    """卡方检验 + pyUPMASK CMD 聚类概率 → χ²。"""
+    """卡方检验 + pyUPMASK CMD 聚类概率 → 双重门槛联合判定。"""
 
+    # 1. 直接将卡方阈值硬编码为你需要的 0.05（或改为从 cfg 获取）
     p_threshold = cfg.ALPHA_CHI2_PVALUE
 
     def __init__(self, cluster: StarCluster, logger: logging.Logger, cluster_id: str, feature_space: str = "5d_h"):
@@ -330,13 +331,39 @@ class Chi2UpmaskAuditor(_Chi2Auditor):
     def audit(self, df: pd.DataFrame) -> pd.DataFrame:
         return self._run_chi2_pipeline(df)
 
+    def _decide_chi2(self, df: pd.DataFrame) -> pd.DataFrame:
+        """覆写基类决策逻辑，在基础卡方判定上追加 UPMASK 概率门槛。"""
+        # A. 调用父类方法：这会自动计算 global_cluster_probability，
+        # 并基于 p_threshold = 0.05 计算出初始的 is_phys_consistent，同时输出多自由度卡方日志
+        df = super()._decide_chi2(df)
+        
+        # B. 定义 pyUPMASK 的阈值（使用 0.5 或是 config 中的配置）
+        upmask_threshold = getattr(cfg, "THRESHOLD_MEMBERSHIP_PROB", 0.5)
+        
+        # 提取各个判定条件的布尔掩码
+        chi2_passed = df["global_cluster_probability"] > self.p_threshold
+        upmask_passed = df["upmask_prob"] > upmask_threshold
+        
+        # C. 联合判定核心：只有两者同时满足，才算通过物理一致性
+        df["is_phys_consistent"] = chi2_passed & upmask_passed
+        
+        # D. 补充输出定制化日志，方便排查数据过滤情况
+        final_passed_count = df["is_phys_consistent"].sum()
+        chi2_passed_count = chi2_passed.sum()
+        self.logger.info(
+            f"🎯 [Chi2Upmask 联合判定] 在卡方概率 > {self.p_threshold} 的 {chi2_passed_count} 颗星中，"
+            f"再经 pyUPMASK 概率 > {upmask_threshold} 过滤，最终判定成员: {final_passed_count} 颗"
+        )
+        
+        return df
+
     def _compute_cmd(self, df: pd.DataFrame):
         """pyUPMASK 聚类概率 → χ²。"""
-        if not all(c in df.columns for c in ["ra", "dec", "color", "mag"]):
+        if not all(c in df.columns for c in ["ra", "dec", "pmra", "pmdec"]):
             return
 
         df["upmask_prob"] = 0.0
-        upmask_cols = ["ra", "dec", "color", "mag"]
+        upmask_cols = ["ra", "dec", "pmra", "pmdec"]
 
         # 加载外部星表
         ext_csv_path = Path(cfg.GAIA_INPUT_DIR) / f"{self.cluster_id.lower()}_pyUPMASK.csv"
@@ -363,14 +390,14 @@ class Chi2UpmaskAuditor(_Chi2Auditor):
 
         valid_df = df[valid_cmd].copy()
         valid_idx = valid_df.index
-        n_iter = int(self.cluster.get_param("UPMASK_ITERATIONS", 20))
-        max_cl = int(self.cluster.get_param("UPMASK_MAX_CLUSTERS", 5))
+        n_iter = int(self.cluster.get_param("UPMASK_ITERATIONS", 25))
+        max_cl = int(self.cluster.get_param("UPMASK_MAX_CLUSTERS", 25))
 
         probs_all = upmask_mod.dataProcess(
             ID=valid_idx.values,
             xy=valid_df[["ra", "dec"]].values,
-            data=valid_df[["color", "mag"]].values,
-            data_err=valid_df[["color_err", "mag_err"]].values,
+            data=valid_df[["pmra", "pmdec"]].values,
+            data_err=valid_df[["pmra_err", "pmde_err"]].values,
             verbose=0, OL_runs=n_iter, parallel_flag=False, parallel_procs=1,
             resampleFlag=True, PCAflag=False, PCAdims=2,
             GUMM_flag=False, GUMM_perc=None, KDEP_flag=False,
@@ -381,10 +408,7 @@ class Chi2UpmaskAuditor(_Chi2Auditor):
         upmask_prob = np.mean(probs_all, axis=0) if len(probs_all) > 1 else probs_all[0]
         df.loc[valid_idx, "upmask_prob"] = upmask_prob
 
-        cmd_chi2 = -2.0 * np.log(upmask_prob + 1e-10)
-        if "color_excess" in df.columns and "color_excess_sigma" in df.columns:
-            outlier = np.abs(df["color_excess"]) > (5.0 * df["color_excess_sigma"])
-            cmd_chi2[outlier[valid_cmd].values] += 1.0
+        cmd_chi2 = 0
 
         df.loc[valid_idx, "cmd_residual"] = cmd_chi2
         df.loc[valid_idx, "cmd_chi2"] = cmd_chi2
@@ -533,6 +557,81 @@ class WeightedPenaltyAuditor(BasePhysicalAuditor):
         )
         return df
 
+# =============================================================================
+# 策略 D：pure_upmask (纯 UPMASK 模式)
+# =============================================================================
+
+class PureUpmaskAuditor(BasePhysicalAuditor):
+    """纯 pyUPMASK 检验策略，完全跳过运动学与视差的卡方检验。"""
+
+    def __init__(self, cluster: StarCluster, logger: logging.Logger, cluster_id: str, feature_space: str = "5d_h"):
+        super().__init__(cluster, logger, feature_space)
+        self.cluster_id = cluster_id
+
+    def audit(self, df: pd.DataFrame) -> pd.DataFrame:
+        self.logger.info("🚀 [PhysAudit] 启动纯 pyUPMASK 模式，仅依赖测光聚类概率进行判定。")
+
+        # 1. 基础依赖检查
+        if not all(c in df.columns for c in ["ra", "dec", "pmra", "pmdec"]):
+            self.logger.warning("⚠️ [PhysAudit] 缺失 UPMASK 所需的基础特征，全量拒绝。")
+            df["is_phys_consistent"] = False
+            return df
+
+        df["upmask_prob"] = 0.0 
+        upmask_cols = ["ra", "dec", "pmra", "pmdec"]
+
+        # 2. 尝试加载外部星表基准（保持与原逻辑一致）
+        ext_csv_path = Path(cfg.GAIA_INPUT_DIR) / f"{self.cluster_id.lower()}_pyUPMASK.csv"
+        ext_gaia_ids: set = set()
+        if ext_csv_path.exists():
+            try:
+                ext_df = pd.read_csv(ext_csv_path)
+                id_col = next((c for c in ext_df.columns if "source" in c.lower()), None)
+                if id_col:
+                    ext_gaia_ids = set(ext_df[id_col].dropna().astype(str).unique())
+            except Exception as e:
+                self.logger.error(f"❌ [PhysAudit] 外部星表加载失败: {e}")
+
+        # 3. 筛选有效计算数据
+        valid_cmd = df[upmask_cols].notna().all(axis=1)
+        if valid_cmd.any():
+            valid_df = df[valid_cmd].copy()
+            valid_idx = valid_df.index
+            n_iter = int(self.cluster.get_param("UPMASK_ITERATIONS", 20))
+            max_cl = int(self.cluster.get_param("UPMASK_MAX_CLUSTERS", 5))
+
+            # 4. 执行核心 UPMASK 算法
+            probs_all = upmask_mod.dataProcess(
+                ID=valid_idx.values,
+                xy=valid_df[["ra", "dec"]].values,
+                data=valid_df[["pmra", "pmdec"]].values,
+                data_err=valid_df[["pmra_err", "pmde_err"]].values,
+                verbose=0, OL_runs=n_iter, parallel_flag=False, parallel_procs=1,
+                resampleFlag=True, PCAflag=False, PCAdims=2,
+                GUMM_flag=False, GUMM_perc=None, KDEP_flag=False,
+                IL_runs=5, N_membs=10, N_cl_max=max_cl,
+                clust_method="KMeans", clRjctMethod="rkfunc",
+                C_thresh=0.05, cl_method_pars={},
+            )
+            upmask_prob = np.mean(probs_all, axis=0) if len(probs_all) > 1 else probs_all[0]
+            df.loc[valid_idx, "upmask_prob"] = upmask_prob
+
+        # 5. 纯 UPMASK 决策逻辑（直接接管通过标准）
+        upmask_threshold = getattr(cfg, "THRESHOLD_MEMBERSHIP_PROB", 0.5)
+        df["is_phys_consistent"] = df["upmask_prob"] >= upmask_threshold
+
+        # 6. 补齐兼容性字段 (避免 validator.py 打印日志或后续分析时报错)
+        df["cmd_residual"] = df["upmask_prob"] 
+        df["cmd_chi2"] = df["upmask_prob"]
+        df["pm_score"] = 0.0
+        df["weighted_penalty"] = 0.0
+
+        # 7. 日志统计
+        passed = df["is_phys_consistent"].sum()
+        self.logger.info(f"📊 [PureUPMASK] 判定完成: 通过 {passed}/{len(df)} (概率阈值: {upmask_threshold})")
+
+        return df
+
 
 # =============================================================================
 # 工厂函数
@@ -554,6 +653,7 @@ def create_auditor(strategy: str, cluster: StarCluster, logger: logging.Logger,
         "chi2_upmask": lambda: Chi2UpmaskAuditor(cluster, logger, cluster_id or cluster.id, feature_space),
         "chi2_cmd_residual": lambda: Chi2ResidualAuditor(cluster, logger, feature_space=feature_space),
         "weighted_penalty": lambda: WeightedPenaltyAuditor(cluster, logger, feature_space=feature_space),
+        "pure_upmask": lambda: PureUpmaskAuditor(cluster, logger, cluster_id or cluster.id, feature_space), 
     }
     factory = _strategies.get(strategy)
     if factory is None:

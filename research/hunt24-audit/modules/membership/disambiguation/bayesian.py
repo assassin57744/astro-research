@@ -283,14 +283,19 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         probs = num / (den + 1e-15)
 
         df_result_clean = pd.DataFrame(
-            {"id": df_field_clean["id"].to_numpy(), "prob": probs}
+            {
+                "id": df_field_clean["id"].to_numpy(), 
+                "prob": probs,
+                "p_cl_raw": p_cl,
+                "p_tail_raw": p_fi
+            }
         )
 
         # 🛡️ 特征残缺野星兜底隔离
         if len(df_result_clean) < len(df_all):
             df_all_ids = df_all[["id"]].copy()
             df_final = df_all_ids.merge(df_result_clean, on="id", how="left").fillna(
-                {"prob": 0.0}
+                {"prob": 0.0, "p_cl_raw": 0.0, "p_tail_raw": 0.0}
             )
             n_dropped = len(df_all) - len(df_result_clean)
             self.logger.info(
