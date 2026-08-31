@@ -259,17 +259,15 @@ class AstroTransformer:
             sc = SkyCoord(
                 ra=df["ra"].to_numpy() * u.deg,
                 dec=df["dec"].to_numpy() * u.deg,
-                pm_ra_cosdec=df["pmra"].to_numpy() * u.mas / u.yr,
-                pm_dec=df["pmdec"].to_numpy() * u.mas / u.yr,
                 frame="icrs",
             )
             gal = sc.galactic
             l = gal.l.degree
             b = gal.b.degree
-            pm_l_cosb = gal.pm_l_cosb.value
-            pm_b = gal.pm_b.value
+            pmra = df["pmra"].to_numpy()
+            pmdec = df["pmdec"].to_numpy()
             plx = df["plx"].to_numpy()
-            res = np.column_stack((l, b, pm_l_cosb, pm_b, plx))
+            res = np.column_stack((l, b, pmra, pmdec, plx))
 
         elif feature_space in ["3d_v", "6d_p"]:
             rv_processed = self._compute_expected_rv(df)

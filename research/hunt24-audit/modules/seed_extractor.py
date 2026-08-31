@@ -42,7 +42,7 @@ class ClusterSeedExtractor:
 
         # 1. 严格映射 config.py 中的 "cluster_algo" 字段
         self.cluster_algo = str(
-            profile.get("cluster_algo", kwargs.get("cluster_algo", "dbscan"))
+            profile.get("CLUSTER_ALGO", kwargs.get("CLUSTER_ALGO", "dbscan"))
         ).lower()
 
         # 2. 严格映射 config.py 中的 "dbscan_eps" 字段（支持 "auto" 或 浮点数）
@@ -53,12 +53,12 @@ class ClusterSeedExtractor:
 
         # 4. 严格映射 config.py 中的 "hdbscan_min_cluster_size"
         self.hdbscan_min_cluster_size = profile.get(
-            "hdbscan_min_cluster_size", kwargs.get("hdbscan_min_cluster_size", 15)
+            "hdbscan_min_cluster_size", kwargs.get("hdbscan_min_cluster_size", 150)
         )
 
         # 5. 严格映射 config.py 中的 "hdbscan_min_samples"
         self.hdbscan_min_samples = profile.get(
-            "hdbscan_min_samples", kwargs.get("hdbscan_min_samples", None)
+            "hdbscan_min_samples", kwargs.get("hdbscan_min_samples", 50)
         )
 
         # 固定蒙特卡洛 KDE 重采样模拟深度（默认 30 次以达到科学无偏收敛）
@@ -119,7 +119,7 @@ class ClusterSeedExtractor:
                 min_cluster_size=self.hdbscan_min_cluster_size,
                 min_samples=self.hdbscan_min_samples,  # 完美透传 config.py 配置
                 cluster_selection_method="eom",  # Excess of Mass 算法，完美拟合恒星团质量函数
-                n_jobs=-1,
+                n_jobs=-1, copy=False
             ).fit(X_input)
             labels = db.labels_
 

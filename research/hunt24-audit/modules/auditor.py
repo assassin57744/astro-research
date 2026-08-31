@@ -578,7 +578,7 @@ class PureUpmaskAuditor(BasePhysicalAuditor):
             return df
 
         df["upmask_prob"] = 0.0 
-        upmask_cols = ["ra", "dec", "pmra", "pmdec"]
+        upmask_cols = ["ra", "dec", "pmra", "pmdec", "plx"]
 
         # 2. 尝试加载外部星表基准（保持与原逻辑一致）
         ext_csv_path = Path(cfg.GAIA_INPUT_DIR) / f"{self.cluster_id.lower()}_pyUPMASK.csv"
@@ -597,19 +597,19 @@ class PureUpmaskAuditor(BasePhysicalAuditor):
         if valid_cmd.any():
             valid_df = df[valid_cmd].copy()
             valid_idx = valid_df.index
-            n_iter = int(self.cluster.get_param("UPMASK_ITERATIONS", 20))
-            max_cl = int(self.cluster.get_param("UPMASK_MAX_CLUSTERS", 5))
+            n_iter = int(self.cluster.get_param("UPMASK_ITERATIONS", 25))
+            max_cl = int(self.cluster.get_param("UPMASK_MAX_CLUSTERS", 25))
 
             # 4. 执行核心 UPMASK 算法
             probs_all = upmask_mod.dataProcess(
                 ID=valid_idx.values,
                 xy=valid_df[["ra", "dec"]].values,
-                data=valid_df[["pmra", "pmdec"]].values,
-                data_err=valid_df[["pmra_err", "pmde_err"]].values,
+                data=valid_df[["pmra", "pmdec", "plx"]].values,
+                data_err=valid_df[["pmra_err", "pmde_err", "plx_err"]].values,
                 verbose=0, OL_runs=n_iter, parallel_flag=False, parallel_procs=1,
                 resampleFlag=True, PCAflag=False, PCAdims=2,
-                GUMM_flag=False, GUMM_perc=None, KDEP_flag=False,
-                IL_runs=5, N_membs=10, N_cl_max=max_cl,
+                GUMM_flag=False, GUMM_perc=None, KDEP_flag=True,
+                IL_runs=5, N_membs=25, N_cl_max=max_cl,
                 clust_method="KMeans", clRjctMethod="rkfunc",
                 C_thresh=0.05, cl_method_pars={},
             )

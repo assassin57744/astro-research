@@ -65,6 +65,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         df_field: pd.DataFrame,
         df_seeds: pd.DataFrame,
         features: List[str],
+        df_background: pd.DataFrame = None,
         use_density_prune: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -97,7 +98,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             use_density_prune = False
 
         # -----------------------------------------------------------------
-        # 1. 数学空间归一化 (以当前拟合天区 df_tube 的方差结构为度量基准)
+        # 1. 数学空间归一化 (以当前拟合天区 df_field 的方差结构为度量基准)
         # -----------------------------------------------------------------
         scaler = StandardScaler()
         scaler.fit(df_field_clean[features])
@@ -105,19 +106,29 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         X_field_scaled = scaler.transform(df_field_clean[features])
         X_seeds_scaled = scaler.transform(df_seeds_clean[features])
 
+        # 🌟 新增：如果提供了外接背景，使用 field 的 scaler 对其进行同空间映射
+        if df_background is not None:
+            self.logger.info(f"🌌 [外接背景] 接入独立背景数据进行拟合，总数: {len(df_background)} 颗")
+            df_bkg_clean = df_background.dropna(subset=features).copy()
+            X_bkg_scaled = scaler.transform(df_bkg_clean[features])
+        else:
+            X_bkg_scaled = X_field_scaled
+
         # -----------------------------------------------------------------
-        # 2. 🌌 构建局部背景似然场模型 (Field Model)
+        # 2. 🌌 构建背景似然场模型 (Field Model)
         # -----------------------------------------------------------------
         field_model = GaussianMixture(
             n_components=1, covariance_type="full", random_state=42
         )
-        X_fit = X_field_scaled
-        if self.enable_subsampling and len(X_field_scaled) > self.subsampling_limit:
+        
+        # 🌟 修改：使用 X_bkg_scaled (外接背景或退化后的目标天区) 进行背景拟合
+        X_fit = X_bkg_scaled
+        if self.enable_subsampling and len(X_bkg_scaled) > self.subsampling_limit:
             rng = np.random.default_rng(42)
-            idx = rng.choice(len(X_field_scaled), self.subsampling_limit, replace=False)
-            X_fit = X_field_scaled[idx]
+            idx = rng.choice(len(X_bkg_scaled), self.subsampling_limit, replace=False)
+            X_fit = X_bkg_scaled[idx]
             self.logger.info(
-                f"⚡ [场模型降采样] {len(X_field_scaled)} → {self.subsampling_limit} | 协方差类型: full"
+                f"⚡ [场模型降采样] {len(X_bkg_scaled)} → {self.subsampling_limit} | 协方差类型: full"
             )
         field_model.fit(X_fit)
 
@@ -310,6 +321,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
         df_all: pd.DataFrame,
         df_seeds: pd.DataFrame,
         features: List[str],
+        df_background: pd.DataFrame = None,
         use_density_prune: bool = False,
     ) -> pd.DataFrame:
         """
@@ -319,6 +331,7 @@ class BayesianGmmDisambiguation(BaseDisambiguation):
             df_field=df_all,
             df_seeds=df_seeds,
             features=features,
+            df_background=df_background,
             use_density_prune=use_density_prune,
         )
         return self.predict(df_all=df_all, model_params=model_params, features=features)

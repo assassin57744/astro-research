@@ -424,24 +424,6 @@ class AstroDB:
             )))
         );
 
-        -- 2. 修正后的色余计算宏
-        CREATE OR REPLACE MACRO calc_corrected_color_excess(formal_color_excess) AS (
-            CASE 
-                WHEN formal_color_excess < 0.5 
-                    THEN formal_color_excess - 1.154360 + 0.033772 * formal_color_excess + 0.032277 * POW(formal_color_excess, 2)
-                WHEN formal_color_excess >= 0.5 AND formal_color_excess < 4.0 
-                    THEN formal_color_excess - 1.162004 + 0.011464 * formal_color_excess + 0.049255 * POW(formal_color_excess, 2) - 0.005879 * POW(formal_color_excess, 3)
-                WHEN formal_color_excess >= 4.0 
-                    THEN formal_color_excess - 1.057572 + 0.260015 * formal_color_excess - 0.049302 * POW(formal_color_excess, 2) + 0.002879 * POW(formal_color_excess, 3)
-                ELSE NULL
-            END
-        );
-
-        -- 3. 色余标准差计算宏
-        CREATE OR REPLACE MACRO calc_corrected_color_excess_sigma(gmag) AS (
-            0.0059898 + 8.817481e-12 * POW(gmag, 7.618399)
-        );
-
         -- 4. 颜色综合误差计算宏
         CREATE OR REPLACE MACRO calc_e_color(e_bpmag, e_rpmag) AS (
             SQRT(POW(e_bpmag, 2) + POW(e_rpmag, 2))
@@ -603,44 +585,119 @@ class AstroDB:
                 self.logger.info(f"✅ [Local] 数据文件 {k}.parquet 已存在，跳过同步。")
 
             # 从 .parquet 中注册数据库
-            if force or not table_exists:
+            if force or should_sync or not table_exists:
                 self.logger.info(f"📋 [Registry] 正在注册数据库表: {t_raw}")
-                calc_custom_cols = False
-                # str = f"raw_{target_cluster_id}_field".lower()
-                # self.logger.info(f"🔍 检查是否需要计算自定义列: {str} == {t_raw} ?")
-                if t_raw.lower() == f"raw_{target_cluster}_field".lower() and target_cluster:
-                    calc_custom_cols = True    
-                self.register_table_from_file(t_raw, result_path, calc_custom_cols=calc_custom_cols)
+
+                field_map = config.get("fields", {})
+
+                # 是否需要生成 BP-RP 的测光误差。
+                # 与 color_excess 无关，只保留 color_err 的计算。
+                calc_color_err = field_map.get("color_err") == "color_err"
+
+                self.register_table_from_file(
+                    t_raw,
+                    result_path,
+                    calc_color_err=calc_color_err,
+                )
             else:
-                self.logger.info(f"✅ [Registry] 表 {t_raw} 已在内存中就绪。")
+                self.logger.info(f"✅ [Registry] 表 {t_raw} 已在数据库中就绪。")
 
         self.logger.info("✨ [Startup] AstroDB L1 原始数据环境导入完成。")
 
-    def register_table_from_file(self, table_name, file_path, calc_custom_cols=False):
-        """将 Parquet 文件物化为 DuckDB 物理表。"""
+    def register_table_from_file(
+        self,
+        table_name,
+        file_path,
+        calc_color_err=False
+    ):
+        """将 Parquet 文件物化为 DuckDB 物理表。
+
+        不再计算任何 color_excess / corrected_color_excess。
+        如配置需要，仅计算 BP-RP 的 color_err。
+        """
+
         abs_path = Path(file_path).resolve().as_posix()
+
         try:
-            if calc_custom_cols:
-                sql = f"""
-                    CREATE OR REPLACE TABLE {table_name} AS 
-                    SELECT *, 
-                    calc_corrected_color_excess(color_excess) AS corrected_color_excess,
-                    calc_corrected_color_excess_sigma(gmag) AS corrected_color_excess_sigma,
-                    calc_e_color(e_bpmag, e_rpmag) AS color_err 
-                    FROM read_parquet('{abs_path}')
-                    """
-                # 仅在首次注册时添加自定义列
-                self.con.execute(sql)
-                self.logger.debug(f"🧪 [Compute] 已物化物理表(含自定义列): {table_name}")
-            else:
-                self.con.execute(
-                    f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{abs_path}')"
-                )
+            # ---------------------------------------------------------
+            # 读取源 Parquet 的真实字段
+            # ---------------------------------------------------------
+            schema_df = self.con.execute(
+                f"""
+                DESCRIBE
+                SELECT *
+                FROM read_parquet('{abs_path}')
+                """
+            ).df()
+
+            cols = set(schema_df["column_name"].tolist())
+
+            select_exprs = ["*"]
+
+            # ---------------------------------------------------------
+            # 仅保留 color_err 计算
+            # ---------------------------------------------------------
+            if calc_color_err and "color_err" not in cols:
+
+                # Gaia Archive / Vizier 风格
+                if "e_BPmag" in cols and "e_RPmag" in cols:
+                    select_exprs.append(
+                        """
+                        calc_e_color(
+                            e_BPmag,
+                            e_RPmag
+                        ) AS color_err
+                        """
+                    )
+
+                # 已标准化的旧格式
+                elif "bpmag_err" in cols and "rpmag_err" in cols:
+                    select_exprs.append(
+                        """
+                        calc_e_color(
+                            bpmag_err,
+                            rpmag_err
+                        ) AS color_err
+                        """
+                    )
+
+                else:
+                    self.logger.warning(
+                        f"⚠️ [Registry] {table_name} 无法计算 color_err："
+                        f"缺少 BP/RP 星等误差字段"
+                    )
+
+            # ---------------------------------------------------------
+            # 建立 raw 物理表
+            # ---------------------------------------------------------
+            select_sql = ",\n".join(select_exprs)
+
+            sql = f"""
+                CREATE OR REPLACE TABLE {table_name} AS
+                SELECT
+                    {select_sql}
+                FROM read_parquet('{abs_path}')
+            """
+
+            self.con.execute(sql)
+
             count = self.get_row_count(table_name)
-            self.logger.info(f"📦 [Registry] 已物化物理表: {table_name} (行数: {count:,})")
-            self.logger.debug(f"📦 [Registry] 源文件: {abs_path}")
+
+            self.logger.info(
+                f"📦 [Registry] 已物化物理表: "
+                f"{table_name} (行数: {count:,})"
+            )
+
+            self.logger.debug(
+                f"📦 [Registry] 源文件: {abs_path}"
+            )
+
         except Exception as e:
-            self.logger.error(f"❌ [Registry] 物化物理表 {table_name} 失败: {e}")
+            self.logger.error(
+                f"❌ [Registry] 物化物理表 "
+                f"{table_name} 失败: {e}"
+            )
+            raise
 
     def init_master_table(self, table_name, df_base):
         """初始化 Master 状态宽表，包含基础观测列。"""

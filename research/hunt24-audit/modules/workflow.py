@@ -237,7 +237,7 @@ class AstroWorkflow:
         """执行可跨特征空间复用的数据准备：数据导入 + 星团实体 + 标准化。"""
         self.logger.info(f"📦 [Phase 1] 数据准备: {ctx.cluster_id}")
 
-        self.db.import_raw(target_cluster=ctx.cluster_id, force=False)
+        self.db.import_raw(target_cluster=ctx.cluster_id, force=True)
 
         ctx.star_cluster = StarCluster(
             ctx.cluster_id, db_instance=self.db, param_source=ctx.param_source
@@ -291,6 +291,11 @@ class AstroWorkflow:
             cfg.IDX_DR2IDX,
             cfg.IDX_IDS_SIMBAD,
         ]
+
+        bkg_idx = cl.get_param("BKG_IDX")
+        if bkg_idx:
+            ref_tables.append(bkg_idx)
+
         cluster_cfg = cfg.CLUSTERS[ctx.cluster_id.upper()].copy()
         cluster_cfg["id"] = ctx.cluster_id
 
@@ -327,9 +332,31 @@ class AstroWorkflow:
 
     # ── 特征工程 ──
 
-    # 场星查询列集：id + 坐标变换必需列 + HR图/天球分布所需观测列
-    _MIN_FIELD_COLS = {'id', 'ra', 'dec', 'pmra', 'pmdec', 'plx', 'rv',
-                       'mag', 'color', 'ruwe'}
+    # 场星查询列集：保持有序，新增观测列时可稳定传递到 Master。
+    # plx_err 是 Gaia 逐星视差 1σ 误差，必须贯穿 aln -> field -> Master -> audit/plot。
+    _MIN_FIELD_COLS = (
+        "id",
+        "ra",
+        "dec",
+        "pmra",
+        "pmdec",
+        "plx",
+        "plx_err",
+        "rv",
+        "mag",
+        "color",
+        "ruwe",
+        "fidelity_v2",
+    )
+
+    # 进入后续特征转换/GMM 前必须满足的基础质量门槛
+    _FIELD_REQUIRED_ASTROMETRY = ("ra", "dec", "plx", "pmra", "pmdec")
+    _FIELD_REQUIRED_INPUT_COLS = (
+        *_FIELD_REQUIRED_ASTROMETRY,
+        "plx_err",
+        "fidelity_v2",
+    )
+    _FIDELITY_MIN = 0.5
 
     def _load_and_transform_field(self, ctx: RunContext) -> pd.DataFrame:
         """加载靶场数据 → 特征转换 → NaN清洗。"""
@@ -348,12 +375,59 @@ class AstroWorkflow:
                     f"WHERE table_name = '{v_aln}'"
                 ).fetchall()
             }
+            # 基础 5D + plx_err + fidelity_v2 必须真实存在。
+            # plx_err 若在 aln 层丢失，会在源头立即报错。
+            required_input_cols = list(self._FIELD_REQUIRED_INPUT_COLS)
+            missing_required = [c for c in required_input_cols if c not in view_cols]
+            if missing_required:
+                raise KeyError(
+                    f"视图 [{v_aln}] 缺少场星质量筛选必需列: {missing_required}"
+                )
+
             cols = [c for c in self._MIN_FIELD_COLS if c in view_cols]
             cols_str = ', '.join(cols)
-            df_raw = self.db.query(f"SELECT {cols_str} FROM {v_aln}")
+
+            # 尽量在数据库层完成首轮清洗，避免把无效行读入内存：
+            #   1) 剔除 ra/dec/plx/pmra/pmdec 缺失的恒星
+            #   2) 剔除 fidelity_v2 缺失的恒星
+            #   3) 剔除 fidelity_v2 < 0.5 的恒星
+            where_terms = [
+                *(f"{c} IS NOT NULL" for c in self._FIELD_REQUIRED_ASTROMETRY),
+                "fidelity_v2 IS NOT NULL",
+                f"fidelity_v2 >= {self._FIDELITY_MIN}",
+            ]
+            where_sql = " AND ".join(where_terms)
+            df_raw = self.db.query(
+                f"SELECT {cols_str} FROM {v_aln} WHERE {where_sql}"
+            )
+
+            if "plx_err" not in df_raw.columns:
+                raise KeyError(
+                    f"❌ [Field] [{v_aln}] 查询后仍缺少 plx_err；"
+                    f"实际列: {df_raw.columns.tolist()}"
+                )
+
+            self.logger.info(
+                f"✅ [Field] plx_err 已读入 Target Field: "
+                f"non-null={int(df_raw['plx_err'].notna().sum())}/{len(df_raw)}"
+            )
+
+            # Pandas 层再做一次防御性过滤，以覆盖数据库中可能存在的 NaN。
+            quality_cols = [*self._FIELD_REQUIRED_ASTROMETRY, "fidelity_v2"]
+            n_before_guard = len(df_raw)
+            df_raw = df_raw.dropna(subset=quality_cols).copy()
+            df_raw = df_raw[df_raw["fidelity_v2"] >= self._FIDELITY_MIN].copy()
+            n_guard_dropped = n_before_guard - len(df_raw)
+            if n_guard_dropped > 0:
+                self.logger.warning(
+                    f"⚠️ [Field Quality Guard] Pandas 二次防御过滤额外剔除 "
+                    f"{n_guard_dropped} 颗。"
+                )
+
             self._field_cache[cache_key] = df_raw
             self.logger.info(
-                f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据: "
+                f"📋 [Process] 从视图 [{v_aln}] 读取目标天区数据（基础天体测量完整且 "
+                f"fidelity_v2 >= {self._FIDELITY_MIN}）: "
                 f"{len(df_raw)} 颗 ({len(df_raw.columns)} 列)"
             )
 
@@ -401,6 +475,27 @@ class AstroWorkflow:
         self.db.tag_master_table(ctx.state.master_table, df_tag)
 
         return df_clean
+
+    def _load_and_transform_background(self, ctx: RunContext) -> pd.DataFrame:
+        """从外接数据库/视图加载纯背景数据"""
+        bkg_idx = ctx.star_cluster.get_param("BKG_IDX")
+        if not bkg_idx:
+            return None # 如果没配置，则回退为默认行为
+            
+        cfg_source = self.manifest.get(bkg_idx, {})
+        v_aln = cfg_source.get("aln_view")
+        
+        # 通过 AstroDB 查询外接表/视图
+        df_raw = self.db.query(f"SELECT * FROM {v_aln}")
+        self.logger.info(f"📋 [Process] 从外接背景库 [{v_aln}] 读取背景星: {len(df_raw)} 颗")
+
+        # 特征转换与清洗（复用现有的网关函数）
+        df_ext = self._transform_and_bridge_features(
+            df_raw, ctx.feature_space, ctx.state.required_features, ctx.star_cluster
+        )
+        return self._defensive_nan_purge(
+            df_ext, ctx.state.required_features, label="External_Background"
+        )
 
     def _transform_and_bridge_features(
         self,
@@ -489,6 +584,110 @@ class AstroWorkflow:
 
         return df_clean
 
+    # ── Master 输入观测列自愈 ──
+
+    @staticmethod
+    def _duckdb_type_for_series(series: pd.Series) -> str:
+        """将 pandas dtype 映射为 DuckDB 类型，用于 Master 自动补列。"""
+        if pd.api.types.is_bool_dtype(series.dtype):
+            return "BOOLEAN"
+        if pd.api.types.is_integer_dtype(series.dtype):
+            return "BIGINT"
+        if pd.api.types.is_float_dtype(series.dtype):
+            return "DOUBLE"
+        if pd.api.types.is_datetime64_any_dtype(series.dtype):
+            return "TIMESTAMP"
+        return "VARCHAR"
+
+    @staticmethod
+    def _quote_ident(name: str) -> str:
+        """安全引用 DuckDB 标识符。"""
+        return '"' + str(name).replace('"', '""') + '"'
+
+    def _sync_master_observation_columns(
+        self,
+        master_name: str,
+        df_source: pd.DataFrame,
+    ) -> None:
+        """保证 Target Field 的基础观测列存在于 Master，并按 id 回填。
+
+        解决：
+        1. 历史 Master 早于新增字段创建；
+        2. init_master_table() 不升级旧表 schema；
+        3. 列存在但历史数据整列为 NULL。
+        """
+        if df_source is None or df_source.empty:
+            raise ValueError(
+                f"❌ [Master Sync] 输入 DataFrame 为空: {master_name}"
+            )
+
+        id_col = cfg.STD_COLS["ID"]
+        if id_col not in df_source.columns:
+            raise KeyError(
+                f"❌ [Master Sync] Target Field 缺少主键列: {id_col}"
+            )
+
+        if "plx_err" not in df_source.columns:
+            raise KeyError(
+                "❌ [Master Sync] df_target_final 缺少 plx_err；"
+                "数据在进入 Master 之前已经丢失。"
+            )
+
+        master_cols = {
+            row[0]
+            for row in self.db.con.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = ?",
+                [master_name],
+            ).fetchall()
+        }
+        if not master_cols:
+            raise RuntimeError(
+                f"❌ [Master Sync] Master 表不存在: {master_name}"
+            )
+
+        source_cols = [
+            c for c in self._MIN_FIELD_COLS
+            if c != id_col and c in df_source.columns
+        ]
+
+        # 1) 缺列自动补 schema
+        missing_cols = [c for c in source_cols if c not in master_cols]
+        for col in missing_cols:
+            sql_type = self._duckdb_type_for_series(df_source[col])
+            self.db.execute(
+                f"ALTER TABLE {self._quote_ident(master_name)} "
+                f"ADD COLUMN IF NOT EXISTS {self._quote_ident(col)} {sql_type}"
+            )
+            self.logger.info(
+                f"➕ [Master Sync] 自动补列: {master_name}.{col} ({sql_type})"
+            )
+
+        # 2) 按 id 回填全部基础观测字段
+        payload_cols = [id_col, *source_cols]
+        payload = df_source[payload_cols].copy()
+        self.db.tag_master_table(master_name, payload)
+
+        # 3) 硬校验 plx_err
+        check = self.db.con.execute(
+            f"SELECT COUNT(*) AS n_total, "
+            f"COUNT({self._quote_ident('plx_err')}) AS n_plx_err "
+            f"FROM {self._quote_ident(master_name)}"
+        ).fetchone()
+
+        n_total = int(check[0] or 0)
+        n_plx_err = int(check[1] or 0)
+
+        if n_plx_err == 0:
+            raise RuntimeError(
+                f"❌ [Master Sync] {master_name}.plx_err 已建列但没有任何有效值。"
+            )
+
+        self.logger.info(
+            f"✅ [Master Sync] plx_err 已写入 Master: "
+            f"{n_plx_err}/{n_total} 行非空"
+        )
+
     # ── GMM 成员识别 ──
 
     @astro_checkpoint(
@@ -497,32 +696,96 @@ class AstroWorkflow:
     )
     def _compute_members(self, ctx: RunContext) -> str | None:
         """统一的成员识别调度器。"""
+
         self.logger.info(
             f"📊 [Compute] 管线请求的特征空间: {ctx.state.required_features}"
         )
 
+        # ============================================================
+        # 1. 加载 Target Field
+        # ============================================================
         df_target_final = self._load_and_transform_field(ctx)
-        
-        # 正常建表（按 config 中的默认模板）
-        self.db.init_master_table(ctx.state.master_table, df_target_final)
-        
+
+        if df_target_final is None or df_target_final.empty:
+            raise ValueError("❌ [Compute] Target field 为空，无法初始化 Master 表")
+
+        # ============================================================
+        # 2. 必须先创建 Master Table
+        # ============================================================
+        self.db.init_master_table(
+            ctx.state.master_table,
+            df_target_final
+        )
+
+        # init_master_table() 不保证旧 Master 自动升级 schema。
+        # 在 seeds / GMM / audit 之前统一补列并按 id 回填。
+        self._sync_master_observation_columns(
+            ctx.state.master_table,
+            df_target_final,
+        )
+
+        self.logger.info(
+            f"✅ [Master] Master 表已初始化并完成观测列同步: "
+            f"{ctx.state.master_table}"
+        )
+
+        # ============================================================
+        # 3. 再加载 Seeds
+        #    _load_and_transform_seeds() 内部会向 Master 回写 raw_seed
+        # ============================================================
         df_seeds_final = self._load_and_transform_seeds(ctx)
 
-        use_experimental = ctx.state.gmm_config.get("use_experimental", False)
-        if not use_experimental:
-            df_res = self._run_stable_pipeline(ctx, df_target_final, df_seeds_final)
+        # ============================================================
+        # 4. 加载独立 Background
+        # ============================================================
+        df_bkg_final = self._load_and_transform_background(ctx)
+
+        if df_bkg_final is not None:
+            self.logger.info(
+                f"✅ [Background] 独立背景星加载完成: {len(df_bkg_final)} 颗"
+            )
         else:
-            df_res = self._run_experimental_pipeline(
-                ctx, df_target_final, df_seeds_final
+            self.logger.info(
+                "ℹ️ [Background] 当前星团未配置独立背景样本"
             )
 
+        # ============================================================
+        # 5. 根据配置选择算法轨
+        # ============================================================
+        use_experimental = ctx.state.gmm_config.get(
+            "use_experimental",
+            False
+        )
+
+        if not use_experimental:
+            df_res = self._run_stable_pipeline(
+                ctx,
+                df_target_final,
+                df_seeds_final
+            )
+        else:
+            df_res = self._run_experimental_pipeline(
+                ctx,
+                df_target_final,
+                df_seeds_final,
+                df_bkg_final
+            )
+
+        # ============================================================
+        # 6. 检查算法结果
+        # ============================================================
         if df_res is None or df_res.empty:
-            raise ValueError("❌ [Compute] 算法内核异常：结果 DataFrame 为空！")
+            raise ValueError(
+                "❌ [Compute] 算法内核异常：结果 DataFrame 为空！"
+            )
 
-        self.logger.info("📥 [Compute] 正在将概率结果同步至 Master 表...")
+        self.logger.info(
+            "📥 [Compute] 正在将概率结果同步至 Master 表..."
+        )
 
-        # 💥 核心防线：在回写前，强制向数据库表追加这两个浮点数列
-        # 这保证了数据一定能写进物理表（即便它们会被排在最后面）
+        # ============================================================
+        # 7. 为算法结果追加必要列
+        # ============================================================
         for new_col in ("p_cl_raw", "p_tail_raw"):
             if new_col in df_res.columns:
                 try:
@@ -531,16 +794,31 @@ class AstroWorkflow:
                         f"ADD COLUMN IF NOT EXISTS {new_col} DOUBLE PRECISION"
                     )
                 except Exception as e:
-                    self.logger.warning(f"⚠️ 无法创建列 {new_col}: {str(e)}")
+                    self.logger.warning(
+                        f"⚠️ 无法创建列 {new_col}: {str(e)}"
+                    )
 
-        # 组装并执行回写
+        # ============================================================
+        # 8. 回写结果
+        # ============================================================
         update_cols = [cfg.STD_COLS["ID"], "prob"]
-        for extra in ("core_prob", "p_cl_raw", "tail_prob", "p_tail_raw", "source"):
+
+        for extra in (
+            "core_prob",
+            "p_cl_raw",
+            "tail_prob",
+            "p_tail_raw",
+            "source",
+        ):
             if extra in df_res.columns:
                 update_cols.append(extra)
-                
+
         updates = df_res[update_cols].copy()
-        self.db.tag_master_table(ctx.state.master_table, updates)
+
+        self.db.tag_master_table(
+            ctx.state.master_table,
+            updates
+        )
 
         return ctx.state.master_table
 
@@ -562,7 +840,7 @@ class AstroWorkflow:
         return engine.predict(df_target_final, model_params)
 
     def _run_experimental_pipeline(
-        self, ctx: RunContext, df_all: pd.DataFrame, df_seeds: pd.DataFrame
+        self, ctx: RunContext, df_all: pd.DataFrame, df_seeds: pd.DataFrame, df_background: pd.DataFrame = None
     ) -> pd.DataFrame:
         """实验新轨：Core 核心识别 + Spatial Tube 潮汐尾捕捉 + 分层互斥决策融合。"""
         strategy_name = ctx.algo_params.get("strategy", "bayesian")
@@ -591,6 +869,53 @@ class AstroWorkflow:
             seed_field_df=df_seeds,
             features=ctx.state.required_features,
         )
+
+        # =========================================================
+        # 🚀 新增：基于物理先验的 HDBSCAN 目标簇消歧拦截
+        # =========================================================
+        if hasattr(extractor, "df_labeled_") and extractor.df_labeled_ is not None:
+            cl = ctx.star_cluster
+            # 从星团上下文读取物理先验（兼容赤道与银道命名系）
+            plx_ref = cl.get_param("PLX_REF")
+            pmra_ref = cl.get_param("PMRA_REF", cl.get_param("PM_L_COSB_REF"))
+            pmdec_ref = cl.get_param("PMDEC_REF", cl.get_param("PM_B_REF"))
+            
+            if all(v is not None for v in [plx_ref, pmra_ref, pmdec_ref]):
+                df_labeled = extractor.df_labeled_
+                valid_clusters = df_labeled[df_labeled['cluster_label'] >= 0]
+                
+                if not valid_clusters.empty:
+                    # 动态探测动力学列名
+                    cols_map = {c.lower(): c for c in valid_clusters.columns}
+                    pm_x_col = next((cols_map[k] for k in ["pmra", "pm_ra", "pm_l_cosb"] if k in cols_map), None)
+                    pm_y_col = next((cols_map[k] for k in ["pmdec", "pm_dec", "pm_b"] if k in cols_map), None)
+                    plx_col = next((cols_map[k] for k in ["plx", "parallax"] if k in cols_map), None)
+                    
+                    if pm_x_col and pm_y_col and plx_col:
+                        self.logger.info(
+                            f"🔍 [Cluster Disambiguation] 启动物理先验匹配... "
+                            f"先验目标: PLX={plx_ref:.2f}, PM_X={pmra_ref:.2f}, PM_Y={pmdec_ref:.2f}"
+                        )
+                        
+                        prior_vec = np.array([pmra_ref, pmdec_ref, plx_ref])
+                        cluster_centroids = valid_clusters.groupby('cluster_label')[[pm_x_col, pm_y_col, plx_col]].median()
+                        
+                        # 使用特征标准差计算马氏/加权距离，消除绝对量级差异
+                        feats_std = valid_clusters[[pm_x_col, pm_y_col, plx_col]].std().values
+                        feats_std = np.where(feats_std == 0, 1e-6, feats_std)
+                        
+                        distances = np.linalg.norm((cluster_centroids.values - prior_vec) / feats_std, axis=1)
+                        best_idx = np.argmin(distances)
+                        target_label = cluster_centroids.index[best_idx]
+                        
+                        self.logger.info(
+                            f"🎯 [Cluster Disambiguation] 锁定最优匹配簇 Label: {target_label} "
+                            f"(距先验标准化距离: {distances[best_idx]:.4f})"
+                        )
+                        
+                        # 覆写提取结果，抛弃默认按数量最多的背景误判簇
+                        df_seeds_core = valid_clusters[valid_clusters['cluster_label'] == target_label].copy()
+        # =========================================================
 
         if df_seeds_core is None or df_seeds_core.empty:
             raise ValueError("❌ [Compute] ClusterSeedExtractor 未能凝聚出有效种子星！")
@@ -669,9 +994,25 @@ class AstroWorkflow:
         # ---------------------------------------------------------
         self.logger.info("🎯 [Channel A] 启动星团 Core 核心区域抓取...")
         df_res_core = engine.fit_predict(
-            df_all, df_seeds_core, ctx.state.required_features
+            df_all, df_seeds_core, ctx.state.required_features, df_background=df_background
         )
         prob_col = cfg.STD_COLS["PROB"]
+
+        # =========================================================
+        # 🚀 新增：在此处执行短接，直接返回核心结果，跳过后续通道 B
+        # =========================================================
+        self.logger.info("⏩ [Manual Skip] 已手动跳过 Tidal Tail 阶段，仅返回 Core 结果。")
+        
+        # 补齐下游及回写 Master 表所必需的字段，防止报错
+        df_res_core["core_prob"] = df_res_core[prob_col]
+        df_res_core["tail_prob"] = 0.0
+        df_res_core["source"] = "core"
+        
+        if "p_cl_raw" not in df_res_core.columns:
+            df_res_core["p_cl_raw"] = 0.0
+        df_res_core["p_tail_raw"] = 0.0
+        
+        return df_res_core
 
         # ---------------------------------------------------------
         # 4. 通道 B：构建类内空间管，抓取 Tidal Tail / 弥散外围成员
@@ -1311,46 +1652,62 @@ class AstroWorkflow:
             f"SELECT * FROM {ctx.state.master_table} WHERE {col_x} = 'Matched'",
         )
 
+        # 🌟 修改点 1：新增一个包含以上三者的合并视图，用于一次性 pyUPMASK 验证
+        v_audit_combined = f"v_tmp_audit_combined_{ctx.state.master_table}"
+        self.db.register_view_from_sql(
+            v_audit_combined,
+            f"SELECT * FROM {ctx.state.master_table} WHERE {col_x} IS NOT NULL",
+        )
+
         return {
             "status": "success",
             "v_audit_pg_only": v_audit_pg_only,
             "v_audit_ref_only": v_audit_ref_only,
             "v_audit_matched": v_audit_matched,
+            "v_audit_combined": v_audit_combined,  # 👈 返回合并视图
             "stats": stats_cross,
         }
-
+    
     # ── [B+C+D] 物理审计 + 文献审计 + 融合决策 ──
 
     def _audit_xmatch_subsets(self, ctx: RunContext, cross_result: dict) -> dict:
-        """对三个原子子集（PG Only / Ref Only / Matched）分别执行 [B]物理 + [C]文献 + [D]融合 审计。
-
-        组合集（Category = Matched+Ref Only, PG Algo = Matched+PG Only）
-        通过简单相加原子子集的 deep_stats 获得，避免重复运行 Validator。
-        """
+        """对全量候选星（PG Only / Ref Only / Matched）执行一次性的合并审计，然后拆分统计。"""
         audit_stats = {}
-        for subset_type, label in [("pg_only", "PG Only"), ("ref_only", "Ref Only"),
-                                    ("matched", "Matched")]:
-            view = cross_result.get(f"v_audit_{subset_type}")
-            count = cross_result.get("stats", {}).get(label, 0)
-            if view and count > 0:
-                v_result, stats = self._run_phys_lit_fusion(ctx, view, subset_type)
-                audit_stats[f"deep_stats_{subset_type}"] = stats
-            else:
-                self.logger.warning(f"⚠️ [Audit] 无 {label} 候选，跳过审计。")
+        v_combined = cross_result.get("v_audit_combined")
 
-        # ── 组合集：通过原子子集相加获得 ──
+        if not v_combined:
+            self.logger.warning("⚠️ [Audit] 无有效候选星，跳过审计。")
+            return audit_stats
+
+        # 🌟 修改点 2：对三个子集的并集，执行一次性物理(pyUPMASK)和文献审计
+        self.logger.info("🌟 [Audit] 将 Matched, PG Only, Ref Only 合并，执行一次性全局验证...")
+        v_report, combined_stats = self._run_phys_lit_fusion(ctx, v_combined, "combined")
+
+        # 🌟 修改点 3：验证结果已经统一写回 Master 表，现在按子集将统计结果拆分开来，供下游报告使用
+        col_x = cfg.MASTER_COLS["X_MATCH"]
+        for subset_type, label in [("pg_only", "PG Only"), ("ref_only", "Ref Only"), ("matched", "Matched")]:
+            sql = (
+                f"SELECT audit_status, count(*) FROM {ctx.state.master_table} "
+                f"WHERE audit_status IS NOT NULL AND {col_x} = '{label}' "
+                f"GROUP BY audit_status"
+            )
+            stats = dict(self.db.con.execute(sql).fetchall())
+            if stats:
+                audit_stats[f"deep_stats_{subset_type}"] = stats
+
+        # ── 组合集：通过原子子集相加获得 (保持原有逻辑不变) ──
         deep_pg = audit_stats.get("deep_stats_pg_only", {})
         deep_ref = audit_stats.get("deep_stats_ref_only", {})
         deep_matched = audit_stats.get("deep_stats_matched", {})
         all_keys = {"Confirmed Member", "New Candidate", "Literature Only", "Contamination"}
 
-        if deep_matched and deep_ref:
+        if deep_matched or deep_ref:
             cat = ctx.category
             audit_stats[f"deep_stats_{cat}"] = {
                 k: deep_matched.get(k, 0) + deep_ref.get(k, 0)
                 for k in all_keys
             }
-        if deep_matched and deep_pg:
+        if deep_matched or deep_pg:
             audit_stats["deep_stats_pg_algo"] = {
                 k: deep_matched.get(k, 0) + deep_pg.get(k, 0)
                 for k in all_keys

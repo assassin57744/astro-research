@@ -40,6 +40,7 @@ GAIA_PWD  = os.getenv("GAIA_PWD")
 THRESHOLD_BASE = 0.5
 THRESHOLD_HIGH_CONF = 0.5      # 高置信成员星判定门限
 THRESHOLD_GOLDEN = 0.8
+ASTROMETRIC_FIDELITY_MIN = 0.5   # Gaia astrometric fidelity: 低于该值或缺失者不参与后续计算
 
 # 1. 机器学习/概率拟合模块的分界线（用于 Phase 2/3 分类硬门限）
 THRESHOLD_MEMBERSHIP_PROB = 0.5  # 成员概率 P >= 50% 记为 Candidate
@@ -168,12 +169,22 @@ class TMPL:
 # =================================================================
 # 4.1 核心字段与种子集 ID
 IDX_FIELD_CLUSTER_M45      , IDX_FIELD_CLUSTER_M45_SEEDS      = "m45_field"    , "m45_seeds_field"
+IDX_FIELD_CLUSTER_M45_BKG  = "m45_background"
+
 IDX_FIELD_CLUSTER_M44      , IDX_FIELD_CLUSTER_M44_SEEDS      = "m44_field"    , "m44_seeds_field"
+IDX_FIELD_CLUSTER_M44_BKG  = "m44_background"
+
 IDX_FIELD_CLUSTER_MEL25    , IDX_FIELD_CLUSTER_MEL25_SEEDS    = "mel25_field"  , "mel25_seeds_field"
 IDX_FIELD_CLUSTER_MEL111   , IDX_FIELD_CLUSTER_MEL111_SEEDS   = "mel111_field" , "mel111_seeds_field"
+
 IDX_FIELD_CLUSTER_M67      , IDX_FIELD_CLUSTER_M67_SEEDS      = "m67_field"    , "m67_seeds_field"
+IDX_FIELD_CLUSTER_M67_BKG  = "m67_background"
+
 IDX_FIELD_CLUSTER_M13      , IDX_FIELD_CLUSTER_M13_SEEDS      = "m13_field"    , "m13_seeds_field"
+IDX_FIELD_CLUSTER_M13_BKG = "m13_background"
+
 IDX_FIELD_CLUSTER_M41      , IDX_FIELD_CLUSTER_M41_SEEDS      = "m41_field"    , "m41_seeds_field"
+IDX_FIELD_CLUSTER_M41_BKG  = "m41_background"
 
 # 4.2 参考文献星表 ID
 IDX_CG20 = "cg20"
@@ -195,6 +206,7 @@ CLUSTERS = {
     "M45": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M45,
         "SEED_IDX": IDX_FIELD_CLUSTER_M45_SEEDS,
+        "BKG_IDX": IDX_FIELD_CLUSTER_M45_BKG,
         "NAME": "Pleiades",
         "SIMBAD_NAME": "Cl Melotte 22",
         "ID_NAME": "melotte_22",
@@ -205,7 +217,7 @@ CLUSTERS = {
         # ↓ source ↓ : 基于hunt24的星团成员的均值
         # "CENTER_RA": 56.61398997432307, "CENTER_DEC": 24.09029596042996, "RADIUS": 17.78,
         # ↓ source ↓ : https://simbad.cds.unistra.fr/simbad/sim-basic?Ident=melotte_22&submit=SIMBAD+search
-        "CENTER_RA": 56.60, "CENTER_DEC": 24.11, "RADIUS": 17.78, 
+        "CENTER_RA": 56.60, "CENTER_DEC": 24.93, "RADIUS": 17.78, 
         "RA_MIN": 44.0, "RA_MAX": 66.0, "DEC_MIN": 16.0, "DEC_MAX": 36.0, 
         "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.3,  # 单位：pc
@@ -243,9 +255,9 @@ CLUSTERS = {
         "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag)
         "KINE_SCORE_LIMIT": 2.0, # 动力学硬门槛     # TODO: 可以细化到分pm, plx, cmd, rv
         # 🌟 核心算法参数 - 种子区域截断范围
-        "SEED_RADIUS": 5.0, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)
+        "SEED_RADIUS": 3.5, # 单位：deg, 源星种子搜索半径(第一次实验取值:2.0, 第二次实验取值:1.2)
         "SEED_PLX_LIM": 4.0,# 单位：mas, 源星种子搜索视差容忍度(第一次实验取值:1.5, 第二次实验取值:0.5)
-        "SEED_MAX_MAG": 19.5, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
+        "SEED_MAX_MAG": 18, # 源星种子搜索最大亮度限制(第一次实验取值:18.0, 第二次实验取值:15.0)
         "SEED_MAX_RUWE": 1.4,
         "UPMASK_ITERATIONS": 25,
         "UPMASK_MAX_CLUSTERS": 25,
@@ -258,6 +270,10 @@ CLUSTERS = {
         "enable_subsampling": False,              # M45 860 万场星，降采样加速
         "DBSCAN_EPS": "auto", #0.3,                    # 🌟 开启全自动自适应调参
         "DBSCAN_MIN_SAMPLES": 20,
+        "CLUSTER_ALGO": "hdbscan",
+        "hdbscan_min_cluster_size": 20,
+        "hdbscan_min_samples": 20,          # 提高门限，使种子核心更凝聚，减少杂质
+
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
@@ -284,14 +300,15 @@ CLUSTERS = {
     "M44": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M44,
         "SEED_IDX": IDX_FIELD_CLUSTER_M44_SEEDS,
+        "BKG_IDX": IDX_FIELD_CLUSTER_M44_BKG,
         "NAME": "Praesepe",
         "ID_NAME": "Melotte_88",
         "CAT_NAME": "NGC_2632",
         "SIMBAD_NAME": "Cl Melotte 88",
         "ISO_FILE": "praesepe_700myr.dat",
-        "CENTER_RA": 130.1, "CENTER_DEC": 19.7, "RADIUS": 11.90,
+        "CENTER_RA": 130.06, "CENTER_DEC": 19.62, "RADIUS": 11.90,
         "RA_MIN": 120.0, "RA_MAX": 140.0, "DEC_MIN": 10.0, "DEC_MAX": 30.0, "MAX_MAG": 21.0,
-        "CORE_RADIUS": 0.8,  # 单位：pc
+        "CORE_RADIUS": 2.76,  # 单位：pc
         "HALF_MASS_RADIUS": 3.9,  # 单位：pc
         "R_HALF_LIGHT": 3.5,  # 单位：pc
         "TIDAL_RADIUS": 12.0,  # 单位：pc
@@ -300,12 +317,12 @@ CLUSTERS = {
         "TUBE_LENGTH_MULTIPLIER": 1.6,  # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_WIDTH_MULTIPLIER": 1.0,   # 蜂巢星团较近，但外围扩散尺度不同，按需调整
         "TUBE_SIGMA_CLIP": 5.0,  # 空间管后 Mahalanobis 运动学截断 (σ²阈值): 保留 MD² ≤ σ² 的星
-        "DISTANCE_PC": 187.0,
+        "DISTANCE_PC": 182.0,
         "DISTANCE_MODULUS": 6.36,
         "EXT_AG": 0.05,
         "E_BP_RP": 0.03,  # 补齐色余
-        "PLX_REF": 5.35, "PMRA_REF": -36.0, "PMDEC_REF": -12.9,
-        "PMRA_DISPERSION": 1.5, "PMDEC_DISPERSION": 1.2, # 自行空间分散度 (mas/yr), 非 3d_v/6d_p 模式下生效
+        "PLX_REF": 5.35, "PMRA_REF": -35.9, "PMDEC_REF": -12.9,
+        "PMRA_DISPERSION": 7.7, "PMDEC_DISPERSION": 0.7, # 自行空间分散度 (mas/yr), 非 3d_v/6d_p 模式下生效
         "RV_REF": 35.0,
         "UVW_REF": np.array([-34.5, -21.2, -6.8]),
         "V_ERROR": 2.0,
@@ -314,18 +331,20 @@ CLUSTERS = {
         "PM_RADIUS": 4.0,  # 自行半径容忍度 (mas/yr)
         "PLX_ERROR": 0.4,  # 视差误差/弥散容忍度 (mas)
         "CMD_DEV": 0.6,  # CMD 偏离容忍度 (mag)
-        "SEED_RADIUS": 5.0,
-        "SEED_PLX_LIM": 1.9,
-        "SEED_MAX_MAG": 19.5,
+        "SEED_RADIUS": 3.5,
+        "SEED_PLX_LIM": 3.5,
+        "SEED_MAX_MAG": 18,
         "SEED_MAX_RUWE": 1.4,
-        "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2,
+        "UPMASK_ITERATIONS": 25,
+        "UPMASK_MAX_CLUSTERS": 25,
         # 🌟 核心算法路由策略集成
         "DISAMBIGUATION_MODE": "bayesian_gmm",   # 中年星团，银盘背景复杂，引入对抗
         "SUBSTRUCTURE_MODE": "dual_comp",        # 解剖 Core + 整体 潮汐尾
-        "CLUSTER_ALGO": "dbscan",
+        "CLUSTER_ALGO": "hdbscan",
         "DBSCAN_MIN_SAMPLES": 20,
         "DBSCAN_EPS": "auto",                    # 🌟 开启全自动自适应调参
+        "hdbscan_min_cluster_size": 80,
+        "hdbscan_min_samples": 80,          # 提高门限，使种子核心更凝聚，减少杂质
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
@@ -416,13 +435,14 @@ CLUSTERS = {
     "M67": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M67,
         "SEED_IDX": IDX_FIELD_CLUSTER_M67_SEEDS,
+        "BKG_IDX": IDX_FIELD_CLUSTER_M67_BKG,
         "NAME": "M67",
         "ID_NAME": "ngc_2682",
         "CAT_NAME": "NGC_2682",
         "SIMBAD_NAME": "M 67",
         "ISO_FILE": "m67_4000myr.dat",
         "DIM_MODE": "5d_h",
-        "CENTER_RA": 132.8452564476688, "CENTER_DEC": 11.826338504396249, "RADIUS": 2.5,
+        "CENTER_RA": 132.85501025916, "CENTER_DEC": 11.81266768536	, "RADIUS": 2.5,
         "RA_MIN": 128.0, "RA_MAX": 138.0, "DEC_MIN": 7.0, "DEC_MAX": 17.0, "MAX_MAG": 21.0,
         "CORE_RADIUS": 1.2,  # 单位：pc
         "HALF_MASS_RADIUS": 4.5,
@@ -431,13 +451,13 @@ CLUSTERS = {
         "TUBE_LENGTH": 5.0,   # 老年银河星团，距离较远，天球视尺度较小
         "TUBE_WIDTH": 1.0,
         "TUBE_SIGMA_CLIP": 5.0,  # Mahalanobis 运动学截断 (σ²)
-        "DISTANCE_PC": 868.7818642069942,
+        "DISTANCE_PC": 873,
         "DISTANCE_MODULUS": 9.65,
         "EXT_AG": 0.10,
         "E_BP_RP": 0.05,
         "PLX_REF": 1.15179175, 
-        "PMRA_REF": -10.97335,
-        "PMDEC_REF": -2.9160399999999997,
+        "PMRA_REF": -10.9686151169157835,
+        "PMDEC_REF": -2.9193934043060934,
         "PMRA_DISPERSION": 0.16036244105151307,
         "PMDEC_DISPERSION": 0.1593615336271586,
         "RV_REF": 33.7,
@@ -448,23 +468,24 @@ CLUSTERS = {
         "PM_RADIUS": 1.5,  # 远距离星团自行弥散极小
         "PLX_ERROR": 0.2,  # 视差容忍度收紧
         "CMD_DEV": 0.6,
-        "SEED_RADIUS": 2.5,       # 继续扩大以包含更多外围种子
-        "SEED_PLX_LIM": 1.2,       # 放宽视差限制以找回更多潜在种子
-        "SEED_MAX_MAG": 22.0,
+        "SEED_RADIUS": 1.5,       # 继续扩大以包含更多外围种子
+        "SEED_PLX_LIM": 0.9,       # 放宽视差限制以找回更多潜在种子
+        "SEED_MAX_MAG": 18.0,
         "SEED_MAX_RUWE": 1.4,
-        "SEED_PM_LIM": 10.0,      # 放宽自行限制以捕获更多外围种子 
-        "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2,
+        "UPMASK_ITERATIONS": 25,
+        "UPMASK_MAX_CLUSTERS": 25,
         # 🌟 核心算法路由策略集成
         "DISAMBIGUATION_MODE": "bayesian_gmm",   # 老疏散星团，强噪声对抗
         "SUBSTRUCTURE_MODE": "dual_comp",        # 守护并剥离长期演化遗留的潮汐尾
-        "CLUSTER_ALGO": "dbscan",
+        "CLUSTER_ALGO": "hdbscan",
         "DBSCAN_EPS": "auto",                    
         "DBSCAN_MIN_SAMPLES": 20,
-        "MEMBER_THRESHOLD": 0.6,                 # 略微收紧门槛以压制银盘野星
+        "hdbscan_min_cluster_size": 20,
+        "hdbscan_min_samples": 20,          # 提高门限，使种子核心更凝聚，减少杂质
+        "MEMBER_THRESHOLD": 0.5,                 # 略微收紧门槛以压制银盘野星
         "SEED_FROM_LITERATURE": True,            # 使用文献种子集作为初始种子
         "LIT_SEED_IDX": "cg20",                  # 使用 CG20 文献种子集作为初始种子  
-        "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
+        "STRATEGY": "bayesian",  
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -489,46 +510,75 @@ CLUSTERS = {
         "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
      
     },
-    # "M13": {
-    #     "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
-    #     "SEED_IDX": IDX_FIELD_CLUSTER_M13_SEEDS,
-    #     "NAME": "M13",
-    #     "ID_NAME": "ngc_6205",
-    #     "CAT_NAME": "NGC_6205",
-    #     "ISO_FILE": "m13_12gyr.dat",
-    #     "DIM_MODE": "2d",
-    #     "CENTER_RA": 250.42, "CENTER_DEC": 36.46, "RADIUS": 3.28,
-    #     "RA_MIN": 248.0, "RA_MAX": 253.0, "DEC_MIN": 34.5, "DEC_MAX": 38.5, "MAX_MAG": 21.0,
-    #     "CORE_RADIUS": 1.3,  # 单位：pc (核心致密)
-    #     "HALF_MASS_RADIUS": 3.5,  # 单位：pc
-    #     "half_light_radius": 3.2,
-    #     "TIDAL_RADIUS": 43.0,  # 球状星团的潮汐半径通常较大
-    #     "DISTANCE_PC": 7100.0,
-    #     "DISTANCE_MODULUS": 14.25,
-    #     "EXT_AG": 0.04,
-    #     "E_BP_RP": 0.02,
-    #     "PLX_REF": 0.14, "PMRA_REF": -3.18, "PMDEC_REF": -2.57,
-    #     "RV_REF": -244.2,
-    #     "UVW_REF": np.array([58.0, -241.0, 10.0]),  # 银晕轨道的典型运动学
-    #     "V_ERROR": 10.0, # 球状星团内部速度弥散度极高
-    #     "RV_ERROR": 10.0,
-    #     "KINE_SCORE_LIMIT": 2.5,
-    #     "PM_RADIUS": 1.0,  # 远距离天体自行离散度极小
-    #     "PLX_ERROR": 0.1,  # 视差门限需非常严苛
-    #     "CMD_DEV": 0.4,  # 球状星团主序带极其狭窄
-    #     "SEED_RADIUS": 0.8, "SEED_PLX_LIM": 0.5,
-    #     "SEED_MAX_MAG": 20.5,
-    #     "SEED_MAX_RUWE": 1.4,
-    #     "SEED_PM_LIM": 2.0,
-    #     "UPMASK_ITERATIONS": 20,
-    #     "UPMASK_MAX_CLUSTERS": 2,
-    #     # 🌟 核心算法路由策略集成
-    #     "DISAMBIGUATION_MODE": "blind_gmm",      # 球状星团，恒星资产丰厚，直接自适应盲跑
-    #     "SUBSTRUCTURE_MODE": "triple_comp",      # 精细解剖核心、前导尾与后随尾
-    # },
+    "M13": {
+        "FIELD_IDX": IDX_FIELD_CLUSTER_M13,
+        "SEED_IDX": IDX_FIELD_CLUSTER_M13_SEEDS,
+        "BKG_IDX": IDX_FIELD_CLUSTER_M13_BKG,
+        "NAME": "M13",
+        "ID_NAME": "ngc_6205",
+        "CAT_NAME": "NGC_6205",
+        "ISO_FILE": "m13_12gyr.dat",
+        "DIM_MODE": "5d_h",
+        "CENTER_RA": 250.42, "CENTER_DEC": 36.46, "RADIUS": 3.28,
+        "RA_MIN": 248.0, "RA_MAX": 253.0, "DEC_MIN": 34.5, "DEC_MAX": 38.5, "MAX_MAG": 21.0,
+        "CORE_RADIUS": 1.75,  # 单位：pc (核心致密)
+        "HALF_MASS_RADIUS": 3.5,  # 单位：pc
+        "half_light_radius": 3.2,
+        "TIDAL_RADIUS": 43.0,  # 球状星团的潮汐半径通常较大
+        "DISTANCE_PC": 7420.0,
+        "DISTANCE_MODULUS": 14.25,
+        "EXT_AG": 0.04,
+        "E_BP_RP": 0.02,
+        "PLX_REF": 0.14, "PMRA_REF": -3.18, "PMDEC_REF": -2.57,
+        "RV_REF": -244.2,
+        "UVW_REF": np.array([58.0, -241.0, 10.0]),  # 银晕轨道的典型运动学
+        "V_ERROR": 10.0, # 球状星团内部速度弥散度极高
+        "RV_ERROR": 10.0,
+        "KINE_SCORE_LIMIT": 2.5,
+        "PM_RADIUS": 1.0,  # 远距离天体自行离散度极小
+        "PLX_ERROR": 0.1,  # 视差门限需非常严苛
+        "CMD_DEV": 0.4,  # 球状星团主序带极其狭窄
+        "SEED_RADIUS": 0.5, "SEED_PLX_LIM": 0.3,
+        "SEED_MAX_MAG": 19.0,
+        "SEED_MAX_RUWE": 1.4,
+        "UPMASK_ITERATIONS": 25,
+        "UPMASK_MAX_CLUSTERS": 25,
+        "CLUSTER_ALGO": "hdbscan",
+        "DBSCAN_EPS": "auto",                    
+        "DBSCAN_MIN_SAMPLES": 20,
+        "hdbscan_min_cluster_size": 10,
+        "hdbscan_min_samples": 6,
+        "MEMBER_THRESHOLD": 0.5,
+        # 🌟 核心算法路由策略集成
+        "STRATEGY": "bayesian",  
+        "STRATEGY_PARAMS": {
+            # 1. 对应 ThresholdGmmDisambiguation 
+            # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
+            "threshold": {
+                "sigma_cutoff": 4.5,  
+            },
+            
+            # 2. 对应 BlindGmmDisambiguation
+            # 🌟 扁平化注入：等价于 BlindGmmDisambiguation(n_components=4, covariance_type="full", default_roi=5.0)
+            "blind": {
+                "n_components": 4,
+                "covariance_type": "full",
+                "default_roi": 5.0
+            },
+            
+            # 3. 对应 BayesianGmmDisambiguation (若你有类似的参数声明)
+            "bayesian": {
+                "eps": "auto",
+                "min_samples": 4
+            }
+        },
+        "MEMBER_THRESHOLD": 0.5,                 # 阶段一贝叶斯切分门槛
+    },
+
     "M41": {
         "FIELD_IDX": IDX_FIELD_CLUSTER_M41,
         "SEED_IDX": IDX_FIELD_CLUSTER_M41_SEEDS,
+        "BKG_IDX": IDX_FIELD_CLUSTER_M41_BKG,
         "NAME": "M41",
         "ID_NAME": "ngc_2287",
         "CAT_NAME": "NGC_2287",
@@ -543,7 +593,7 @@ CLUSTERS = {
         "TUBE_LENGTH": 3.0,
         "TUBE_WIDTH": 1.0,
         "TUBE_SIGMA_CLIP": 5.0,  # Mahalanobis 运动学截断
-        "DISTANCE_PC": 736.2945224042926,
+        "DISTANCE_PC": 678.0,
         "DISTANCE_MODULUS": 9.25,
         "EXT_AG": 0.05,  # 消光较低
         "E_BP_RP": 0.03,
@@ -558,19 +608,23 @@ CLUSTERS = {
         "PM_RADIUS": 2.0,  # 较远星团，自行散布较小
         "PLX_ERROR": 0.3,
         "CMD_DEV": 0.6,
-        "SEED_RADIUS": 1.5,
+        "SEED_RADIUS": 0.8,
         "SEED_PLX_LIM": 0.6,  # PLX_ERROR * 3
-        "SEED_MAX_MAG": 19.5,
+        "SEED_MAX_MAG": 19,
         "SEED_MAX_RUWE": 1.4,
-        "UPMASK_ITERATIONS": 20,
-        "UPMASK_MAX_CLUSTERS": 2,
+        "UPMASK_ITERATIONS": 25,
+        "UPMASK_MAX_CLUSTERS": 25,
         # 🌟 核心算法路由策略集成
-        "DISAMBIGUATION_MODE": "threshold_gmm",   # 老疏散星团，强噪声对抗
+        "DISAMBIGUATION_MODE": "bayesian_gmm",   # 老疏散星团，强噪声对抗
         "SUBSTRUCTURE_MODE": "identity",        # 守护并剥离长期演化遗留的潮汐尾
-        "MEMBER_THRESHOLD": 3.0,                 # 略微收紧门槛以压制银盘野星
         "STRATEGY": "bayesian",  # 🌟 当前激活策略：卡方截断
-        "DBSCAN_EPS": "auto",                     
         "DBSCAN_MIN_SAMPLES": 20,
+        "CLUSTER_ALGO": "hdbscan",
+        "DBSCAN_EPS": "auto",                    
+        "DBSCAN_MIN_SAMPLES": 20,
+        "hdbscan_min_cluster_size": 20,
+        "hdbscan_min_samples": 20,          # 提高门限，使种子核心更凝聚，减少杂质
+
         "STRATEGY_PARAMS": {
             # 1. 对应 ThresholdGmmDisambiguation 
             # 🌟 扁平化注入：解包后等价于 ThresholdGmmDisambiguation(sigma_cutoff=4.5)
@@ -607,16 +661,20 @@ FIELDS_VIZIER = {
     "dec": "DE_ICRS",
     "pmra": "pmRA",
     "pmdec": "pmDE",
+    "pmra_err": "e_pmRA",
+    "pmde_err": "e_pmDE",
     "plx": "Plx",
     "plx_err": "e_Plx",
     "mag": "Gmag",
     "color": "BP-RP",
     "ruwe": "RUWE",
     "rv": "RV",
+    # Rybizki et al. astrometric fidelity；所有目标星团/背景样本统一要求该列
+    "fidelity_v2": "fidelity_v2",
 }
 
 FIELDS_GAIA_ARCHIVE = {
-    "id": "source",
+    "id": "Source",
     "ra": "RA_ICRS",
     "dec": "DE_ICRS",
     "ra_err": "e_RA_ICRS",
@@ -633,18 +691,72 @@ FIELDS_GAIA_ARCHIVE = {
     "bpmag_err":"e_BPmag",
     "rpmag":"RPmag",
     "rpmag_err":"e_RPmag",
-    "color_excess": "corrected_color_excess",
-    "color_excess_sigma": "corrected_color_excess_sigma",
     "color": "color",
     "color_err": "color_err",
     "ruwe": "RUWE",
     "rv": "RV",
     "rv_err":"e_RV",
+    # Rybizki et al. astrometric fidelity；所有 Gaia 目标星团/种子统一要求该列
+    "fidelity_v2": "fidelity_v2",
+}
+
+FIELDS_GAIA_NATIVE = {
+    # --- Source ID ---
+    "id": "source_id",
+
+    # --- Sky position ---
+    "ra": "ra",
+    "dec": "dec",
+    "ra_err": "ra_error",
+    "dec_err": "dec_error",
+
+    # --- Proper motion ---
+    "pmra": "pmra",
+    "pmdec": "pmdec",
+    "pmra_err": "pmra_error",
+    "pmde_err": "pmdec_error",
+
+    # --- Parallax ---
+    "plx": "parallax",
+    "plx_err": "parallax_error",
+
+    # --- Gaia G photometry ---
+    "mag": "phot_g_mean_mag",
+    "g_flux": "phot_g_mean_flux",
+
+    # --- Gaia BP photometry ---
+    "bpmag": "phot_bp_mean_mag",
+    "bp_flux": "phot_bp_mean_flux",
+
+    # --- Gaia RP photometry ---
+    "rpmag": "phot_rp_mean_mag",
+    "rp_flux": "phot_rp_mean_flux",
+
+    # --- Colour ---
+    "color": "bp_rp",
+
+    # --- Radial velocity ---
+    "rv": "radial_velocity",
+    "rv_err": "radial_velocity_error",
+
+    # --- Astrometric quality ---
+    "ruwe": "ruwe",
+
+    # --- Astrophysical parameters ---
+    "teff": "teff_gspphot",
+    "logg": "logg_gspphot",
+    "mh": "mh_gspphot",
+
+    "fidelity_v2": "fidelity_v2",
 }
 
 # 6.2 配置辅助函数
 def _make_gaia_entry(idx, file_pattern, fields=FIELDS_GAIA_ARCHIVE, pre_filters=None):
-    """生成 Gaia 数据源标准配置项的辅助函数"""
+    """生成 Gaia 数据源标准配置项的辅助函数。
+
+    默认字段映射已全局包含 fidelity_v2，因此所有目标星团都必须在 raw 层
+    具备该列，随后由 std -> stx -> aln 继续向后传递。
+    """
     return {
         "name": TMPL.T_TBL.format(idx=idx),
         "idx": idx,
@@ -671,6 +783,7 @@ def _make_seed_entry(idx, base_idx, with_pm=False, pre_filters=None, fields=FIEL
     """
     生成种子集配置项的辅助函数。
     种子集被视为基础字段表（Wide-field）的一个逻辑子集（View），不再对应物理文件。
+    默认沿用 FIELDS_GAIA_ARCHIVE，因此全局继承 fidelity_v2 要求。
     """
     if pre_filters is None:
         pre_filters = [
@@ -763,6 +876,11 @@ MANIFEST = {
         IDX_FIELD_CLUSTER_M45_SEEDS,
         IDX_FIELD_CLUSTER_M45,
     ),
+    IDX_FIELD_CLUSTER_M45_BKG: _make_gaia_entry(
+        IDX_FIELD_CLUSTER_M45_BKG,
+        "gaiadr3_m45_background.fits",  # 替换成您实际的文件名
+        fields=FIELDS_VIZIER,
+    ),
 
     # --- M44: Praesepe ---
     IDX_FIELD_CLUSTER_M44: _make_gaia_entry(
@@ -772,6 +890,11 @@ MANIFEST = {
     IDX_FIELD_CLUSTER_M44_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M44_SEEDS,
         IDX_FIELD_CLUSTER_M44,
+    ),
+    IDX_FIELD_CLUSTER_M44_BKG: _make_gaia_entry(
+        IDX_FIELD_CLUSTER_M44_BKG,
+        "gaiadr3_m44_background.fits",  # 替换成您实际的文件名
+        fields=FIELDS_GAIA_NATIVE,
     ),
 
     # --- Mel 25: Hyades ---
@@ -792,35 +915,59 @@ MANIFEST = {
         IDX_FIELD_CLUSTER_MEL111_SEEDS,
         IDX_FIELD_CLUSTER_MEL111,
     ),
+
     # --- M67: NGC 2682 ---
     IDX_FIELD_CLUSTER_M67: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M67,
         "gaiadr3_m67_wide.fits",
+        fields=FIELDS_VIZIER,
     ),
     IDX_FIELD_CLUSTER_M67_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M67_SEEDS,
         IDX_FIELD_CLUSTER_M67,
-        with_pm=True,
+        fields=FIELDS_VIZIER
     ),
+    IDX_FIELD_CLUSTER_M67_BKG: _make_gaia_entry(
+        IDX_FIELD_CLUSTER_M67_BKG,
+        "gaiadr3_m67_background.fits",  # 替换成您实际的文件名
+        fields=FIELDS_VIZIER,
+    ),
+
     # --- M13: NGC 6205 (Globular Cluster) ---
     IDX_FIELD_CLUSTER_M13: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M13,
         "gaiadr3_m13_wide.fits",
+        fields = FIELDS_GAIA_NATIVE,
     ),
     IDX_FIELD_CLUSTER_M13_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M13_SEEDS,
         IDX_FIELD_CLUSTER_M13,
-        with_pm=True,
+        fields=FIELDS_GAIA_NATIVE,
     ),
+    IDX_FIELD_CLUSTER_M13_BKG: _make_gaia_entry(
+        IDX_FIELD_CLUSTER_M13_BKG,
+        "gaiadr3_m13_background.fits",  # 替换成您实际的文件名
+        fields=FIELDS_GAIA_NATIVE,
+    ),
+
     # --- M41: NGC 2287 (Little Beehive) ---
     IDX_FIELD_CLUSTER_M41: _make_gaia_entry(
         IDX_FIELD_CLUSTER_M41,
         "gaiadr3_m41_wide.fits",
+        fields=FIELDS_VIZIER
     ),
     IDX_FIELD_CLUSTER_M41_SEEDS: _make_seed_entry(
         IDX_FIELD_CLUSTER_M41_SEEDS,
         IDX_FIELD_CLUSTER_M41,
+        fields=FIELDS_VIZIER,
+
     ),
+    IDX_FIELD_CLUSTER_M41_BKG: _make_gaia_entry(
+        IDX_FIELD_CLUSTER_M41_BKG,
+        "gaiadr3_m41_background.fits",  # 替换成您实际的文件名
+        fields=FIELDS_VIZIER,
+    ),
+
     # ==============================================================================
     # 2. Infrastructure & Utility Indexes (Bridge Tables, Metadata)
     # ==============================================================================
@@ -974,8 +1121,8 @@ GMM_CONFIG = {
     "cluster_algo": "dbscan", # 可选: dbscan, hdbscan
     "DBSCAN_EPS": 0.3,  # 从 0.3 调大，补偿高维空间距离
     "DBSCAN_MIN_SAMPLES": 9,  # 自适应eps算法缺省值
-    "hdbscan_min_cluster_size": 15,
-    "hdbscan_min_samples": 5,          # 提高门限，使种子核心更凝聚，减少杂质
+    "hdbscan_min_cluster_size": 10,
+    "hdbscan_min_samples": 10,          # 提高门限，使种子核心更凝聚，减少杂质
     "hdbscan_cluster_selection_epsilon": 0.1, # 进一步降低合并容忍度，只保留最高密度的核心部分
     "gmm_covariance_type": "full",
     "max_iter": 20,

@@ -63,6 +63,15 @@ class AstroAnalyzer:
             "astrometry": ["plx", "ruwe"],
         }
 
+    def _get_plot_dir(self):
+        """返回当前星团专属的图表输出目录。"""
+        cluster_id = (self.target_cluster or "unknown").upper()
+
+        plot_dir = cfg.ANALYSIS_DIR / cluster_id
+        plot_dir.mkdir(parents=True, exist_ok=True)
+
+        return plot_dir
+
     def _save_plot(self, fig, prefix, key_ref=None):
         """[内部工具] 统一保存图表到指定目录并关闭画布。"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -82,8 +91,7 @@ class AstroAnalyzer:
         )
 
         # 扁平化处理：直接使用导出根目录，不再创建 plots 子目录
-        plot_dir = cfg.EXPORT_DIR
-        plot_dir.mkdir(parents=True, exist_ok=True)
+        plot_dir = self._get_plot_dir()
 
         save_path = plot_dir / filename
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
@@ -134,7 +142,7 @@ class AstroAnalyzer:
             fig, ax = plt.subplots(figsize=(7, 6))
 
         # 绘制背景
-        if t_ref:
+        '''if t_ref:
             df_bg = self._get_bg_data(t_ref, self.FEATURE_GROUPS["proper_motion"])
             ax.scatter(
                 df_bg["pmra"],
@@ -143,7 +151,7 @@ class AstroAnalyzer:
                 s=1,
                 alpha=0.3,
                 label=f"Field Stars (n={len(df_bg)})",
-            )
+            )'''
 
         sc = None  # 初始化散点图对象
 
@@ -884,7 +892,7 @@ class AstroAnalyzer:
 
         # 保存图表
         # 扁平化处理：将原本散落在 reports 下的内容统一收纳到数据导出目录
-        save_path = cfg.EXPORT_DIR / TMPL.FILE_MISS_MAG_DIST
+        save_path = self._get_plot_dir() / TMPL.FILE_MISS_MAG_DIST
         plt.savefig(save_path)
         self.logger.info(f"💾 星等分布直方图已保存至: {save_path}")
 
@@ -1063,7 +1071,7 @@ class AstroAnalyzer:
             )
 
         # 3. 交叉比对诊断三连图（CMD + 位置 + 自行）
-        diag_cols = {"ra", "dec", "pmra", "pmdec", "mag", "color", "x_match_tag"}
+        diag_cols = {"ra", "dec", "pmra", "pmdec", "plx", "mag", "color", "x_match_tag"}
         if diag_cols.issubset(existing_cols):
             self._plot_cross_match_diagnostics(master)
         else:
@@ -1095,7 +1103,7 @@ class AstroAnalyzer:
         )
         length_deg = state.tube_length
         width_deg = state.tube_width
-        output_dir = str(cfg.ANALYSIS_DIR)
+        output_dir = str(self._get_plot_dir())
         cluster_id = self.target_cluster
 
         # ── 以下为原 plot_spatial_tube 核心逻辑 ──
@@ -1184,35 +1192,30 @@ class AstroAnalyzer:
         self.logger.info(f"💾 [{cluster_id}] 成果图已保存至: {output_path}")
 
     def _plot_channel_probs(self, master: str):
-        """基于 master 表绘制 prob / core_prob / tail_prob 三通道概率分布直方图。
-
-        整合了原 utils/tube.py:plot_prob_distributions 的全部逻辑。
-        """
+        """基于 master 表绘制 prob 概率分布直方图。"""
+        # 仅查询 prob 列[cite: 5]
         df_res = self.db.query(
-            f"SELECT prob, core_prob, tail_prob FROM {master}"
+            f"SELECT prob FROM {master}"
         )
         cluster_id = self.target_cluster
-        output_dir = str(cfg.ANALYSIS_DIR)
+        output_dir = str(self._get_plot_dir())
 
         self.logger.info(
-            f"📊 正在渲染 [{cluster_id}] 三通道概率分布直方图..."
+            f"📊 正在渲染 [{cluster_id}] 概率分布直方图..."
         )
 
-        fig, axes = plt.subplots(1, 3, figsize=(16, 5), dpi=150)
+        # 将 1x3 子图改为单图[cite: 5]
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
 
-        titles = [
-            ("prob", "Union Prob", "#4C72B0"),
-            ("core_prob", "Core Channel Prob", "#DD8452"),
-            ("tail_prob", "Tail Channel Prob", "#55A868"),
-        ]
+        col = "prob"
+        title = "Union Prob"
+        color = "#4C72B0"
 
-        for ax, (col, title, color) in zip(axes, titles):
-            if col not in df_res.columns:
-                ax.text(0.5, 0.5, f"Missing: {col}",
-                        ha="center", va="center", transform=ax.transAxes)
-                ax.set_title(title, fontsize=13)
-                continue
-
+        if col not in df_res.columns:
+            ax.text(0.5, 0.5, f"Missing: {col}",
+                    ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(title, fontsize=13)
+        else:
             data = df_res[col].dropna()
             ax.hist(data, bins=80, range=(0, 1), color=color, alpha=0.8,
                     edgecolor="white", linewidth=0.3)
@@ -1225,106 +1228,281 @@ class AstroAnalyzer:
             ax.set_title(title, fontsize=13, fontweight="bold")
             ax.set_yscale("log")
             ax.legend(fontsize=8, framealpha=0.7)
-            ax.text(
-                0.95, 0.95,
-                f"N={len(data):,}\nμ={data.mean():.3f}\nmed={data.median():.3f}",
-                transform=ax.transAxes, ha="right", va="top", fontsize=9,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.8),
-            )
 
+        # 更新主标题[cite: 5]
         fig.suptitle(
-            f"{cluster_id.upper()} — Probability Distribution: Core vs Tail Channels",
+            f"{cluster_id.upper()} — Probability Distribution",
             fontsize=15, fontweight="bold", y=1.02,
         )
         plt.tight_layout()
         os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"{cluster_id.lower()}_prob_dist.jpg")
+        output_path = os.path.join(output_dir, f"{cluster_id.lower()}_prob_dist.pdf")
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         self.logger.info(f"💾 [{cluster_id}] 概率分布直方图已保存至: {output_path}")
 
     def _plot_cross_match_diagnostics(self, master: str):
-        """绘制交叉比对三连图：CMD + 赤道位置 + 自行（背景为灰色场星）。
-
-        Matched=蓝 / PG Only=橙红 / Ref Only=灰 / Field=浅灰背景。
-        """
+        """绘制交叉比对诊断图（保留原主题，基于 audit_status 用红色圆环叠加标注未通过 pyUPMASK 的恒星）。"""
         cluster_id = self.target_cluster
-        output_dir = str(cfg.ANALYSIS_DIR)
+        output_dir = str(self._get_plot_dir())
+        os.makedirs(output_dir, exist_ok=True)
 
-        self.logger.info(f"🔬 正在渲染 [{cluster_id}] 交叉比对诊断三连图...")
+        self.logger.info(f"🔬 正在渲染 [{cluster_id}] 交叉比对诊断拆分图 (基于 audit_status 叠加红色圆环)...")
 
+        # 🌟 SQL 查询中读取 audit_status 列
         df = self.db.query(
-            f"SELECT ra, dec, pmra, pmdec, mag, color, x_match_tag "
+            f"SELECT ra, dec, pmra, pmdec, plx, plx_err, mag, color, x_match_tag, audit_status "
             f"FROM {master}"
         )
         x_tag = cfg.MASTER_COLS["X_MATCH"]
+        audit_col = "audit_status"
 
-        # ── 定义颜色映射 ──
+        # ── 1. 保留原本的绘图主题颜色 ──
         colors = {
             "Matched":  ("royalblue",   "Matched"),
             "PG Only":  ("orangered",   "PG Only"),
-            "Ref Only": ("forestgreen",  "Ref Only"),
+            "Ref Only": ("forestgreen", "Ref Only"),
         }
 
-        fig, axes = plt.subplots(1, 3, figsize=(22, 7), dpi=150)
-        fig.suptitle(
-            f"{cluster_id.upper()} — Cross-Match Diagnostics",
-            fontsize=15, fontweight="bold", y=1.02,
-        )
-
-        # ── 1. CMD (颜色-星等图) ──
-        ax = axes[0]
+        # ==========================================
+        # ── 1. CMD (颜色-星等图) -> 保存为 PDF ──
+        # ==========================================
+        fig_cmd, ax_cmd = plt.subplots(figsize=(8, 7))
         cmd_mask = (df["color"] > -0.5) & (df["color"] < 4.5) & (df["mag"] < 22)
         df_cmd = df[cmd_mask]
+        
+        # 步骤 A：绘制原主题 (实心圆点)
         for tag, (c, label) in colors.items():
             sub = df_cmd[df_cmd[x_tag] == tag]
             if not sub.empty:
-                ax.scatter(sub["color"], sub["mag"], c=c, s=12, alpha=0.8,
-                           edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
-        self._overlay_isochrones(ax, df_cmd)
-        ax.invert_yaxis()
-        ax.set_xlabel("G_BP − G_RP", fontsize=12)
-        ax.set_ylabel("G (mag)", fontsize=12)
-        ax.set_title("CMD", fontsize=13, fontweight="bold")
-        ax.legend(fontsize=7, framealpha=0.7, loc="upper right")
+                ax_cmd.scatter(sub["color"], sub["mag"], c=c, s=15, alpha=0.8,
+                               edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
 
-        # ── 2. 赤道位置 (RA/Dec) ──
-        ax = axes[1]
-        ax.scatter(df["ra"], df["dec"], c="lightgrey", s=1, alpha=0.08, zorder=1)
-        for tag, (c, label) in colors.items():
-            sub = df[df[x_tag] == tag]
-            if not sub.empty:
-                ax.scatter(sub["ra"], sub["dec"], c=c, s=12, alpha=0.8,
-                           edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
-        ax.invert_xaxis()
-        # 物理正圆：RA 轴需 cos(Dec) 修正
-        cos_dec = np.cos(np.radians(abs(df["dec"].mean())))
-        ax.set_aspect(1.0 / cos_dec, adjustable="datalim")
-        ax.set_xlabel("RA (deg)", fontsize=12)
-        ax.set_ylabel("Dec (deg)", fontsize=12)
-        ax.set_title("Spatial Distribution", fontsize=13, fontweight="bold")
-        ax.legend(fontsize=7, framealpha=0.7, loc="upper right")
-
-        # ── 3. 自行矢量图 (VPD) ──
-        ax = axes[2]
-        for tag, (c, label) in colors.items():
-            sub = df[df[x_tag] == tag]
-            if not sub.empty:
-                ax.scatter(sub["pmra"], sub["pmdec"], c=c, s=12, alpha=0.8,
-                           edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
-        ax.set_xlabel("pmra (mas/yr)", fontsize=12)
-        ax.set_ylabel("pmdec (mas/yr)", fontsize=12)
-        ax.set_title("Proper Motion VPD", fontsize=13, fontweight="bold")
-        ax.legend(fontsize=7, framealpha=0.7, loc="upper right")
+        #self._overlay_isochrones(ax_cmd, df_cmd)
+        ax_cmd.invert_yaxis()
+        ax_cmd.set_xlabel("G_BP − G_RP", fontsize=12)
+        ax_cmd.set_ylabel("G (mag)", fontsize=12)
+        ax_cmd.set_title(f"{cluster_id.upper()} — Cross-Match CMD", fontsize=13, fontweight="bold")
+        ax_cmd.legend(fontsize=8, framealpha=0.8, loc="upper right")
 
         plt.tight_layout()
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(
-            output_dir, f"{cluster_id.lower()}_cross_match_diag.jpg"
+        out_cmd = os.path.join(output_dir, f"{cluster_id.lower()}_cross_match_cmd.pdf")
+        fig_cmd.savefig(out_cmd, bbox_inches="tight")
+        plt.close(fig_cmd)
+
+        # ==========================================
+        # ── 2. 赤道位置 (RA/Dec) -> 保存为 PNG ──
+        # ==========================================
+        fig_spa, ax_spa = plt.subplots(figsize=(8, 7))
+                
+        # 步骤 A：绘制原主题 (实心圆点)
+        for tag, (c, label) in colors.items():
+            sub = df[df[x_tag] == tag]
+            if not sub.empty:
+                ax_spa.scatter(sub["ra"], sub["dec"], c=c, s=15, alpha=0.8,
+                               edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
+
+        ax_spa.set_xlabel("RA (deg)", fontsize=12)
+        ax_spa.set_ylabel("Dec (deg)", fontsize=12)
+
+        ax_spa.set_title(
+            f"{cluster_id.upper()} — Equatorial Position",
+            fontsize=13,
+            fontweight="bold"
         )
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        self.logger.info(f"💾 [{cluster_id}] 交叉比对诊断三连图已保存至: {output_path}")
+
+        ax_spa.legend(
+            fontsize=8,
+            framealpha=0.8,
+            loc="upper right"
+        )
+
+        plt.tight_layout()
+        # 🌟 Spatial 图保存为高分辨率 PNG
+        out_spa = os.path.join(output_dir, f"{cluster_id.lower()}_cross_match_spatial.png")
+        fig_spa.savefig(out_spa, dpi=300, bbox_inches="tight")
+        plt.close(fig_spa)
+
+        # ==========================================
+        # ── 3. 自行矢量图 (VPD) -> 保存为 PDF ──
+        # ==========================================
+        fig_vpd, ax_vpd = plt.subplots(figsize=(8, 7))
+        
+        # 步骤 A：绘制原主题 (实心圆点)
+        for tag, (c, label) in colors.items():
+            sub = df[df[x_tag] == tag]
+            if not sub.empty:
+                ax_vpd.scatter(sub["pmra"], sub["pmdec"], c=c, s=15, alpha=0.8,
+                               edgecolors="none", label=f"{label} ({len(sub)})", zorder=3)
+
+                ax_vpd.set_xlabel("pmRA (mas/yr)", fontsize=12)
+        ax_vpd.set_ylabel("pmDec (mas/yr)", fontsize=12)
+
+        ax_vpd.set_title(
+            f"{cluster_id.upper()} — Proper Motion VPD",
+            fontsize=13,
+            fontweight="bold"
+        )
+
+        ax_vpd.legend(
+            fontsize=8,
+            framealpha=0.8,
+            loc="upper right"
+        )
+
+        ax_vpd.grid(
+            True,
+            linestyle=":",
+            alpha=0.3
+        )
+
+        plt.tight_layout()
+
+        out_vpd = os.path.join(
+            output_dir,
+            f"{cluster_id.lower()}_cross_match_vpd.pdf"
+        )
+
+        fig_vpd.savefig(
+            out_vpd,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig_vpd)
+
+        self.logger.info(
+            f"💾 [{cluster_id}] 自行 VPD 已保存至: {out_vpd}"
+        )
+
+        # ==========================================
+        # ── 4. 视差-星等图 (Parallax vs Gmag)
+        #     横轴：plx (mas)
+        #     纵轴：G mag
+        #     水平误差棒：plx_err (1 sigma)
+        # ==========================================
+        fig_plx, ax_plx = plt.subplots(figsize=(9, 7))
+
+        # 基础过滤
+        plx_mag_mask = (
+            df["plx"].notna()
+            & df["mag"].notna()
+        )
+
+        df_plx_mag = df.loc[plx_mag_mask].copy()
+
+        # 强制转换成数值，防止数据库类型造成问题
+        df_plx_mag["plx"] = pd.to_numeric(
+            df_plx_mag["plx"],
+            errors="coerce"
+        )
+
+        df_plx_mag["mag"] = pd.to_numeric(
+            df_plx_mag["mag"],
+            errors="coerce"
+        )
+
+        df_plx_mag["plx_err"] = pd.to_numeric(
+            df_plx_mag["plx_err"],
+            errors="coerce"
+        )
+
+        for tag, (c, label) in colors.items():
+            sub = df_plx_mag[df_plx_mag[x_tag] == tag]
+
+            if sub.empty:
+                continue
+
+            # --------------------------------------------------
+            # 1. 只画细误差棒，不让 errorbar 自己画中心 marker
+            # --------------------------------------------------
+            err_mask = (
+                sub["plx_err"].notna()
+                & np.isfinite(sub["plx_err"])
+                & (sub["plx_err"] >= 0)
+            )
+
+            sub_err = sub[err_mask]
+
+            if not sub_err.empty:
+                ax_plx.errorbar(
+                    sub_err["mag"],
+                    sub_err["plx"],
+                    yerr=sub_err["plx_err"],
+
+                    fmt="none",
+                    ecolor=c,
+                    elinewidth=0.35,
+                    capsize=0.8,
+                    capthick=0.35,
+                    alpha=0.35,
+                    zorder=2,
+                )
+
+            # --------------------------------------------------
+            # 2. 中心数据点：恢复成原来格式的实心圆
+            # --------------------------------------------------
+            ax_plx.scatter(
+                sub["mag"],
+                sub["plx"],
+
+                marker="o",
+                s=15,
+
+                facecolors=c,           # 明确指定实心填充
+                edgecolors="none",      # 与原来的圆点格式一致
+                alpha=0.8,
+
+                label=f"{label} ({len(sub)})",
+                zorder=5,
+            )
+
+        # G 星等数值越小越亮
+        ax_plx.invert_xaxis()
+
+        ax_plx.set_xlabel(
+            "G (mag)",
+            fontsize=12
+        )
+
+        ax_plx.set_ylabel(
+            "Parallax (mas)",
+            fontsize=12
+        )
+
+        ax_plx.set_title(
+            f"{cluster_id.upper()} — Parallax vs G Magnitude "
+            f"(vertical bars = ±1σ)",
+            fontsize=13,
+            fontweight="bold"
+        )
+
+        ax_plx.grid(
+            True,
+            linestyle=":",
+            alpha=0.3
+        )
+
+        ax_plx.legend(
+            fontsize=8,
+            framealpha=0.8,
+            loc="upper right"
+        )
+
+        plt.tight_layout()
+
+        out_plx = os.path.join(
+            output_dir,
+            f"{cluster_id.lower()}_cross_match_parallax_gmag.pdf"
+        )
+
+        fig_plx.savefig(
+            out_plx,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close(fig_plx)
 
     def _overlay_isochrones(self, ax, df_cmd=None):
         """在 CMD 图上叠加星团标准等龄线，自动适配数据颜色范围。"""

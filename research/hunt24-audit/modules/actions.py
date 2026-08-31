@@ -53,41 +53,103 @@ class StdActions:
         std_view = cfg["std_view"]
         mapping_dict = cfg.get("fields", {})
 
-        # 使用 scalar 或 fetchone 快速获取 count
         count_before = db.get_row_count(raw_table)
 
-        # 1. 构造基础 Mapping SQL
+        # =========================================================
+        # 0. 读取 raw 表实际字段，提前检查映射
+        # =========================================================
+        raw_schema = db.con.execute(
+            f"DESCRIBE {raw_table}"
+        ).df()
+
+        raw_columns = set(
+            raw_schema["column_name"].tolist()
+        )
+
+        if mapping_dict:
+            missing_fields = [
+                (new_col, old_col)
+                for new_col, old_col in mapping_dict.items()
+                if old_col not in raw_columns
+            ]
+
+            if missing_fields:
+                missing_text = ", ".join(
+                    f"{new_col} <- {old_col}"
+                    for new_col, old_col in missing_fields
+                )
+
+                raise KeyError(
+                    f"❌ [{k_ref}] STD 字段映射失败："
+                    f"raw 表 [{raw_table}] 缺少源字段: "
+                    f"{missing_text}\n"
+                    f"实际字段: {sorted(raw_columns)}"
+                )
+
+        # =========================================================
+        # 1. 构造 Mapping SQL
+        # =========================================================
         if mapping_dict:
             select_items = []
+
             for new_col, old_col in mapping_dict.items():
 
-                safe_old = f'"{old_col}"'
+                # 明确指定字段来自 raw 表，避免与 SELECT alias 冲突
+                safe_old = f'src."{old_col}"'
 
-                # 针对 ID 类字段进行强制类型转换，确保跨表 JOIN 时的兼容性
-                if "id" in new_col.lower():
-                    select_items.append(f"CAST({safe_old} AS BIGINT) AS {new_col}")
+                # 只对真正的 ID 字段转换成 BIGINT
+                # 不能使用 `"id" in new_col`，
+                # 因为 fidelity_v2 也包含 "id"
+                if new_col.lower() in {"id", "id_dr2"}:
+                    select_items.append(
+                        f'CAST({safe_old} AS BIGINT) AS "{new_col}"'
+                    )
                 else:
-                    select_items.append(f"{safe_old} AS {new_col}")
+                    select_items.append(
+                        f'{safe_old} AS "{new_col}"'
+                    )
+
             select_clause = ", ".join(select_items)
+
         else:
-            select_clause = "*"
+            select_clause = "src.*"
 
-        base_sql = f"SELECT {select_clause} FROM {raw_table}"
+        base_sql = (
+            f"SELECT {select_clause} "
+            f"FROM {raw_table} AS src"
+        )
 
-        # 2. 调用内部拦截器进行初步截断
-        final_sql = StdActions._apply_pre_filter(base_sql, cfg, ctx)
-        logger.debug(f" [{k_ref}] 预拦截器: {final_sql}")
+        # =========================================================
+        # 2. 初步截断
+        # =========================================================
+        final_sql = StdActions._apply_pre_filter(
+            base_sql,
+            cfg,
+            ctx
+        )
 
-        # 3. 创建视图
-        db.register_view_from_sql(std_view, final_sql)
+        logger.debug(
+            f"[{k_ref}] 预拦截器: {final_sql}"
+        )
 
-        # 5. 获取过滤后的记录数（查询刚创建的视图）
+        # =========================================================
+        # 3. 创建 STD 视图
+        # =========================================================
+        db.register_view_from_sql(
+            std_view,
+            final_sql
+        )
+
         count_after = db.get_row_count(std_view)
         dropped = count_before - count_after
 
-        logger.info(f"[{k_ref}] STD: Standardized with mapping and pre-filtering.")
         logger.info(
-            f"[{k_ref}] STD: 数据量变化: {count_before:,} -> {count_after:,} (预过滤掉: {dropped:,})"
+            f"[{k_ref}] STD: Standardized with mapping and pre-filtering."
+        )
+        logger.info(
+            f"[{k_ref}] STD: 数据量变化: "
+            f"{count_before:,} -> {count_after:,} "
+            f"(预过滤掉: {dropped:,})"
         )
 
     @staticmethod
